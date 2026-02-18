@@ -31,11 +31,12 @@ import {
   LiquiditySide,
   addLiquidity,
   deleteLiquidity,
-  getLiquidity,
+  getStrategyStatus,
   startStrategy,
   stopStrategy,
   updateLiquidity,
 } from "../api/strategy";
+import { useTradingStore } from "../store/tradingStore";
 
 type FormState = {
   timeframe: number;
@@ -65,7 +66,6 @@ function toNum(v: string, fallback = 0) {
 }
 
 export default function StrategyPage() {
-  const [running, setRunning] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const [form, setForm] = useState<FormState>({
@@ -86,24 +86,33 @@ export default function StrategyPage() {
   const [liqPrice, setLiqPrice] = useState("");
   const [liqSide, setLiqSide] = useState<LiquiditySide>("buy");
 
-  const [items, setItems] = useState<LiquidityItem[]>([]);
+  const items = useTradingStore((s) => s.liquidity) as LiquidityItem[];
+  const strategyStatus = useTradingStore((s) => s.strategyStatus);
+  const setStrategyStatus = useTradingStore((s) => s.setStrategyStatus);
+  const running = !!strategyStatus.running;
+
   const triggered = useMemo(() => items.filter((i) => i.triggered), [items]);
   const pending = useMemo(() => items.filter((i) => !i.triggered), [items]);
 
-  async function refresh() {
-    try {
-      const data = await getLiquidity();
-      setItems(data);
-    } catch (e) {
-      console.error(e);
-    }
-  }
-
   useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 1000);
-    return () => clearInterval(t);
-  }, []);
+    let alive = true;
+    (async () => {
+      try {
+        const data = await getStrategyStatus();
+        if (!alive) return;
+        setStrategyStatus(data ?? {});
+      } catch (e) {
+        console.error("Failed to fetch strategy status", e);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [setStrategyStatus]);
+
+
+
+
 
   async function onStart() {
     setBusy(true);
@@ -120,7 +129,7 @@ export default function StrategyPage() {
         sl_type: form.slInPips,
         sl: toNum(form.sl, 400),
       });
-      setRunning(true);
+      setStrategyStatus({ running: true });
     } catch (e) {
       console.error(e);
       alert("Failed to start strategy (check backend routes / payload).");
@@ -133,7 +142,7 @@ export default function StrategyPage() {
     setBusy(true);
     try {
       await stopStrategy();
-      setRunning(false);
+      setStrategyStatus({ running: false, pending_liq: null });
     } catch (e) {
       console.error(e);
       alert("Failed to stop strategy.");
@@ -148,8 +157,7 @@ export default function StrategyPage() {
 
     setBusy(true);
     try {
-      const created = await addLiquidity(price, liqSide);
-      setItems((prev) => [created, ...prev]);
+      await addLiquidity(price, liqSide);
       setLiqPrice("");
     } catch (e) {
       console.error(e);
@@ -163,23 +171,18 @@ export default function StrategyPage() {
     const price = toNum(priceStr, NaN);
     if (!Number.isFinite(price)) return;
 
-    setItems((prev) => prev.map((x) => (x.id === id ? { ...x, price } : x)));
-
     try {
       await updateLiquidity(id, price);
     } catch (e) {
       console.error(e);
-      refresh();
     }
   }
 
   async function onDelete(id: string) {
-    setItems((prev) => prev.filter((x) => x.id !== id));
     try {
       await deleteLiquidity(id);
     } catch (e) {
       console.error(e);
-      refresh();
     }
   }
 
@@ -227,6 +230,13 @@ export default function StrategyPage() {
           >
             Stop
           </Button>
+          {strategyStatus.last_event ? (
+            <Chip
+              size="small"
+              label={strategyStatus.last_event}
+              variant="outlined"
+            />
+          ) : null}
         </Stack>
       </Stack>
 
@@ -597,3 +607,4 @@ export default function StrategyPage() {
     </Box>
   );
 }
+

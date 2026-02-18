@@ -23,6 +23,7 @@ async def live_feed(ws: WebSocket):
     last_history_signature = None
     last_positions_signature = None
     last_liquidity_signature = None
+    last_strategy_signature = None
 
     try:
         while True:
@@ -68,6 +69,21 @@ async def live_feed(ws: WebSocket):
             if liq_sig != last_liquidity_signature:
                 await ws.send_json({"type": "liquidity", "data": liquidity})
                 last_liquidity_signature = liq_sig
+
+            # ---- STRATEGY STATUS (send only if changed) ----
+            strategy_status = strategy_service.get_status()
+            pending = strategy_status.get("pending_liq") or {}
+            strat_sig = (
+                bool(strategy_status.get("running")),
+                pending.get("id"),
+                pending.get("side"),
+                pending.get("armed_candle_time"),
+                strategy_status.get("last_event"),
+                strategy_status.get("last_event_at"),
+            )
+            if strat_sig != last_strategy_signature:
+                await ws.send_json({"type": "strategy_status", "data": strategy_status})
+                last_strategy_signature = strat_sig
 
             # ---- HISTORY (send only if changed) ----
             async with mt5_lock:

@@ -128,6 +128,8 @@ class StrategyService:
         # ✅ volume confirmation settings
         self.volume_lookback: int = 20
         self.volume_rule: str = "above_avg"  # "above_avg" | "max" | "min"
+        self.last_event: str = ""
+        self.last_event_at: float = 0.0
 
     # ---------- MT5 helpers ----------
 
@@ -209,6 +211,39 @@ class StrategyService:
 
     # ---------- Public API ----------
 
+    def _set_event(self, text: str):
+        if text == self.last_event:
+            return
+        self.last_event = text
+        self.last_event_at = time.time()
+        print(f"[strategy] {text}")
+
+    def get_status(self):
+        return {
+            "running": self.running,
+            "pending_liq": self.pending_liq,
+            "config": self.config,
+            "last_event": self.last_event,
+            "last_event_at": self.last_event_at,
+        }
+
+    def _is_order_success(self, retcode) -> bool:
+        """
+        MT5 success retcodes for trade requests.
+        10009: DONE, 10010: DONE_PARTIAL, 10008: PLACED
+        """
+        if retcode is None:
+            return False
+        success_codes = {
+            getattr(mt5, "TRADE_RETCODE_DONE", 10009),
+            getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010),
+            getattr(mt5, "TRADE_RETCODE_PLACED", 10008),
+        }
+        try:
+            return int(retcode) in success_codes
+        except Exception:
+            return False
+
     def start(self, config: dict):
         self.config = dict(config)
         self.running = True
@@ -217,6 +252,7 @@ class StrategyService:
         # keep pending_liq as-is or reset?
         # Usually reset when starting to avoid stale intent:
         self.pending_liq = None
+        self._set_event("started")
 
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -226,6 +262,7 @@ class StrategyService:
         self.running = False
         self._stop_flag.set()
         self.pending_liq = None
+        self._set_event("stopped")
 
     # ---------- Liquidity CRUD ----------
 
@@ -303,7 +340,9 @@ class StrategyService:
                             "side": side,
                             "price": price,
                             "armed_at": time.time(),
+                            "armed_candle_time": None,
                         }
+                        self._set_event(f"liquidity_triggered:{side}@{price}")
                         break  # only one hit per loop
 
                 candle = self._get_last_closed_candle(symbol, timeframe)
@@ -317,46 +356,81 @@ class StrategyService:
                     time.sleep(0.2)
                     continue
 
-                forced_side = None
+                # Liquidity-driven only: do not place auto/candle-only orders.
+                if not self.pending_liq:
+                    time.sleep(0.2)
+                    continue
 
-                # If pending_liq exists, we ONLY trade when confirmation candle occurs
-                if self.pending_liq:
-                    desired = self.pending_liq["side"]  # "buy" | "sell"
+                desired = self.pending_liq["side"]  # "buy" | "sell"
+                c_time = int(candle[0])
 
-                    # 1) candle direction must match liquidity side
-                    c_side = self._candle_side(candle)
-                    if c_side != desired:
-                        time.sleep(0.2)
-                        continue
+                if self.pending_liq.get("armed_candle_time") is None:
+                    self.pending_liq["armed_candle_time"] = c_time
+                    self._set_event(
+                        f"pending_wait_next_candle from {c_time} for {desired}"
+                    )
+                    time.sleep(0.2)
+                    continue
 
-                    # 2) preferred volume must match
-                    if not self._volume_ok(symbol, timeframe, candle):
-                        time.sleep(0.2)
-                        continue
+                if c_time <= int(self.pending_liq.get("armed_candle_time", 0)):
+                    time.sleep(0.2)
+                    continue
 
-                    forced_side = desired
+                # Avoid retry spam inside the same closed candle.
+                if c_time == int(self.pending_liq.get("last_attempt_candle_time", 0)):
+                    time.sleep(0.2)
+                    continue
+
+                # 1) candle direction must match liquidity side
+                c_side = self._candle_side(candle)
+                if c_side != desired:
+                    self._set_event(
+                        f"pending_wait_direction need={desired} got={c_side} candle={c_time}"
+                    )
+                    time.sleep(0.2)
+                    continue
+
+                # 2) preferred volume must match
+                if not self._volume_ok(symbol, timeframe, candle):
+                    self._set_event(
+                        f"pending_wait_volume rule={self.volume_rule} candle={c_time}"
+                    )
+                    time.sleep(0.2)
+                    continue
+
+                self.pending_liq["last_attempt_candle_time"] = c_time
 
                 cfg = dict(self.config)
                 cfg["candle"] = candle
-
-                if forced_side:
-                    cfg["forced_side"] = forced_side
-                else:
-                    cfg.pop("forced_side", None)
+                cfg["forced_side"] = desired
 
                 result = open_order_strategy(cfg)
 
                 if result is not None:
-                    self._last_trade_time = time.time()
+                    retcode = getattr(result, "retcode", None)
+                    self._set_event(f"order_attempt side={desired} retcode={retcode}")
 
-                    # ✅ if we traded because pending_liq was confirmed, clear it
-                    if self.pending_liq and forced_side:
+                    if self._is_order_success(retcode):
+                        self._last_trade_time = time.time()
+                        liq_id = self.pending_liq.get("id")
+                        self.liquidity = [l for l in self.liquidity if l.get("id") != liq_id]
+                        self._set_event(
+                            f"pending_confirmed_trade_opened removed_liq={liq_id}"
+                        )
                         self.pending_liq = None
+                    else:
+                        self._set_event(
+                            f"order_rejected_wait_next_candle side={desired} retcode={retcode}"
+                        )
+                else:
+                    self._set_event("order_skipped_by_filters_or_tick")
 
                 time.sleep(0.2)
 
-            except Exception:
+            except Exception as e:
+                self._set_event(f"loop_error:{e}")
                 time.sleep(0.5)
 
 
 strategy_service = StrategyService()
+

@@ -1,8 +1,5 @@
-// ChartPanel.tsx (FULL UPDATED)
-// ✅ Adds Liquidity levels on chart as BLUE dashed price lines
-// ⚠️ Change LIQ_ENDPOINT to match your backend route
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   createChart,
   IChartApi,
@@ -14,13 +11,12 @@ import {
   IPriceLine,
 } from "lightweight-charts";
 import axios from "axios";
-import { useTradingStore } from "../store/tradingStore";
+import { ChartTimeframe, useTradingStore } from "../store/tradingStore";
 
 type Candle = CandlestickData<Time>;
-type TF = "M1" | "M5" | "M15" | "H1";
+type TF = ChartTimeframe;
 
-const CHART_ENDPOINT = "http://localhost:8000/api/chart";
-const LIQ_ENDPOINT = "http://localhost:8000/api/strategy/liquidity"; // <-- change if needed
+const CHART_ENDPOINT = "http://localhost:8000/api/chart/";
 
 function tfToSeconds(tf: TF) {
   switch (tf) {
@@ -64,16 +60,18 @@ export default function ChartPanel() {
   // ✅ liquidity price lines (id -> IPriceLine)
   const liqLinesRef = useRef<Map<string, IPriceLine>>(new Map());
 
-  const [timeframe, setTimeframe] = useState<TF>("M5");
+  const timeframe = useTradingStore((s) => s.chartTimeframe);
+  const setTimeframe = useTradingStore((s) => s.setChartTimeframe);
   const timeframeSeconds = useMemo(() => tfToSeconds(timeframe), [timeframe]);
 
   const bid = useTradingStore((s) => s.bid);
   const tickTime = useTradingStore((s) => (s as any).tickTime);
   const history = useTradingStore((s) => s.history) as any[];
   const positions = useTradingStore((s) => s.positions) as any[];
+  const liquidity = useTradingStore((s) => s.liquidity) as any[];
 
-  // ✅ liquidity data (polled)
-  const [liquidity, setLiquidity] = useState<any[]>([]);
+
+
 
   // ===========================
   // CHART INIT + TOOLTIP
@@ -268,6 +266,8 @@ export default function ChartPanel() {
 
     lastCandleRef.current = null;
     candleSeriesRef.current.setData([]);
+    syncLiquidityLines(liquidity);
+
 
     const res = await axios.get(`${CHART_ENDPOINT}?timeframe=${timeframe}`);
 
@@ -423,37 +423,12 @@ export default function ChartPanel() {
     series.setMarkers(deduped);
   }
 
-  // ===========================
-  // ✅ LIQUIDITY: POLL + DRAW BLUE DASHED LINES
-  // ===========================
-  useEffect(() => {
-    let alive = true;
 
-    async function fetchLiquidity() {
-      try {
-        const res = await axios.get(LIQ_ENDPOINT);
-        if (!alive) return;
-        setLiquidity(
-          Array.isArray(res.data) ? res.data : (res.data?.items ?? []),
-        );
-      } catch {
-        // keep silent to avoid console spam
-      }
-    }
-
-    fetchLiquidity();
-    const t = setInterval(fetchLiquidity, 1000);
-
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
 
   useEffect(() => {
     syncLiquidityLines(liquidity);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liquidity]);
+  }, [liquidity, timeframeSeconds]);
+
 
   function syncLiquidityLines(items: any[]) {
     const series = candleSeriesRef.current;

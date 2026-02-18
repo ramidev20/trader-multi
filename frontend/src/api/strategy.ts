@@ -22,6 +22,14 @@ export type StartStrategyPayload = {
   sl: number;
 };
 
+export type StrategyStatusResponse = {
+  running: boolean;
+  pending_liq?: any | null;
+  config?: Record<string, any>;
+  last_event?: string;
+  last_event_at?: number;
+};
+
 export async function startStrategy(payload: StartStrategyPayload) {
   const { data } = await api.post("/strategy/start", payload);
   return data;
@@ -32,8 +40,8 @@ export async function stopStrategy() {
   return data;
 }
 
-export async function getLiquidity() {
-  const { data } = await api.get<LiquidityItem[]>("/strategy/liquidity");
+export async function getStrategyStatus() {
+  const { data } = await api.get<StrategyStatusResponse>("/strategy/status");
   return data;
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Box,
   Tabs,
@@ -14,29 +14,6 @@ import {
   TableBody,
 } from "@mui/material";
 import { useTradingStore } from "../store/tradingStore";
-import { getLiquidity, LiquidityItem } from "../api/strategy";
-import { api } from "../api/client";
-
-type PositionRow = {
-  ticket: number;
-  symbol: string;
-  type: string; // BUY/SELL
-  volume: number;
-  price_open: number;
-  profit: number;
-};
-
-type HistoryPositionRow = {
-  position_id: number;
-  symbol: string;
-  side: "BUY" | "SELL";
-  volume: number;
-  profit: number;
-  open_time: number;
-  close_time: number;
-  open_price: number;
-  close_price: number;
-};
 
 function TabPanel(props: { value: number; index: number; children: any }) {
   const { value, index, children } = props;

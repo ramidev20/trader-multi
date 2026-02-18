@@ -1,13 +1,9 @@
 from fastapi import APIRouter, HTTPException
 from app.services.strategy_service import strategy_service
 from pydantic import BaseModel
-from typing import List
 from app.services.mt5_service import is_logged_in 
 
 router = APIRouter(tags=["Strategy"])
-
-from fastapi import HTTPException
-import MetaTrader5 as mt5
 
 
 
@@ -51,6 +47,11 @@ async def start_strategy(payload: StartStrategyRequest):
 async def stop_strategy():
     strategy_service.stop()
     return {"status": "stopped"}
+
+
+@router.get("/status")
+async def strategy_status():
+    return strategy_service.get_status()
 
 
 # ----------- Liquidity Management -----------

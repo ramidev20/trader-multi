@@ -1,8 +1,8 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 
 set "RUNNER_DIR=%~dp0"
-set "PROJECT_ROOT=%RUNNER_DIR%.."
+for %%I in ("%RUNNER_DIR%..") do set "PROJECT_ROOT=%%~fI"
 set "VENV_DIR=%RUNNER_DIR%.venv"
 
 if not exist "%PROJECT_ROOT%\backend" (
@@ -13,8 +13,10 @@ if not exist "%PROJECT_ROOT%\backend" (
 
 set "ENV_FILE=%RUNNER_DIR%.env"
 if exist "%ENV_FILE%" (
-  for /f "usebackq tokens=1,* delims==" %%A in ("%ENV_FILE%") do (
-    if not "%%A"=="" if not "%%A:~0,1%"=="#" set "%%A=%%B"
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ENV_FILE%") do (
+    if not "%%A"=="" (
+      set "%%A=%%B"
+    )
   )
 )
 
@@ -27,10 +29,10 @@ cd /d "%PROJECT_ROOT%"
 
 if not exist "%VENV_DIR%\Scripts\python.exe" (
   where py >nul 2>nul
-  if %errorlevel%==0 (
-    py -3 -m venv "%VENV_DIR%"
-  ) else (
+  if errorlevel 1 (
     python -m venv "%VENV_DIR%"
+  ) else (
+    py -3 -m venv "%VENV_DIR%"
   )
 )
 
@@ -44,7 +46,7 @@ set "PY=%VENV_DIR%\Scripts\python.exe"
 
 echo [2/4] Installing backend dependencies...
 "%PY%" -m pip install --disable-pip-version-check -q -r backend\requirements.txt
-if %errorlevel% neq 0 (
+if errorlevel 1 (
   echo Failed to install backend dependencies.
   pause
   exit /b 1
@@ -53,21 +55,23 @@ if %errorlevel% neq 0 (
 if not exist "frontend\dist\index.html" (
   echo [3/4] Frontend build not found. Building frontend...
   where npm >nul 2>nul
-  if %errorlevel% neq 0 (
+  if errorlevel 1 (
     echo Node.js/npm is required to build frontend for the first time.
     pause
     exit /b 1
   )
+
   pushd frontend
   call npm install
-  if %errorlevel% neq 0 (
+  if errorlevel 1 (
     popd
     echo npm install failed.
     pause
     exit /b 1
   )
+
   call npm run build
-  if %errorlevel% neq 0 (
+  if errorlevel 1 (
     popd
     echo npm run build failed.
     pause

@@ -20,6 +20,13 @@ export type StartStrategyPayload = {
   tp: number;
   sl_type: boolean;
   sl: number;
+  enable_buy: boolean;
+  enable_sell: boolean;
+  max_orders: number;
+  start_time?: string | null;
+  end_time_enabled: boolean;
+  end_time?: string | null;
+  use_liquidity: boolean;
 };
 
 export type StrategyStatusResponse = {
@@ -28,6 +35,7 @@ export type StrategyStatusResponse = {
   config?: Record<string, any>;
   last_event?: string;
   last_event_at?: number;
+  events?: Array<{ text: string; at: number }>;
 };
 
 export async function startStrategy(payload: StartStrategyPayload) {

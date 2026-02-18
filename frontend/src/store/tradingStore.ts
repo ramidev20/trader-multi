@@ -15,6 +15,7 @@ export interface StrategyStatus {
   config?: Record<string, any>;
   last_event?: string;
   last_event_at?: number;
+  events?: Array<{ text: string; at: number }>;
 }
 
 export interface TradingState {

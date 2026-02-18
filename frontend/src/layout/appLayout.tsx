@@ -1,8 +1,8 @@
 import React, { useEffect } from "react";
 import { Box, Toolbar } from "@mui/material";
 import { Outlet } from "react-router-dom";
-import Sidebar from "./Sidebar";
-import Topbar from "./Topbar";
+import Sidebar from "./sideBar";
+import Topbar from "./topBar";
 import { api } from "../api/client";
 import { useTradingStore } from "../store/tradingStore";
 

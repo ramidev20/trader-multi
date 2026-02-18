@@ -29,7 +29,7 @@ import LogoutOutlinedIcon from "@mui/icons-material/LogoutOutlined";
 import AccountCircleOutlinedIcon from "@mui/icons-material/AccountCircleOutlined";
 import LoginRoundedIcon from "@mui/icons-material/LoginRounded";
 
-import { drawerWidth } from "./Sidebar";
+import { drawerWidth } from "./sideBar";
 import { useTradingStore } from "../store/tradingStore";
 import { api } from "../api/client";
 

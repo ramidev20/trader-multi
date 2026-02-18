@@ -2,6 +2,7 @@ import { useTradingStore } from "../store/tradingStore";
 
 let ws: WebSocket | null = null;
 let shouldReconnect = false;
+let lastStrategyLogKey = "";
 
 export function connectSocket() {
   shouldReconnect = true;
@@ -13,7 +14,9 @@ export function connectSocket() {
   )
     return;
 
-  ws = new WebSocket("ws://localhost:8000/ws/live");
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const wsHost = window.location.host;
+  ws = new WebSocket(`${protocol}://${wsHost}/ws/live`);
 
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
@@ -49,6 +52,14 @@ export function connectSocket() {
         break;
 
       case "strategy_status":
+        if (msg?.data?.last_event && msg?.data?.last_event_at) {
+          const k = `${msg.data.last_event_at}|${msg.data.last_event}`;
+          if (k !== lastStrategyLogKey) {
+            lastStrategyLogKey = k;
+            const at = new Date(Number(msg.data.last_event_at) * 1000).toLocaleTimeString();
+            store.addLog?.(`[${at}] [strategy] ${msg.data.last_event}`);
+          }
+        }
         store.setStrategyStatus?.(msg.data ?? {});
         break;
     }

@@ -11,7 +11,7 @@ export default function Chart() {
     const series = chart.addCandlestickSeries();
 
     async function load() {
-      const res = await axios.get("http://localhost:8000/api/chart");
+      const res = await axios.get("/api/chart");
       series.setData(res.data.candles);
     }
 

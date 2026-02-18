@@ -1,5 +1,5 @@
 import { Box, Card } from "@mui/material";
-import ChartPanel from "../components/chartpanel";
+import ChartPanel from "../components/chartPanel";
 import TradeDock from "../components/tradePanel";
 import TerminalPanel from "../components/footerPanel";
 

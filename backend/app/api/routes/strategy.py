@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from app.services.strategy_service import strategy_service
 from pydantic import BaseModel
+from typing import Optional
 from app.services.mt5_service import is_logged_in 
 
 router = APIRouter(tags=["Strategy"])
@@ -21,6 +22,13 @@ class StartStrategyRequest(BaseModel):
     tp: float
     sl_type: bool
     sl: float
+    enable_buy: bool = True
+    enable_sell: bool = True
+    max_orders: int = 1
+    start_time: Optional[str] = None
+    end_time_enabled: bool = False
+    end_time: Optional[str] = None
+    use_liquidity: bool = True
 
 
 class LiquidityCreate(BaseModel):

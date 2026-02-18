@@ -16,7 +16,8 @@ import { ChartTimeframe, useTradingStore } from "../store/tradingStore";
 type Candle = CandlestickData<Time>;
 type TF = ChartTimeframe;
 
-const CHART_ENDPOINT = "http://localhost:8000/api/chart/";
+const CHART_ENDPOINT = "/api/chart/";
+const CHART_RANGE_KEY = "chart_visible_range_v1";
 
 function tfToSeconds(tf: TF) {
   switch (tf) {
@@ -48,6 +49,37 @@ function normalizeTimeToSeconds(t: any): number {
   return n > 1e12 ? Math.floor(n / 1000) : n;
 }
 
+function getRangeStorageKey(tf: TF) {
+  return `${CHART_RANGE_KEY}_${tf}`;
+}
+
+function loadVisibleRange(tf: TF): { from: number; to: number } | null {
+  try {
+    const raw = localStorage.getItem(getRangeStorageKey(tf));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const from = Number(parsed?.from);
+    const to = Number(parsed?.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+    if (to <= from) return null;
+    return { from, to };
+  } catch {
+    return null;
+  }
+}
+
+function saveVisibleRange(tf: TF, range: { from: number; to: number } | null) {
+  if (!range) return;
+  const from = Number(range.from);
+  const to = Number(range.to);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return;
+  try {
+    localStorage.setItem(getRangeStorageKey(tf), JSON.stringify({ from, to }));
+  } catch {
+    // ignore storage quota / privacy mode errors
+  }
+}
+
 export default function ChartPanel() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -59,6 +91,8 @@ export default function ChartPanel() {
 
   // ✅ liquidity price lines (id -> IPriceLine)
   const liqLinesRef = useRef<Map<string, IPriceLine>>(new Map());
+  const liveGuideLineRef = useRef<IPriceLine | null>(null);
+  const countdownTagRef = useRef<HTMLDivElement | null>(null);
 
   const timeframe = useTradingStore((s) => s.chartTimeframe);
   const setTimeframe = useTradingStore((s) => s.setChartTimeframe);
@@ -70,6 +104,19 @@ export default function ChartPanel() {
   const positions = useTradingStore((s) => s.positions) as any[];
   const liquidity = useTradingStore((s) => s.liquidity) as any[];
 
+  const candleRemainingSec = useMemo(() => {
+    const t = Number(tickTime);
+    if (!Number.isFinite(t) || timeframeSeconds <= 0) return null;
+    const next = (Math.floor(t / timeframeSeconds) + 1) * timeframeSeconds;
+    return Math.max(0, next - t);
+  }, [tickTime, timeframeSeconds]);
+
+  function formatRemaining(v: number | null) {
+    if (v === null || !Number.isFinite(v)) return "--:--";
+    const mm = Math.floor(v / 60);
+    const ss = Math.floor(v % 60);
+    return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  }
 
 
 
@@ -95,6 +142,8 @@ export default function ChartPanel() {
       borderDownColor: "#ef4444",
       wickUpColor: "#1ca175",
       wickDownColor: "#ef4444",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     candleSeriesRef.current = candleSeries;
 
@@ -127,10 +176,29 @@ export default function ChartPanel() {
     dealTip.style.display = "none";
     dealTip.style.whiteSpace = "nowrap";
 
+    const countdownTag = document.createElement("div");
+    countdownTag.style.position = "absolute";
+    countdownTag.style.zIndex = "12";
+    countdownTag.style.right = "4px";
+    countdownTag.style.padding = "4px 7px";
+    countdownTag.style.borderRadius = "2px";
+    countdownTag.style.fontSize = "12px";
+    countdownTag.style.fontWeight = "400";
+    countdownTag.style.background = "#ef4444";
+    countdownTag.style.color = "white";
+    countdownTag.style.pointerEvents = "none";
+    countdownTag.style.display = "none";
+    countdownTag.style.textAlign = "center";
+    countdownTag.style.lineHeight = "1.1";
+    countdownTag.style.whiteSpace = "pre";
+    countdownTag.style.boxShadow = "0 1px 2px rgba(0,0,0,0.25)";
+    countdownTagRef.current = countdownTag;
+
     // container must be relative for absolute tooltips
     containerRef.current.style.position = "relative";
     containerRef.current.appendChild(ohlcTip);
     containerRef.current.appendChild(dealTip);
+    containerRef.current.appendChild(countdownTag);
 
     const onMove = (param: any) => {
       if (!param?.time || !param?.point) {
@@ -222,6 +290,10 @@ export default function ChartPanel() {
     };
 
     chart.subscribeCrosshairMove(onMove);
+    const onVisibleRangeChange = (range: { from: number; to: number } | null) => {
+      saveVisibleRange(timeframe, range);
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChange);
 
     const resize = () => {
       if (!containerRef.current) return;
@@ -235,18 +307,26 @@ export default function ChartPanel() {
     return () => {
       window.removeEventListener("resize", resize);
       chart.unsubscribeCrosshairMove(onMove);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
+      saveVisibleRange(timeframe, chart.timeScale().getVisibleLogicalRange() as any);
       ohlcTip.remove();
       dealTip.remove();
+      countdownTag.remove();
 
       // ✅ cleanup liquidity lines
       try {
         const series = candleSeriesRef.current;
         if (series) {
+          if (liveGuideLineRef.current) {
+            series.removePriceLine(liveGuideLineRef.current);
+          }
           for (const line of liqLinesRef.current.values()) {
             series.removePriceLine(line);
           }
         }
       } catch {}
+      liveGuideLineRef.current = null;
+      countdownTagRef.current = null;
       liqLinesRef.current.clear();
 
       chart.remove();
@@ -264,8 +344,15 @@ export default function ChartPanel() {
   async function loadInitialCandles() {
     if (!candleSeriesRef.current) return;
 
+    if (liveGuideLineRef.current) {
+      candleSeriesRef.current.removePriceLine(liveGuideLineRef.current);
+      liveGuideLineRef.current = null;
+    }
     lastCandleRef.current = null;
     candleSeriesRef.current.setData([]);
+    if (countdownTagRef.current) {
+      countdownTagRef.current.style.display = "none";
+    }
     syncLiquidityLines(liquidity);
 
 
@@ -284,7 +371,12 @@ export default function ChartPanel() {
 
     candleSeriesRef.current.setData(candles);
     lastCandleRef.current = candles[candles.length - 1] ?? null;
-    chartRef.current?.timeScale().fitContent();
+    const savedRange = loadVisibleRange(timeframe);
+    if (savedRange) {
+      chartRef.current?.timeScale().setVisibleLogicalRange(savedRange as any);
+    } else {
+      chartRef.current?.timeScale().fitContent();
+    }
 
     applyMarkers(history, positions, timeframeSeconds);
     syncLiquidityLines(liquidity); // ✅ ensure lines exist after reload
@@ -340,6 +432,44 @@ export default function ChartPanel() {
       lastCandleRef.current = newCandle;
       candleSeriesRef.current.update(newCandle);
     }
+
+    syncCountdownTag(price);
+  }
+
+  function syncCountdownTag(price: number) {
+    const series = candleSeriesRef.current;
+    const tag = countdownTagRef.current;
+    const container = containerRef.current;
+    if (!series || !tag || !container || !Number.isFinite(price)) return;
+
+    const y = series.priceToCoordinate(price);
+    if (!Number.isFinite(y) || candleRemainingSec === null) {
+      tag.style.display = "none";
+      if (liveGuideLineRef.current) {
+        series.removePriceLine(liveGuideLineRef.current);
+        liveGuideLineRef.current = null;
+      }
+      return;
+    }
+
+    const guideOpts = {
+      price,
+      color: "#ef4444",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dotted,
+      axisLabelVisible: false,
+      title: "",
+    };
+    if (!liveGuideLineRef.current) {
+      liveGuideLineRef.current = series.createPriceLine(guideOpts);
+    } else {
+      liveGuideLineRef.current.applyOptions(guideOpts);
+    }
+
+    const top = Math.max(4, Math.min(container.clientHeight - 36, Number(y) - 18));
+    tag.style.top = `${top}px`;
+    tag.style.display = "block";
+    tag.textContent = `${price.toFixed(2)}\n${formatRemaining(candleRemainingSec)}`;
   }
 
   // ===========================

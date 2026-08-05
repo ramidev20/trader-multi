@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "backend: dev",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Set-Location '${workspaceFolder}\\backend'; if (Test-Path '.venv\\Scripts\\python.exe') { & '.venv\\Scripts\\python.exe' -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 } else { python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 }"
+      ],
+      "isBackground": true,
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always",
+        "clear": false
+      }
+    },
+    {
+      "label": "frontend: dev",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Set-Location '${workspaceFolder}\\frontend'; & npm.cmd run dev -- --host 127.0.0.1 --port 5173"
+      ],
+      "isBackground": true,
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always",
+        "clear": false
+      }
+    }
+  ]
+}

@@ -1,87 +1,958 @@
+from __future__ import annotations
+
 import time
-import uuid
 import threading
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from pathlib import Path
+import json
+from types import SimpleNamespace
+from typing import Callable, Optional
+from uuid import uuid4
 
-import MetaTrader5 as mt5
-
+from .mt5_compat import mt5, mt5_available
+from .mt5_lock import MT5_LOCK
+from .runtime_state import append_list, append_log, get, patch_path, replace_list, set_path
+from .task_manager import emit_log, is_task_running, start_task, stop_task
 
 SYMBOL_DEFAULT = "XAUUSD"
+CONFIG_FILE = Path(__file__).resolve().parents[3] / "config.json"
+_sim_ticks = {"XAUUSD": 3350.0}
+_sim_last_candle_ts: dict[str, int] = {}
+MANUAL_TP_TASK_NAME = "manual_multi_tp"
+TIMEFRAME_MAP = {
+    "M1": mt5.TIMEFRAME_M1,
+    "M3": mt5.TIMEFRAME_M3,
+    "M5": mt5.TIMEFRAME_M5,
+    "M15": mt5.TIMEFRAME_M15,
+}
 
 
-# ===================== Strategy (your old function, unchanged) =====================
+def _tick_for(symbol: str) -> SimpleNamespace:
+    base = _sim_ticks.get(symbol, 3350.0)
+    drift = ((int(time.time()) % 12) - 6) * 0.08
+    ask = round(base + drift + 0.05, 2)
+    bid = round(base + drift - 0.05, 2)
+    _sim_ticks[symbol] = round(base + ((int(time.time() * 1000) % 2) * 0.01 - 0.005), 2)
+    return SimpleNamespace(ask=ask, bid=bid)
+
+
+def _resolve_timeframe(value) -> int:
+    if isinstance(value, str):
+        return int(TIMEFRAME_MAP.get(value.upper(), mt5.TIMEFRAME_M1))
+    try:
+        return int(value)
+    except Exception:
+        return int(mt5.TIMEFRAME_M1)
+
+
+def _load_config() -> dict:
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def _normalize_terminal_path(path_value: str) -> str:
+    path = str(path_value or "").strip()
+    if len(path) >= 2 and path[0] == path[-1] and path[0] in {'"', "'"}:
+        path = path[1:-1].strip()
+    return path
+
+
+def _resolve_master_account(cfg: dict) -> dict | None:
+    accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
+    master_login = _safe_int((cfg or {}).get("master_account_login"))
+    if master_login > 0:
+        for acc in accounts:
+            if _safe_int(acc.get("user")) == master_login:
+                return acc
+    for acc in accounts:
+        if str(acc.get("role", "sub")).lower() == "master":
+            return acc
+    return None
+
+
+def _copy_targets(cfg: dict, master_login: int) -> list[tuple[dict, float]]:
+    accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
+    by_login = {_safe_int(a.get("user")): a for a in accounts}
+    targets: list[tuple[dict, float]] = []
+
+    copy_accounts = cfg.get("copy_accounts", []) if isinstance(cfg, dict) else []
+    if isinstance(copy_accounts, list) and copy_accounts:
+        for item in copy_accounts:
+            try:
+                if not bool(item.get("enabled", True)):
+                    continue
+                login = _safe_int(item.get("account_login"))
+                if login <= 0 or login == master_login:
+                    continue
+                account = by_login.get(login)
+                if not account:
+                    continue
+                risk = float(item.get("risk_multiplier", account.get("risk_multiplier", 1.0)) or 1.0)
+                targets.append((account, risk))
+            except Exception:
+                continue
+        return targets
+
+    for acc in accounts:
+        try:
+            login = _safe_int(acc.get("user"))
+            if login <= 0 or login == master_login:
+                continue
+            if str(acc.get("role", "sub")).lower() != "sub":
+                continue
+            targets.append((acc, float(acc.get("risk_multiplier", 1.0) or 1.0)))
+        except Exception:
+            continue
+    return targets
+
+
+def _copy_targets_count() -> int:
+    cfg = _load_config()
+    master = _resolve_master_account(cfg)
+    master_login = _safe_int((master or {}).get("user"))
+    return len(_copy_targets(cfg, master_login))
+
+
+def _initialize_mt5_for_account(account: dict) -> tuple[bool, str]:
+    login = _safe_int(account.get("user"))
+    password = str(account.get("password", "") or "")
+    server = str(account.get("server", "") or "")
+    terminal_path = _normalize_terminal_path(str(account.get("terminal_path", "") or ""))
+    if login <= 0 or not password or not server or not terminal_path:
+        return False, f"missing account credentials/path for login={login}"
+    with MT5_LOCK:
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+        ok = mt5.initialize(login=login, password=password, server=server, path=terminal_path)
+        if not ok:
+            return False, str(mt5.last_error())
+        return True, "ok"
+
+
+def _ensure_symbol_ready(symbol: str) -> tuple[bool, str]:
+    if not mt5_available():
+        return True, "simulation"
+
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        return False, f"Symbol {symbol} not found in terminal."
+
+    if not bool(getattr(info, "visible", False)):
+        selected = mt5.symbol_select(symbol, True)
+        if not selected:
+            return False, f"Failed to select symbol {symbol}: {mt5.last_error()}"
+
+    observed_stamps: list[int] = []
+    for _ in range(10):
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is not None and getattr(tick, "bid", 0) and getattr(tick, "ask", 0):
+            stamp = getattr(tick, "time_msc", None) or getattr(tick, "time", None)
+            if stamp:
+                observed_stamps.append(int(stamp))
+                if len(observed_stamps) >= 2 and observed_stamps[-1] != observed_stamps[-2]:
+                    return True, "ok"
+        time.sleep(0.2)
+    if observed_stamps:
+        return False, f"Stale prices for {symbol}. Terminal is connected but quote stream is not updating."
+    return False, f"No prices available for {symbol}."
+
+
+def _check_request(request: dict) -> tuple[bool, str]:
+    if not mt5_available():
+        return True, "simulation"
+    try:
+        result = mt5.order_check(request)
+    except Exception as ex:
+        return False, f"order_check exception: {ex}"
+    if result is None:
+        return False, f"order_check failed: {mt5.last_error()}"
+    retcode = getattr(result, "retcode", None)
+    if retcode in {0, mt5.TRADE_RETCODE_DONE}:
+        return True, str(getattr(result, "comment", "Done") or "Done")
+    return False, str(getattr(result, "comment", f"order_check retcode={retcode}") or f"order_check retcode={retcode}")
+
+
+def _normalize_volume(symbol: str, volume: float) -> float:
+    raw_volume = max(0.0, float(volume or 0.0))
+    info = mt5.symbol_info(symbol) if mt5_available() else None
+    min_volume = float(getattr(info, "volume_min", 0.01) or 0.01)
+    max_volume = float(getattr(info, "volume_max", 100.0) or 100.0)
+    step = float(getattr(info, "volume_step", 0.01) or 0.01)
+    if step <= 0:
+        step = 0.01
+
+    stepped = max(min_volume, (raw_volume // step) * step)
+    capped = min(stepped, max_volume)
+    precision = 2
+    step_text = f"{step:.10f}".rstrip("0").rstrip(".")
+    if "." in step_text:
+        precision = min(6, len(step_text.split(".")[1]))
+    return round(capped, precision)
+
+
+def _loss_per_lot(symbol: str, order_type: int, entry_price: float, stop_loss: float) -> float:
+    if mt5_available():
+        try:
+            profit = mt5.order_calc_profit(order_type, symbol, 1.0, float(entry_price), float(stop_loss))
+            if profit is not None:
+                return abs(float(profit))
+        except Exception:
+            pass
+
+    info = mt5.symbol_info(symbol) if mt5_available() else None
+    if info is None:
+        return 0.0
+
+    tick_size = float(getattr(info, "trade_tick_size", 0.0) or getattr(info, "point", 0.0) or 0.0)
+    tick_value = float(
+        getattr(info, "trade_tick_value_loss", 0.0)
+        or getattr(info, "trade_tick_value", 0.0)
+        or getattr(info, "trade_tick_value_profit", 0.0)
+        or 0.0
+    )
+    if tick_size <= 0 or tick_value <= 0:
+        return 0.0
+    return abs(float(entry_price) - float(stop_loss)) / tick_size * tick_value
+
+
+def _risk_adjusted_volume(
+    symbol: str,
+    order_type: int,
+    entry_price: float,
+    stop_loss: float,
+    risk_percent: float,
+    fallback_lot: float,
+) -> float:
+    if not mt5_available():
+        return _normalize_volume(symbol, fallback_lot)
+
+    account_info = mt5.account_info()
+    equity = float(
+        getattr(account_info, "equity", 0.0) or getattr(account_info, "balance", 0.0) or 0.0
+    )
+    if equity <= 0 or risk_percent <= 0:
+        return _normalize_volume(symbol, fallback_lot)
+
+    loss_per_lot = _loss_per_lot(symbol, order_type, entry_price, stop_loss)
+    if loss_per_lot <= 0:
+        return _normalize_volume(symbol, fallback_lot)
+
+    risk_amount = equity * (float(risk_percent) / 100.0)
+    if risk_amount <= 0:
+        return _normalize_volume(symbol, fallback_lot)
+
+    raw_volume = risk_amount / loss_per_lot
+    if raw_volume <= 0:
+        return _normalize_volume(symbol, fallback_lot)
+    return _normalize_volume(symbol, raw_volume)
+
+
+def _ensure_master_session() -> tuple[bool, str, dict | None, dict]:
+    cfg = _load_config()
+    master = _resolve_master_account(cfg)
+    if not master:
+        return False, "No master account configured for execution.", None, cfg
+    if not mt5_available():
+        return True, "simulation", master, cfg
+    ok, detail = _initialize_mt5_for_account(master)
+    if not ok:
+        login = _safe_int(master.get("user"))
+        return False, f"MT5 initialize failed for master {login}: {detail}", master, cfg
+    return True, "ok", master, cfg
+
+
+def _build_copy_request(master_request: dict, risk_multiplier: float, origin: str) -> dict:
+    req = dict(master_request)
+    volume = float(master_request.get("volume", 0.01) or 0.01) * float(risk_multiplier or 1.0)
+    req["volume"] = round(max(0.01, volume), 2)
+    req["comment"] = f"{origin} copy"
+    req["magic"] = int(master_request.get("magic", 1000) or 1000) + 1
+
+    symbol = str(master_request.get("symbol", SYMBOL_DEFAULT))
+    symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol)
+    if not symbol_ok:
+        return req
+    order_type = int(master_request.get("type", mt5.ORDER_TYPE_BUY) or mt5.ORDER_TYPE_BUY)
+    tick = mt5.symbol_info_tick(symbol) if mt5_available() else None
+    if tick is None:
+        return req
+
+    master_price = float(master_request.get("price", 0.0) or 0.0)
+    master_tp = float(master_request.get("tp", 0.0) or 0.0)
+    master_sl = float(master_request.get("sl", 0.0) or 0.0)
+
+    if order_type == mt5.ORDER_TYPE_BUY:
+        price = float(getattr(tick, "ask", master_price) or master_price)
+        req["price"] = price
+        if master_tp:
+            req["tp"] = round(price + (master_tp - master_price), 2)
+        if master_sl:
+            req["sl"] = round(price - (master_price - master_sl), 2)
+    else:
+        price = float(getattr(tick, "bid", master_price) or master_price)
+        req["price"] = price
+        if master_tp:
+            req["tp"] = round(price - (master_price - master_tp), 2)
+        if master_sl:
+            req["sl"] = round(price + (master_sl - master_price), 2)
+    return req
+
+
+def _clone_trade_to_sub_accounts(master_request: dict, origin: str) -> None:
+    ok, detail, master, cfg = _ensure_master_session()
+    if not ok:
+        append_log("search", f"[ERROR] Copy disabled: {detail}")
+        return
+    master_login = _safe_int((master or {}).get("user"))
+    targets = _copy_targets(cfg, master_login)
+    if not targets:
+        return
+    if not mt5_available():
+        append_log("search", f"[COPY] Simulation mode: {len(targets)} copy target(s) queued.")
+        return
+
+    copied = 0
+    for account, risk_multiplier in targets:
+        login = _safe_int(account.get("user"))
+        init_ok, init_detail = _initialize_mt5_for_account(account)
+        if not init_ok:
+            append_log("search", f"[ERROR] Copy init failed for {login}: {init_detail}")
+            continue
+        copy_req = _build_copy_request(master_request, risk_multiplier, origin)
+        result = mt5.order_send(copy_req)
+        if result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+            copied += 1
+        else:
+            append_log(
+                "search",
+                f"[ERROR] Copy order failed for {login}: {getattr(result, 'comment', mt5.last_error())}",
+            )
+
+    # Restore master session for subsequent strategy ticks.
+    if master:
+        restore_ok, restore_detail = _initialize_mt5_for_account(master)
+        if not restore_ok:
+            append_log("search", f"[ERROR] Master session restore failed: {restore_detail}")
+    append_log("search", f"[COPY] Copied master trade to {copied}/{len(targets)} sub account(s).")
+
+
+@dataclass
+class Liquidity:
+    price: float
+    side: str
+    triggered: bool = False
+    effect: Optional[Callable] = None
+
+
+def wait_for_new_candle(
+    timeframe,
+    symbol: str = SYMBOL_DEFAULT,
+    poll_attempts: int = 10,
+    poll_sleep: float = 0.2,
+):
+    if mt5_available():
+        symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol)
+        if not symbol_ok:
+            return None
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
+        if rates is None or len(rates) == 0:
+            return None
+        last_time = rates[0]["time"]
+        for _ in range(poll_attempts):
+            time.sleep(poll_sleep)
+            new_rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
+            if new_rates and len(new_rates) > 0 and new_rates[0]["time"] != last_time:
+                closed = mt5.copy_rates_from_pos(symbol, timeframe, 1, 1)
+                return closed[0] if closed and len(closed) > 0 else None
+        return None
+
+    candle_ts = int(time.time())
+    last_ts = _sim_last_candle_ts.get(symbol)
+    if last_ts is not None and candle_ts <= last_ts:
+        return None
+    _sim_last_candle_ts[symbol] = candle_ts
+    t = _tick_for(symbol)
+    open_price = t.bid
+    close_price = t.ask if candle_ts % 2 else t.bid
+    return {"time": candle_ts, 1: open_price, 4: close_price}
+
+
+def _candle_value(candle, key: int, fallback_name: str) -> float:
+    if isinstance(candle, dict):
+        if key in candle:
+            return float(candle[key])
+        if fallback_name in candle:
+            return float(candle[fallback_name])
+    return float(candle[key])
+
+
+def _open_positions_count(symbol: str) -> int:
+    if mt5_available():
+        positions = mt5.positions_get(symbol=symbol)
+        return len(positions) if positions else 0
+    orders = get("orders", [])
+    return len([o for o in orders if o.get("status") == "open" and o.get("symbol") == symbol])
+
+
+def _close_mt5_position(position, close_volume: float | None = None, comment: str = "close all positions") -> tuple[bool, str]:
+    symbol = str(getattr(position, "symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT)
+    position_volume = float(getattr(position, "volume", 0.0) or 0.0)
+    volume = min(position_volume, float(close_volume)) if close_volume is not None else position_volume
+    position_type = int(getattr(position, "type", -1))
+    position_ticket = int(getattr(position, "ticket", 0) or 0)
+    if volume <= 0 or position_ticket <= 0:
+        return False, "invalid position volume/ticket"
+
+    with MT5_LOCK:
+        info = mt5.symbol_info(symbol) if mt5_available() else None
+        if info is not None and not bool(getattr(info, "visible", False)):
+            if not mt5.symbol_select(symbol, True):
+                return False, f"symbol select failed: {mt5.last_error()}"
+        tick = mt5.symbol_info_tick(symbol) if mt5_available() else None
+        if tick is None:
+            return False, "no tick"
+
+        if position_type == mt5.ORDER_TYPE_BUY:
+            close_type = mt5.ORDER_TYPE_SELL
+            price = float(getattr(tick, "bid", 0.0) or 0.0)
+        else:
+            close_type = mt5.ORDER_TYPE_BUY
+            price = float(getattr(tick, "ask", 0.0) or 0.0)
+
+        if price <= 0:
+            return False, "invalid close price"
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": round(volume, 2),
+            "type": close_type,
+            "position": position_ticket,
+            "price": price,
+            "deviation": 20,
+            "magic": 123456,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+        }
+
+        fill_modes = [mt5.ORDER_FILLING_FOK]
+        for candidate in ("ORDER_FILLING_IOC", "ORDER_FILLING_RETURN"):
+            mode = getattr(mt5, candidate, None)
+            if mode is not None and mode not in fill_modes:
+                fill_modes.append(mode)
+
+        for fill_mode in fill_modes:
+            request["type_filling"] = fill_mode
+            result = mt5.order_send(request)
+            if result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+                return True, f"done:{getattr(result, 'comment', '') or 'ok'}"
+            if result is not None:
+                detail = f"retcode={getattr(result, 'retcode', None)} comment={getattr(result, 'comment', '') or ''}".strip()
+            else:
+                detail = f"no result last_error={mt5.last_error()}"
+            last_detail = detail
+        return False, last_detail if "last_detail" in locals() else "close failed"
+
+
+_manual_tp_sessions: list[dict] = []
+
+
+def _manual_tp_position(session: dict):
+    positions = mt5.positions_get(symbol=session["symbol"]) or []
+    ticket = int(session.get("ticket") or 0)
+    if ticket:
+        for position in positions:
+            if int(getattr(position, "ticket", 0) or 0) == ticket:
+                return position
+
+    expected_type = mt5.ORDER_TYPE_BUY if session["side"] == "BUY" else mt5.ORDER_TYPE_SELL
+    candidates = [
+        position
+        for position in positions
+        if int(getattr(position, "type", -1)) == expected_type
+        and abs(float(getattr(position, "price_open", 0.0) or 0.0) - float(session["entry"])) <= 1.0
+    ]
+    if not candidates:
+        return None
+    position = max(candidates, key=lambda item: int(getattr(item, "time", 0) or 0))
+    session["ticket"] = int(getattr(position, "ticket", 0) or 0) or None
+    return position
+
+
+def _monitor_manual_multi_tp() -> None:
+    if not _manual_tp_sessions:
+        stop_task(MANUAL_TP_TASK_NAME)
+        return
+
+    for session in list(_manual_tp_sessions):
+        targets = session.get("targets", [])
+        target_index = int(session.get("next_target", 0) or 0)
+        if target_index >= max(0, len(targets) - 1):
+            _manual_tp_sessions.remove(session)
+            continue
+
+        target_price, withdrawal_percent = targets[target_index]
+        if mt5_available():
+            position = _manual_tp_position(session)
+            if position is None:
+                _manual_tp_sessions.remove(session)
+                continue
+            tick = mt5.symbol_info_tick(session["symbol"])
+            if tick is None:
+                continue
+            current_price = float(tick.bid if session["side"] == "BUY" else tick.ask)
+            target_hit = current_price >= target_price if session["side"] == "BUY" else current_price <= target_price
+            if not target_hit:
+                continue
+            current_volume = float(getattr(position, "volume", 0.0) or 0.0)
+            close_volume = current_volume * float(withdrawal_percent) / 100.0
+            closed, detail = _close_mt5_position(position, close_volume, "manual TP partial close")
+            if not closed:
+                emit_log(f"[manual_tp] TP{target_index + 1} partial close failed: {detail}", "warning")
+                continue
+        else:
+            order_id = str(session.get("order_id") or "")
+            orders = get("orders", [])
+            order = next((item for item in orders if str(item.get("id")) == order_id and item.get("status") == "open"), None)
+            if order is None:
+                _manual_tp_sessions.remove(session)
+                continue
+            tick = _tick_for(session["symbol"])
+            current_price = float(tick.bid if session["side"] == "BUY" else tick.ask)
+            target_hit = current_price >= target_price if session["side"] == "BUY" else current_price <= target_price
+            if not target_hit:
+                continue
+            order["lot"] = round(float(order.get("lot", 0.0) or 0.0) * (1.0 - float(withdrawal_percent) / 100.0), 2)
+            replace_list("orders", orders)
+
+        session["next_target"] = target_index + 1
+        emit_log(
+            f"[manual_tp] TP{target_index + 1} reached at {float(target_price):.2f}; withdrew {float(withdrawal_percent):.0f}% of remaining volume.",
+            "success",
+        )
+
+
+def _register_manual_tp_session(side: str, entry: float, targets: list[tuple[float, float]], ticket=None, order_id: str | None = None) -> None:
+    _manual_tp_sessions.append(
+        {
+            "symbol": SYMBOL_DEFAULT,
+            "side": side,
+            "entry": float(entry),
+            "targets": list(targets),
+            "next_target": 0,
+            "ticket": int(ticket or 0) or None,
+            "order_id": order_id,
+        }
+    )
+    if not is_task_running(MANUAL_TP_TASK_NAME):
+        start_task(MANUAL_TP_TASK_NAME, _monitor_manual_multi_tp, interval_sec=1, log_schedule=False)
+
+
+def open_manual_position(
+    order_type: str,
+    lot_size: float | None = None,
+    tp: float | None = None,
+    sl: float | None = None,
+    symbol: str = SYMBOL_DEFAULT,
+    tp_in_pips: bool = False,
+    sl_in_pips: bool = False,
+    risk_percent: float | None = None,
+    advanced: bool = False,
+    sl_price: float | None = None,
+    ratio: float = 3.0,
+    tp2_enabled: bool = False,
+    tp3_enabled: bool = False,
+    tp1_percent: float = 100.0,
+    tp2_percent: float = 100.0,
+):
+    master_ok, master_detail, _master, _cfg = _ensure_master_session()
+    if not master_ok:
+        message = f"Manual order blocked: {master_detail}"
+        append_log("search", f"[ERROR] {message}")
+        raise RuntimeError(message)
+
+    symbol_ok, symbol_detail = _ensure_symbol_ready(symbol)
+    if not symbol_ok:
+        message = f"Manual order blocked: {symbol_detail}"
+        append_log("search", f"[ERROR] {message}")
+        raise RuntimeError(message)
+
+    tick = mt5.symbol_info_tick(symbol) if mt5_available() else _tick_for(symbol)
+    if tick is None:
+        message = f"Manual order blocked: no live tick for {symbol}."
+        append_log("search", f"[ERROR] {message}")
+        raise RuntimeError(message)
+    order_type_upper = str(order_type).upper()
+    is_buy = order_type_upper == "BUY"
+    entry_price = float(tick.ask) if is_buy else float(tick.bid)
+
+    if advanced:
+        if sl_price is None:
+            raise RuntimeError("Multi-TP orders require a Stop Loss Price.")
+        stop_loss = float(sl_price)
+        if (is_buy and stop_loss >= entry_price) or ((not is_buy) and stop_loss <= entry_price):
+            raise RuntimeError("Stop Loss Price must be below BUY price or above SELL price.")
+        risk_distance = abs(entry_price - stop_loss)
+    elif sl is None:
+        stop_loss = entry_price - 1.0 if is_buy else entry_price + 1.0
+        risk_distance = abs(entry_price - stop_loss)
+    elif sl_in_pips:
+        risk_distance = float(sl) / 10.0
+        stop_loss = entry_price - risk_distance if is_buy else entry_price + risk_distance
+    else:
+        stop_loss = float(sl)
+        risk_distance = abs(entry_price - stop_loss)
+
+    if risk_distance <= 0:
+        raise RuntimeError("Stop Loss must be different from the entry price.")
+
+    effective_lot = float(lot_size or 0.0)
+    if risk_percent is not None and float(risk_percent) > 0:
+        effective_lot = _risk_adjusted_volume(
+            symbol,
+            mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
+            entry_price,
+            stop_loss,
+            float(risk_percent),
+            effective_lot or 0.01,
+        )
+    if effective_lot <= 0:
+        raise RuntimeError("Enter a valid Risk % or Lot size.")
+
+    take_profit_specs: list[tuple[float, float]] = []
+    if advanced:
+        enabled_withdrawals = [float(tp1_percent)]
+        if tp2_enabled:
+            enabled_withdrawals.append(float(tp2_percent))
+        if tp3_enabled:
+            enabled_withdrawals.append(100.0)
+        if any(percent <= 0 or percent > 100 for percent in enabled_withdrawals):
+            raise RuntimeError("TP withdrawal percentages must be between 0 and 100.")
+        if any(percent >= 100 for percent in enabled_withdrawals[:-1]):
+            raise RuntimeError("Only the last enabled TP can withdraw 100% of its remaining position.")
+        ratio_value = float(ratio or 0)
+        if ratio_value <= 0:
+            raise RuntimeError("Global TP ratio must be greater than 0.")
+        ratio_step = ratio_value / len(enabled_withdrawals)
+        for index, percent in enumerate(enabled_withdrawals, start=1):
+            distance = risk_distance * ratio_step * index
+            target = entry_price + distance if is_buy else entry_price - distance
+            take_profit_specs.append((target, percent))
+        take_profit = take_profit_specs[-1][0]
+    elif tp is None:
+        take_profit = entry_price + 1.0 if is_buy else entry_price - 1.0
+    elif tp_in_pips:
+        take_profit = entry_price + (float(tp) / 10.0) if is_buy else entry_price - (float(tp) / 10.0)
+    else:
+        take_profit = float(tp)
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "volume": round(float(effective_lot), 2),
+        "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
+        "price": float(entry_price),
+        "sl": round(float(stop_loss), 2),
+        "tp": round(float(take_profit), 2),
+        "deviation": 20,
+        "magic": 123456,
+        "comment": "manual position",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_FOK,
+    }
+
+    check_ok, check_detail = _check_request(request)
+    if not check_ok:
+        message = f"Manual order blocked: {check_detail}"
+        append_log("search", f"[ERROR] {message}")
+        raise RuntimeError(message)
+
+    result = mt5.order_send(request) if mt5_available() else None
+    done = bool(result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE) or not mt5_available()
+    if done:
+        ticket = getattr(result, "order", int(time.time() * 1000))
+        append_list(
+            "orders",
+            {
+                "id": str(uuid4()),
+                "ticket": ticket,
+                "symbol": symbol,
+                "side": str(order_type).upper(),
+                "lot": round(float(effective_lot), 2),
+                "entry": round(float(entry_price), 2),
+                "tp": round(float(take_profit), 2),
+                "sl": round(float(stop_loss), 2),
+                "tp_targets": [
+                    {"price": round(float(target), 2), "withdraw_percent": float(percent)}
+                    for target, percent in take_profit_specs
+                ],
+                "risk_percent": float(risk_percent or 0),
+                "status": "open",
+                "origin": "manual",
+                "created_at": datetime.now().isoformat(),
+            },
+            limit=2000,
+        )
+        append_log("search", f"[SUCCESS] Manual {order_type_upper} opened on {symbol}.")
+        _clone_trade_to_sub_accounts(request, origin="manual")
+        if len(take_profit_specs) > 1:
+            _register_manual_tp_session(
+                order_type_upper,
+                entry_price,
+                take_profit_specs,
+                ticket=getattr(result, "position", None) if result is not None else ticket,
+                order_id=str(get("orders", [])[-1].get("id")) if not mt5_available() and get("orders", []) else None,
+            )
+    else:
+        message = str(getattr(result, "comment", mt5.last_error()) or mt5.last_error())
+        append_log("search", f"[ERROR] Manual order failed: {message}")
+        raise RuntimeError(f"Manual order failed: {message}")
+    return result
+
+
+def calculate_manual_lot(
+    order_type: str,
+    risk_percent: float,
+    sl: float,
+    sl_in_pips: bool = True,
+    symbol: str = SYMBOL_DEFAULT,
+    sl_price: bool = False,
+) -> tuple[float, str]:
+    if mt5_available() and mt5.account_info() is None:
+        raise RuntimeError("Connect the master account from Dashboard before calculating lot size.")
+    symbol_ok, symbol_detail = _ensure_symbol_ready(symbol)
+    if not symbol_ok:
+        raise RuntimeError(symbol_detail)
+    tick = mt5.symbol_info_tick(symbol) if mt5_available() else _tick_for(symbol)
+    if tick is None:
+        raise RuntimeError(f"No live tick for {symbol}.")
+    side = str(order_type).upper()
+    is_buy = side == "BUY"
+    entry_price = float(tick.ask if is_buy else tick.bid)
+    if sl_price:
+        stop_loss = float(sl)
+    elif sl_in_pips:
+        distance = float(sl) / 10.0
+        stop_loss = entry_price - distance if is_buy else entry_price + distance
+    else:
+        stop_loss = float(sl)
+    if (is_buy and stop_loss >= entry_price) or ((not is_buy) and stop_loss <= entry_price):
+        raise RuntimeError("Stop Loss must be below BUY price or above SELL price.")
+    lot = _risk_adjusted_volume(
+        symbol,
+        mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
+        entry_price,
+        stop_loss,
+        float(risk_percent),
+        0.01,
+    )
+    return lot, f"Lot calculated from {float(risk_percent):.2f}% risk and {abs(entry_price - stop_loss):.2f} price distance."
+
+
+def close_all_positions(side: str = "all", symbol: str | None = None):
+    _manual_tp_sessions.clear()
+    stop_task(MANUAL_TP_TASK_NAME)
+    closed_tickets: set[int] = set()
+    attempted = 0
+    errors: list[str] = []
+    cfg = _load_config()
+    accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
+    master = _resolve_master_account(cfg)
+    require_ticket_match = mt5_available() and bool(accounts)
+    if mt5_available() and accounts:
+        for account in accounts:
+            login = _safe_int(account.get("user"))
+            if login <= 0:
+                continue
+            init_ok, init_detail = _initialize_mt5_for_account(account)
+            if not init_ok:
+                errors.append(f"{login}: init failed {init_detail}")
+                append_log("search", f"[ERROR] Close init failed for {login}: {init_detail}")
+                continue
+            try:
+                positions = mt5.positions_get() if symbol is None else mt5.positions_get(symbol=symbol)
+                if not positions:
+                    continue
+                for pos in positions:
+                    try:
+                        position_side = "buy" if int(getattr(pos, "type", -1)) == mt5.ORDER_TYPE_BUY else "sell"
+                        if side == "buy" and position_side != "buy":
+                            continue
+                        if side == "sell" and position_side != "sell":
+                            continue
+                        attempted += 1
+                        closed_ok, close_detail = _close_mt5_position(pos)
+                        if closed_ok:
+                            closed_tickets.add(int(getattr(pos, "ticket", 0) or 0))
+                        else:
+                            symbol_name = str(getattr(pos, "symbol", symbol or SYMBOL_DEFAULT) or SYMBOL_DEFAULT)
+                            message = f"Close failed ticket={getattr(pos, 'ticket', '-')} symbol={symbol_name} {close_detail}"
+                            errors.append(message)
+                            append_log("search", f"[ERROR] {message}")
+                    except Exception as ex:
+                        message = f"{login}: close error {ex}"
+                        errors.append(message)
+                        append_log("search", f"[ERROR] {message}")
+            finally:
+                pass
+        if master:
+            restore_ok, restore_detail = _initialize_mt5_for_account(master)
+            if not restore_ok:
+                errors.append(f"master restore failed: {restore_detail}")
+                append_log("search", f"[ERROR] Master session restore failed: {restore_detail}")
+    else:
+        for order in get("orders", []):
+            if order.get("status") != "open":
+                continue
+            if side == "buy" and order.get("side") != "BUY":
+                continue
+            if side == "sell" and order.get("side") != "SELL":
+                continue
+            attempted += 1
+            try:
+                closed_tickets.add(int(order.get("ticket", 0) or 0))
+            except Exception:
+                continue
+    orders = get("orders", [])
+    for order in orders:
+        if order.get("status") != "open":
+            continue
+        if side == "buy" and order.get("side") != "BUY":
+            continue
+        if side == "sell" and order.get("side") != "SELL":
+            continue
+        try:
+            ticket = int(order.get("ticket", 0) or 0)
+        except Exception:
+            ticket = 0
+        if require_ticket_match and ticket not in closed_tickets:
+            continue
+        order["status"] = "closed"
+        order["closed_at"] = datetime.now().isoformat()
+    replace_list("orders", orders)
+    return {"attempted": attempted, "closed": len(closed_tickets), "real_close": mt5_available(), "errors": errors}
+    append_log("search", f"[WARNING] Close positions requested ({side}) for {symbol}.")
+
+
+def account_management(profit_percent, risk_percent, start_balance, symbol: str = SYMBOL_DEFAULT):
+    if mt5_available():
+        info = mt5.account_info()
+        if info is None:
+            return True, "warning", "No account info available."
+        current_balance = float(info.equity)
+    else:
+        accounts = _load_config().get("trading_accounts", [])
+        current_balance = float(sum(float(a.get("equity", a.get("balance", 0)) or 0) for a in accounts) or start_balance)
+
+    trade_diff = current_balance - float(start_balance or 0)
+    profit_threshold = float(start_balance) * (float(profit_percent) / 100.0)
+    risk_threshold = float(start_balance) * (float(risk_percent) / 100.0)
+
+    if trade_diff >= profit_threshold:
+        close_all_positions(symbol=symbol)
+        return False, "success", f"Daily profit limit reached: {trade_diff:.2f} USD"
+    if trade_diff <= -risk_threshold:
+        close_all_positions(symbol=symbol)
+        return False, "warning", f"Daily risk limit reached: {abs(trade_diff):.2f} USD"
+    return True, "debug", f"Balance: {current_balance:.2f} | Current P/L: {trade_diff:.2f} USD"
+
 
 def open_order_strategy(config_data):
-    """
-    Required config keys:
-      - min_pips (or legacy pips)
-      - max_pips
-      - lot
-      - tp_type (True=TP in pips, False=absolute price)
-      - tp
-      - sl_type (True=SL in pips, False=absolute price)
-      - sl
-      - candle (CLOSED candle row)
-      - order_delay (seconds)
-    Optional:
-      - symbol (default XAUUSD)
-      - forced_side: "buy" or "sell" (Liquidity forces direction)
-    """
-
     def body_pips(open_price, close_price):
         return round((open_price - close_price) * 10, 3)
 
+    master_ok, master_detail, _master, _cfg = _ensure_master_session()
+    if not master_ok:
+        emit_log(f"[order] blocked: {master_detail}", "error")
+        return None
+
     min_pips = config_data.get("min_pips", config_data.get("pips"))
     max_pips = config_data["max_pips"]
-    lot = config_data["lot"]
-    tp_type = config_data["tp_type"]
-    tp_val = config_data["tp"]
-    sl_type = config_data["sl_type"]
-    sl_val = config_data["sl"]
+    fallback_lot = float(config_data.get("lot", 0.01) or 0.01)
+    risk_percent = float(config_data.get("risk_percent", 1.0) or 0.0)
+    max_positions = int(config_data.get("max_positions", 0) or 0)
+    enable_buy = bool(config_data.get("enable_buy", True))
+    enable_sell = bool(config_data.get("enable_sell", True))
+    pullback_enabled = bool(config_data.get("enable_pullback", config_data.get("pullback_enabled", False)))
+    pullback_pips = float(config_data.get("pullback_pips", 0) or 0)
+    tp_type = bool(config_data["tp_type"])
+    tp_val = float(config_data["tp"])
+    sl_type = bool(config_data["sl_type"])
+    sl_val = float(config_data["sl"])
     candle = config_data["candle"]
-    delay = config_data.get("order_delay", 0.0)
+    delay = float(config_data.get("order_delay", 0.0) or 0.0)
     symbol = config_data.get("symbol", SYMBOL_DEFAULT)
+
+    symbol_ok, symbol_detail = _ensure_symbol_ready(symbol)
+    if not symbol_ok:
+        emit_log(f"[order] blocked: {symbol_detail}", "error")
+        return None
 
     if min_pips is None:
         raise KeyError('config_data must contain "min_pips" (or legacy "pips")')
 
-    pips = body_pips(candle[1], candle[4])
-
-    # candle body filter
+    pips = body_pips(_candle_value(candle, 1, "open"), _candle_value(candle, 4, "close"))
     if not (float(min_pips) <= abs(pips) <= float(max_pips)):
         return None
 
-    tick = mt5.symbol_info_tick(symbol)
+    tick = mt5.symbol_info_tick(symbol) if mt5_available() else _tick_for(symbol)
     if tick is None:
         return None
 
-    forced_side = config_data.get("forced_side")  # "buy"/"sell"/None
+    if max_positions > 0:
+        if _open_positions_count(symbol) >= max_positions:
+            return None
 
+    forced_side = config_data.get("forced_side")
     if forced_side == "buy":
+        if pips >= 0 or not enable_buy:
+            return None
         order_type = mt5.ORDER_TYPE_BUY
-        entry_price = tick.ask
+        entry_price = float(tick.ask)
     elif forced_side == "sell":
+        if pips <= 0 or not enable_sell:
+            return None
         order_type = mt5.ORDER_TYPE_SELL
-        entry_price = tick.bid
+        entry_price = float(tick.bid)
     else:
-        # fallback: direction by candle body
         if pips < 0:
+            if not enable_buy:
+                return None
             order_type = mt5.ORDER_TYPE_BUY
-            entry_price = tick.ask
+            entry_price = float(tick.ask)
         else:
+            if not enable_sell:
+                return None
             order_type = mt5.ORDER_TYPE_SELL
-            entry_price = tick.bid
+            entry_price = float(tick.bid)
 
-    if tp_type:
-        tp = (entry_price + (tp_val / 10)) if order_type == mt5.ORDER_TYPE_BUY else (entry_price - (tp_val / 10))
-    else:
-        tp = float(tp_val)
+    if pullback_enabled and pullback_pips > 0 and not mt5_available():
+        # In simulation mode we skip pullback enforcement against real positions.
+        pass
 
-    if sl_type:
-        sl = (entry_price - (sl_val / 10)) if order_type == mt5.ORDER_TYPE_BUY else (entry_price + (sl_val / 10))
-    else:
-        sl = float(sl_val)
+    tp = (entry_price + (tp_val / 10)) if tp_type and order_type == mt5.ORDER_TYPE_BUY else (
+        (entry_price - (tp_val / 10)) if tp_type else float(tp_val)
+    )
+    sl = (entry_price - (sl_val / 10)) if sl_type and order_type == mt5.ORDER_TYPE_BUY else (
+        (entry_price + (sl_val / 10)) if sl_type else float(sl_val)
+    )
+    lot = _risk_adjusted_volume(symbol, order_type, entry_price, sl, risk_percent, fallback_lot)
+    side_label = "BUY" if order_type == mt5.ORDER_TYPE_BUY else "SELL"
 
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
@@ -98,470 +969,410 @@ def open_order_strategy(config_data):
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
 
-    if delay and delay > 0:
-        time.sleep(float(delay))
+    if delay > 0:
+        time.sleep(delay)
 
-    return mt5.order_send(request)
-
-
-# ===================== Strategy Service (updated: pending stays forever) =====================
-
-class StrategyService:
-    def __init__(self):
-        self.running: bool = False
-        self.config: Dict = {}
-        self._thread: Optional[threading.Thread] = None
-        self._stop_flag = threading.Event()
-
-        # Liquidity items stored here
-        # item: {id, price, side, triggered}
-        self.liquidity: List[Dict] = []
-
-        # to avoid spamming orders every loop
-        self._last_trade_time = 0.0
-        self.min_trade_interval_sec = 2.0  # simple safety
-
-        # ✅ pending liquidity confirmation state (REPLACE behavior, NO TIMEOUT)
-        # stays until confirmation candle occurs OR another liquidity hit replaces it
-        self.pending_liq: Optional[Dict] = None
-        # example: {"id": "...", "side": "buy"/"sell", "price": 0.0, "armed_at": time.time()}
-
-        # ✅ volume confirmation settings
-        self.volume_lookback: int = 20
-        self.volume_rule: str = "above_avg"  # "above_avg" | "max" | "min"
-        self.last_event: str = ""
-        self.last_event_at: float = 0.0
-        self.events: List[Dict] = []
-        self.max_events: int = 300
-        self._last_non_liq_candle_time: int = 0
-
-    # ---------- MT5 helpers ----------
-
-    def _ensure_mt5(self) -> bool:
-        if mt5.initialize():
-            return True
-        return False
-
-    def _get_last_closed_candle(self, symbol: str, timeframe: int):
-        """
-        Returns a row like:
-        [time, open, high, low, close, tick_volume, spread, real_volume]
-        """
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 1, 1)  # pos=1 = last CLOSED candle
-        if rates is None or len(rates) == 0:
-            return None
-        r = rates[0]
-        return [r["time"], r["open"], r["high"], r["low"], r["close"], r["tick_volume"], r["spread"], r["real_volume"]]
-
-    def _get_recent_closed_candles(self, symbol: str, timeframe: int, count: int):
-        """
-        Returns list of rows (oldest->newest):
-        [time, open, high, low, close, tick_volume, spread, real_volume]
-        """
-        if count <= 0:
-            return []
-
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 1, count)  # last `count` CLOSED candles
-        if rates is None or len(rates) == 0:
-            return []
-
-        out = []
-        for r in rates:
-            out.append([r["time"], r["open"], r["high"], r["low"], r["close"], r["tick_volume"], r["spread"], r["real_volume"]])
-        return out
-
-    def _candle_side(self, candle_row) -> str:
-        o = float(candle_row[1])
-        c = float(candle_row[4])
-        if c > o:
-            return "buy"
-        if c < o:
-            return "sell"
-        return "neutral"
-
-    def _volume_ok(self, symbol: str, timeframe: int, candle_row) -> bool:
-        """
-        preferred volume rule:
-          - above_avg: tick_volume >= avg(last N closed candles tick_volume)
-          - max: tick_volume >= max(last N closed candles tick_volume)
-          - min: tick_volume <= min(last N closed candles tick_volume)
-        """
-        try:
-            v = float(candle_row[5] or 0.0)  # tick_volume at index 5
-        except Exception:
-            return True
-
-        candles = self._get_recent_closed_candles(symbol, timeframe, self.volume_lookback)
-        if not candles:
-            return True
-
-        vols = []
-        for r in candles:
-            try:
-                vols.append(float(r[5] or 0.0))
-            except Exception:
-                pass
-
-        if not vols:
-            return True
-
-        if self.volume_rule == "max":
-            return v >= max(vols)
-        if self.volume_rule == "min":
-            return v <= min(vols)
-
-        avg = sum(vols) / len(vols)
-        return v >= avg
-
-    # ---------- Public API ----------
-
-    def _set_event(self, text: str):
-        if text == self.last_event:
-            return
-        self.last_event = text
-        self.last_event_at = time.time()
-        self.events.append({"text": text, "at": self.last_event_at})
-        if len(self.events) > self.max_events:
-            self.events = self.events[-self.max_events :]
-        print(f"[strategy] {text}")
-
-    def _parse_iso_timestamp(self, raw) -> Optional[float]:
-        if not raw:
-            return None
-        try:
-            s = str(raw).strip()
-            if s.endswith("Z"):
-                s = s[:-1] + "+00:00"
-            return float(datetime.fromisoformat(s).timestamp())
-        except Exception:
-            return None
-
-    def _in_window(self, now_ts: float) -> bool:
-        start_at = self._parse_iso_timestamp(self.config.get("start_time"))
-        end_enabled = bool(self.config.get("end_time_enabled"))
-        end_at = self._parse_iso_timestamp(self.config.get("end_time")) if end_enabled else None
-
-        if start_at and now_ts < start_at:
-            self._set_event(f"waiting_start_time:{datetime.fromtimestamp(start_at).isoformat()}")
-            return False
-
-        if end_enabled and end_at and now_ts >= end_at:
-            self._set_event(f"end_time_reached:{datetime.fromtimestamp(end_at).isoformat()}")
-            self.stop()
-            return False
-        return True
-
-    def get_status(self):
-        return {
-            "running": self.running,
-            "pending_liq": self.pending_liq,
-            "config": self.config,
-            "last_event": self.last_event,
-            "last_event_at": self.last_event_at,
-            "events": self.events,
-        }
-
-    def _is_order_success(self, retcode) -> bool:
-        """
-        MT5 success retcodes for trade requests.
-        10009: DONE, 10010: DONE_PARTIAL, 10008: PLACED
-        """
-        if retcode is None:
-            return False
-        success_codes = {
-            getattr(mt5, "TRADE_RETCODE_DONE", 10009),
-            getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010),
-            getattr(mt5, "TRADE_RETCODE_PLACED", 10008),
-        }
-        try:
-            return int(retcode) in success_codes
-        except Exception:
-            return False
-
-    def start(self, config: dict):
-        self.config = dict(config)
-        self.running = True
-        self._stop_flag.clear()
-
-        # keep pending_liq as-is or reset?
-        # Usually reset when starting to avoid stale intent:
-        self.pending_liq = None
-        self.events = []
-        self._last_non_liq_candle_time = 0
-        self._set_event("started")
-
-        if self._thread is None or not self._thread.is_alive():
-            self._thread = threading.Thread(target=self._run_loop, daemon=True)
-            self._thread.start()
-
-    def stop(self):
-        self.running = False
-        self._stop_flag.set()
-        self.pending_liq = None
-        self._set_event("stopped")
-
-    # ---------- Liquidity CRUD ----------
-
-    def get_liquidity(self):
-        return self.liquidity
-
-    def add_liquidity(self, price: float, side: str):
-        item = {
-            "id": str(uuid.uuid4()),
-            "price": float(price),
-            "side": side,          # "buy" or "sell"
-            "triggered": False,
-        }
-        self.liquidity.append(item)
-        return item
-
-    def update_liquidity(self, liq_id: str, price: float):
-        for l in self.liquidity:
-            if l["id"] == liq_id and not l["triggered"]:
-                l["price"] = float(price)
-                return l
+    check_ok, check_detail = _check_request(request)
+    if not check_ok:
+        emit_log(f"[order] blocked {side_label} {symbol} reason={check_detail}", "warning")
         return None
 
-    def delete_liquidity(self, liq_id: str):
-        self.liquidity = [l for l in self.liquidity if l["id"] != liq_id]
-        if self.pending_liq and self.pending_liq.get("id") == liq_id:
-            self.pending_liq = None
+    result = mt5.order_send(request) if mt5_available() else None
+    done = bool(result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE) or not mt5_available()
+    if done:
+        append_list(
+            "orders",
+            {
+                "id": str(uuid4()),
+                "ticket": getattr(result, "order", int(time.time() * 1000)),
+                "symbol": symbol,
+                "side": side_label,
+                "lot": float(lot),
+                "entry": round(float(entry_price), 2),
+                "tp": round(float(tp), 2),
+                "sl": round(float(sl), 2),
+                "status": "open",
+                "origin": "strategy",
+                "created_at": datetime.now().isoformat(),
+            },
+            limit=2000,
+        )
+        emit_log(f"[order] success {side_label} {symbol}", "success")
+        _clone_trade_to_sub_accounts(request, origin="strategy")
+        return result or SimpleNamespace(retcode=mt5.TRADE_RETCODE_DONE, order=int(time.time() * 1000))
 
-    # ---------- Runner loop ----------
+    emit_log(
+        f"[order] failed {side_label} {symbol} retcode={getattr(result, 'retcode', None)} comment={getattr(result, 'comment', mt5.last_error())}",
+        "error",
+    )
+    return None
 
-    def _run_loop(self):
-        """
-        Supports 2 modes:
-          - use_liquidity=True: wait for liquidity hit, then confirm by candle side + volume
-          - use_liquidity=False: trade directly on candle side + volume conditions
-        """
-        if not self._ensure_mt5():
-            self.running = False
+
+class LiquidityManager:
+    def __init__(self, symbol: str = SYMBOL_DEFAULT, timeframe=mt5.TIMEFRAME_M1):
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.leq_list: list[Liquidity] = []
+        self.active_liq: Optional[Liquidity] = None
+        self.orders_opened: int = 0
+        self.orders_limit_total: int = 0
+        self.last_stop_reason: Optional[str] = None
+        self._last_global_candle_time: Optional[int] = None
+        self._last_pos_candle_time: Optional[int] = None
+        self._wait_close_after_leq_trigger: bool = False
+        self._concurrent_lock_after_close: bool = False
+        self._open_positions_peak: int = 0
+        self._last_open_positions: Optional[int] = None
+        self._max_positions_pause_logged: bool = False
+        self._lock = threading.Lock()
+
+    def add(self, liq: Liquidity):
+        with self._lock:
+            self.leq_list.append(liq)
+            replace_list(
+                "liquidity_levels",
+                [
+                    {
+                        "id": idx + 1,
+                        "price": round(x.price, 2),
+                        "side": x.side.upper(),
+                        "state": "Triggered" if x.triggered else "Pending",
+                    }
+                    for idx, x in enumerate(self.leq_list)
+                ],
+            )
+
+    def remove(self, liq_id: int):
+        with self._lock:
+            if 0 <= liq_id - 1 < len(self.leq_list):
+                self.leq_list.pop(liq_id - 1)
+            replace_list(
+                "liquidity_levels",
+                [
+                    {
+                        "id": idx + 1,
+                        "price": round(x.price, 2),
+                        "side": x.side.upper(),
+                        "state": "Triggered" if x.triggered else "Pending",
+                    }
+                    for idx, x in enumerate(self.leq_list)
+                ],
+            )
+
+    def clear_active(self):
+        with self._lock:
+            self.active_liq = None
+
+    def set_orders_limit(self, orders_limit: int):
+        with self._lock:
+            self.orders_limit_total = max(0, int(orders_limit or 0))
+
+    def _stop_strategy_now(self, reason: Optional[str] = None):
+        if reason:
+            self.last_stop_reason = reason
+            emit_log(f"[strategy] {reason}", "warning")
+        stop_task("search_global")
+        stop_task("search_leq")
+        stop_task("pos_search")
+        self.clear_active()
+        patch_path(
+            "strategy",
+            {
+                "running": False,
+                "tasks": [],
+                "last_stop_reason": self.last_stop_reason,
+            },
+        )
+
+    @staticmethod
+    def _is_trade_done(result) -> bool:
+        return result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE
+
+    def _register_result_and_enforce_limit(self, result):
+        if not self._is_trade_done(result):
+            return
+        with self._lock:
+            self.orders_opened += 1
+            limit = int(self.orders_limit_total or 0)
+            reached_limit = limit > 0 and self.orders_opened >= limit
+        if reached_limit:
+            self._stop_strategy_now(f"Orders limit reached ({self.orders_opened}/{limit}). Strategy stopped.")
+
+    def _touched_tick(self, liq: Liquidity, tick) -> bool:
+        if liq.side == "buy":
+            return float(tick.ask) <= float(liq.price)
+        return float(tick.bid) >= float(liq.price)
+
+    def _symbol_open_positions(self) -> int:
+        return _open_positions_count(self.symbol)
+
+    @staticmethod
+    def _max_positions_from_config(base_config: dict) -> int:
+        return int(base_config.get("max_positions", 0) or 0)
+
+    def _active_liq_side(self) -> Optional[str]:
+        with self._lock:
+            return self.active_liq.side if self.active_liq else None
+
+    def _clear_active_liquidity(self, remove_from_list: bool = False):
+        with self._lock:
+            liq = self.active_liq
+            if liq is None:
+                return
+            if remove_from_list:
+                try:
+                    self.leq_list.remove(liq)
+                except ValueError:
+                    pass
+            self.active_liq = None
+            self._last_pos_candle_time = None
+            self._wait_close_after_leq_trigger = False
+
+    def _concurrent_positions_locked(self, base_config: dict) -> bool:
+        max_positions = self._max_positions_from_config(base_config)
+        if max_positions <= 0:
+            return False
+        stop_on_first_close = bool(base_config.get("stop_on_first_close", False))
+
+        open_positions = self._symbol_open_positions()
+        with self._lock:
+            if self._last_open_positions is None:
+                self._last_open_positions = open_positions
+                self._open_positions_peak = max(self._open_positions_peak, open_positions)
+                return False
+            if open_positions > self._open_positions_peak:
+                self._open_positions_peak = open_positions
+            if not self._concurrent_lock_after_close and self._open_positions_peak > 0 and open_positions < self._open_positions_peak:
+                self._concurrent_lock_after_close = True
+                reason = (
+                    "A position closed (TP/SL). Strategy stopped (stop_on_first_close enabled)."
+                    if stop_on_first_close
+                    else "Concurrent mode: a position closed (TP/SL). New positions disabled until strategy restart."
+                )
+                if stop_on_first_close:
+                    self._stop_strategy_now(reason)
+                    return True
+                if not self.last_stop_reason:
+                    self.last_stop_reason = reason
+            self._last_open_positions = open_positions
+            return self._concurrent_lock_after_close
+
+    def _active_liq_reached_max_positions(self, base_config: dict) -> bool:
+        side = self._active_liq_side()
+        if side is None:
+            return False
+        max_positions = self._max_positions_from_config(base_config)
+        if max_positions <= 0:
+            return False
+        return self._symbol_open_positions() >= max_positions
+
+    def global_search_tick(self, base_config: dict):
+        if self._concurrent_positions_locked(base_config):
+            return
+        candle = wait_for_new_candle(self.timeframe, symbol=self.symbol)
+        if candle is None:
+            return
+        candle_time = int(candle["time"])
+        with self._lock:
+            if candle_time == self._last_global_candle_time:
+                return
+            self._last_global_candle_time = candle_time
+        cfg = base_config.copy()
+        cfg["symbol"] = self.symbol
+        cfg["candle"] = candle
+        cfg.pop("forced_side", None)
+        result = open_order_strategy(cfg)
+        self._register_result_and_enforce_limit(result)
+
+    def search_leq_tick(self, base_config: dict):
+        if self._concurrent_positions_locked(base_config):
+            stop_task("pos_search")
+            self._clear_active_liquidity(remove_from_list=False)
+            return
+        max_positions = self._max_positions_from_config(base_config)
+        if max_positions > 0 and self._symbol_open_positions() >= max_positions:
+            stop_task("pos_search")
+            self._clear_active_liquidity(remove_from_list=False)
+            if not self.last_stop_reason:
+                self.last_stop_reason = "Liquidity mode paused at max positions."
             return
 
-        while not self._stop_flag.is_set():
-            try:
-                symbol = self.config.get("symbol", SYMBOL_DEFAULT)
-                timeframe = int(self.config.get("timeframe", mt5.TIMEFRAME_M1))
-                use_liquidity = bool(self.config.get("use_liquidity", True))
-                now = time.time()
+        tick = mt5.symbol_info_tick(self.symbol) if mt5_available() else _tick_for(self.symbol)
+        if tick is None:
+            return
 
-                if not self._in_window(now):
-                    time.sleep(0.25)
-                    continue
+        with self._lock:
+            if self.active_liq is not None:
+                return
+            candidates = [l for l in self.leq_list if not l.triggered]
+            if not candidates:
+                return
 
-                tick = mt5.symbol_info_tick(symbol)
-                if tick is None:
-                    time.sleep(0.25)
-                    continue
+        triggered_liq = None
+        for liq in candidates:
+            if self._touched_tick(liq, tick):
+                triggered_liq = liq
+                break
+        if triggered_liq is None:
+            return
 
-                if use_liquidity:
-                    for liq in self.liquidity:
-                        if liq["triggered"]:
-                            continue
+        with self._lock:
+            triggered_liq.triggered = True
+            self.active_liq = triggered_liq
+            self._last_pos_candle_time = None
+            self._wait_close_after_leq_trigger = True
+        emit_log(f"[liquidity] triggered side={triggered_liq.side} level={triggered_liq.price}", "info")
 
-                        price = float(liq["price"])
-                        side = liq["side"]
+        stop_task("pos_search")
+        cfg = base_config.copy()
+        cfg["symbol"] = self.symbol
+        cfg["forced_side"] = triggered_liq.side
+        start_task("pos_search", lambda: self.pos_search_tick(cfg), interval_sec=1, start_time=datetime.now())
 
-                        hit = False
-                        if side == "buy" and tick.ask <= price:
-                            hit = True
-                        elif side == "sell" and tick.bid >= price:
-                            hit = True
+    def pos_search_tick(self, cfg: dict):
+        with self._lock:
+            liq = self.active_liq
+        if liq is None:
+            stop_task("pos_search")
+            return
+        if self._concurrent_positions_locked(cfg):
+            self._clear_active_liquidity(remove_from_list=True)
+            stop_task("pos_search")
+            return
+        if self._active_liq_reached_max_positions(cfg):
+            self._clear_active_liquidity(remove_from_list=True)
+            stop_task("pos_search")
+            return
 
-                        if hit:
-                            liq["triggered"] = True
-                            self.pending_liq = {
-                                "id": liq["id"],
-                                "side": side,
-                                "price": price,
-                                "armed_at": time.time(),
-                                "armed_candle_time": None,
-                                "orders_opened": 0,
-                            }
-                            self._set_event(f"liquidity_triggered:{side}@{price}")
-                            break
-                else:
-                    self.pending_liq = None
+        candle = wait_for_new_candle(self.timeframe, symbol=self.symbol)
+        if candle is None:
+            return
+        candle_time = int(candle["time"])
+        with self._lock:
+            if candle_time == self._last_pos_candle_time:
+                return
+            self._last_pos_candle_time = candle_time
+            if self._wait_close_after_leq_trigger:
+                self._wait_close_after_leq_trigger = False
+                return
 
-                candle = self._get_last_closed_candle(symbol, timeframe)
-                if candle is None:
-                    time.sleep(0.25)
-                    continue
+        cfg["candle"] = candle
+        cfg["forced_side"] = liq.side
+        result = open_order_strategy(cfg)
+        if self._is_trade_done(result):
+            self._register_result_and_enforce_limit(result)
+            if self._active_liq_reached_max_positions(cfg):
+                self._clear_active_liquidity(remove_from_list=True)
+                stop_task("pos_search")
 
-                if now - self._last_trade_time < self.min_trade_interval_sec:
-                    time.sleep(0.2)
-                    continue
 
-                allow_buy = bool(self.config.get("enable_buy", True))
-                allow_sell = bool(self.config.get("enable_sell", True))
-                max_orders = max(1, int(self.config.get("max_orders", 1)))
-                c_time = int(candle[0])
+manager = LiquidityManager(symbol=SYMBOL_DEFAULT, timeframe=mt5.TIMEFRAME_M1)
 
-                if not use_liquidity:
-                    if c_time <= int(self._last_non_liq_candle_time):
-                        time.sleep(0.2)
-                        continue
-                    self._last_non_liq_candle_time = c_time
 
-                    desired = self._candle_side(candle)
-                    if desired == "neutral":
-                        self._set_event(f"candle_neutral_skip candle={c_time}")
-                        time.sleep(0.2)
-                        continue
+def strategy_status() -> dict:
+    return get("strategy", {})
 
-                    if desired == "buy" and not allow_buy:
-                        self._set_event("entry_blocked_buy_disabled")
-                        time.sleep(0.2)
-                        continue
-                    if desired == "sell" and not allow_sell:
-                        self._set_event("entry_blocked_sell_disabled")
-                        time.sleep(0.2)
-                        continue
 
-                    if not self._volume_ok(symbol, timeframe, candle):
-                        self._set_event(
-                            f"candle_wait_volume rule={self.volume_rule} candle={c_time}"
-                        )
-                        time.sleep(0.2)
-                        continue
+def start_strategy_system(
+    base_config_data: dict,
+    interval_sec: int = 1,
+    liquidity_enabled: bool = True,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    end_time_enabled: bool = False,
+):
+    master_ok, master_detail, _master, _cfg = _ensure_master_session()
+    if not master_ok:
+        raise RuntimeError(master_detail)
 
-                    cfg = dict(self.config)
-                    cfg["candle"] = candle
-                    cfg["forced_side"] = desired
+    with manager._lock:
+        manager.timeframe = _resolve_timeframe(base_config_data.get("timeframe", mt5.TIMEFRAME_M1))
+        manager.orders_opened = 0
+        manager.orders_limit_total = int(base_config_data.get("orders_limit", base_config_data.get("max_orders", 0)) or 0)
+        manager.last_stop_reason = None
+        manager.active_liq = None
+        manager._last_global_candle_time = None
+        manager._last_pos_candle_time = None
+        manager._wait_close_after_leq_trigger = False
+        manager._concurrent_lock_after_close = False
+        manager._open_positions_peak = 0
+        manager._last_open_positions = None
+        manager._max_positions_pause_logged = False
 
-                    opened_this_round = 0
-                    failed_retcode = None
-                    for _ in range(max_orders):
-                        result = open_order_strategy(cfg)
-                        if result is None:
-                            failed_retcode = None
-                            break
+    strategy_start = start_time if isinstance(start_time, datetime) else datetime.now()
 
-                        retcode = getattr(result, "retcode", None)
-                        self._set_event(f"order_attempt side={desired} retcode={retcode}")
-                        if not self._is_order_success(retcode):
-                            failed_retcode = retcode
-                            break
-                        opened_this_round += 1
+    def on_strategy_end():
+        try:
+            stop_task("search_global")
+            stop_task("search_leq")
+            stop_task("pos_search")
+            if not manager.last_stop_reason:
+                manager.last_stop_reason = "End time reached. Closing all open positions."
+            emit_log(f"[strategy] {manager.last_stop_reason}", "warning")
+            manager.clear_active()
+            close_all_positions(symbol=manager.symbol)
+            patch_path("strategy", {"running": False, "tasks": [], "last_stop_reason": manager.last_stop_reason})
+        except Exception as ex:
+            emit_log(f"[strategy_end] error: {ex}", "error")
 
-                    if opened_this_round > 0:
-                        self._last_trade_time = time.time()
-                        self._set_event(
-                            f"candle_confirmed_trade_opened side={desired} opened={opened_this_round}/{max_orders}"
-                        )
-                    else:
-                        if failed_retcode is None:
-                            self._set_event("order_skipped_by_filters_or_tick")
-                        else:
-                            self._set_event(
-                                f"order_rejected_wait_next_candle side={desired} retcode={failed_retcode}"
-                            )
+    if liquidity_enabled:
+        stop_task("search_global")
+        stop_task("pos_search")
+        start_task(
+            "search_leq",
+            lambda: manager.search_leq_tick(base_config_data),
+            interval_sec=interval_sec,
+            start_time=strategy_start,
+            end_time=end_time,
+            end_time_enabled=end_time_enabled,
+            on_task_end=on_strategy_end if end_time_enabled else None,
+        )
+        tasks = ["search_leq", "pos_search"]
+        mode = "search_leq"
+    else:
+        start_task(
+            "search_global",
+            lambda: manager.global_search_tick(base_config_data),
+            interval_sec=interval_sec,
+            start_time=strategy_start,
+            end_time=end_time,
+            end_time_enabled=end_time_enabled,
+            on_task_end=on_strategy_end if end_time_enabled else None,
+        )
+        stop_task("search_leq")
+        stop_task("pos_search")
+        manager.clear_active()
+        tasks = ["search_global"]
+        mode = "search_global"
 
-                    time.sleep(0.2)
-                    continue
+    patch_path(
+        "strategy",
+        {
+            "running": True,
+            "mode": mode,
+            "started_at": datetime.now().isoformat(),
+            "tasks": tasks,
+            "start_time": strategy_start.isoformat(),
+            "end_time": end_time.isoformat() if isinstance(end_time, datetime) else None,
+            "last_stop_reason": None,
+        },
+    )
+    append_log("search", f"[SUCCESS] Strategy started in {mode} mode.")
 
-                if not self.pending_liq:
-                    time.sleep(0.2)
-                    continue
 
-                desired = self.pending_liq["side"]
-                opened = int(self.pending_liq.get("orders_opened", 0))
+def stop_strategy_system():
+    stop_task("search_global")
+    stop_task("search_leq")
+    stop_task("pos_search")
+    manager.clear_active()
+    patch_path("strategy", {"running": False, "tasks": [], "last_stop_reason": manager.last_stop_reason})
+    append_log("search", "[WARNING] Manual stop requested.")
 
-                if desired == "buy" and not allow_buy:
-                    self._set_event("entry_blocked_buy_disabled")
-                    time.sleep(0.2)
-                    continue
-                if desired == "sell" and not allow_sell:
-                    self._set_event("entry_blocked_sell_disabled")
-                    time.sleep(0.2)
-                    continue
 
-                if opened >= max_orders:
-                    liq_id = self.pending_liq.get("id")
-                    self.liquidity = [l for l in self.liquidity if l.get("id") != liq_id]
-                    self.pending_liq = None
-                    self._set_event(f"max_orders_reached removed_liq={liq_id}")
-                    time.sleep(0.2)
-                    continue
-
-                if self.pending_liq.get("armed_candle_time") is None:
-                    self.pending_liq["armed_candle_time"] = c_time
-                    self._set_event(f"pending_wait_next_candle from {c_time} for {desired}")
-                    time.sleep(0.2)
-                    continue
-
-                if c_time <= int(self.pending_liq.get("armed_candle_time", 0)):
-                    time.sleep(0.2)
-                    continue
-
-                if c_time == int(self.pending_liq.get("last_attempt_candle_time", 0)):
-                    time.sleep(0.2)
-                    continue
-
-                c_side = self._candle_side(candle)
-                if c_side != desired:
-                    self._set_event(
-                        f"pending_wait_direction need={desired} got={c_side} candle={c_time}"
-                    )
-                    time.sleep(0.2)
-                    continue
-
-                if not self._volume_ok(symbol, timeframe, candle):
-                    self._set_event(
-                        f"pending_wait_volume rule={self.volume_rule} candle={c_time}"
-                    )
-                    time.sleep(0.2)
-                    continue
-
-                self.pending_liq["last_attempt_candle_time"] = c_time
-
-                cfg = dict(self.config)
-                cfg["candle"] = candle
-                cfg["forced_side"] = desired
-
-                remaining = max(0, max_orders - opened)
-                opened_this_round = 0
-                failed_retcode = None
-                for _ in range(remaining):
-                    result = open_order_strategy(cfg)
-                    if result is None:
-                        failed_retcode = None
-                        break
-
-                    retcode = getattr(result, "retcode", None)
-                    self._set_event(f"order_attempt side={desired} retcode={retcode}")
-                    if not self._is_order_success(retcode):
-                        failed_retcode = retcode
-                        break
-                    opened_this_round += 1
-
-                if opened_this_round > 0:
-                    self._last_trade_time = time.time()
-                    self.pending_liq["orders_opened"] = int(self.pending_liq.get("orders_opened", 0)) + opened_this_round
-                    opened = int(self.pending_liq.get("orders_opened", 0))
-                    if opened >= max_orders:
-                        liq_id = self.pending_liq.get("id")
-                        self.liquidity = [l for l in self.liquidity if l.get("id") != liq_id]
-                        self._set_event(
-                            f"pending_confirmed_trade_opened opened={opened}/{max_orders} removed_liq={liq_id}"
-                        )
-                        self.pending_liq = None
-                    else:
-                        self._set_event(f"pending_partial_fill opened={opened}/{max_orders}")
-                else:
-                    if failed_retcode is None:
-                        self._set_event("order_skipped_by_filters_or_tick")
-                    else:
-                        self._set_event(
-                            f"order_rejected_wait_next_candle side={desired} retcode={failed_retcode}"
-                        )
-
-                time.sleep(0.2)
-
-            except Exception as e:
-                self._set_event(f"loop_error:{e}")
-                time.sleep(0.5)
-
-strategy_service = StrategyService()
-
+def running_tasks() -> dict[str, bool]:
+    return {
+        "search_global": is_task_running("search_global"),
+        "search_leq": is_task_running("search_leq"),
+        "pos_search": is_task_running("pos_search"),
+        "account_management": is_task_running("account_management"),
+    }

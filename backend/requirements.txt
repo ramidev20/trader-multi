@@ -1,5 +1,4 @@
-fastapi
-uvicorn[standard]
-MetaTrader5
-python-dotenv
-python-jose
+fastapi==0.115.12
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-multipart==0.0.12

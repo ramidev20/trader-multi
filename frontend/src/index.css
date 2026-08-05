@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: "Inter", "Segoe UI", sans-serif;
+}
+
+.table-frame {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.table-frame__scroll {
+  height: 100%;
+  overflow: auto;
+}
+
+.table-frame td,
+.table-frame th {
+  vertical-align: top;
+}
+
+.log-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.log-list__line {
+  padding: 4px 8px;
+  color: #94a3b8;
+}
+
+.log-list__line--success { color: #34d399; }
+.log-list__line--warning { color: #fbbf24; }
+.log-list__line--error { color: #fb7185; }
+
+.note-hint {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid #cbd5e1;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #64748b;
+  cursor: help;
+}
+
+.note-hint:hover,
+.note-hint:focus-visible {
+  border-color: #93c5fd;
+  color: #2563eb;
+  outline: none;
+}
+

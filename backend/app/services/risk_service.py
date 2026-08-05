@@ -1,203 +1,88 @@
-import threading
-import time
-from dataclasses import dataclass, asdict
-from datetime import datetime, time as dtime
-from typing import Optional, Dict, Any
+from __future__ import annotations
 
-import MetaTrader5 as mt5
+from datetime import datetime
+from typing import Any
 
-from app.services.mt5_service import (
-    is_logged_in,
-    get_account_info,
-    get_open_positions,
-    close_all_positions,
-)
-from app.services.strategy_service import strategy_service
+from .runtime_state import append_log, get, patch_path
+from .strategy_service import account_management, manager as strategy_manager, running_tasks, stop_strategy_system
+from .task_manager import is_task_running, start_task, stop_task
 
 
-@dataclass
-class RiskConfig:
-    enabled: bool = True
-    symbol: str = "XAUUSD"
-
-    # limits in account currency
-    maxDailyLoss: float = 250.0
-    maxDrawdown: float = 500.0
-    stopAfterProfit: float = 300.0
-    maxOpenPositions: int = 2
-
-    disableNewTradesOnLimit: bool = True
-    closePositionsOnLimit: bool = False
+def _strategy_running() -> bool:
+    tasks = running_tasks()
+    return tasks["search_global"] or tasks["search_leq"] or tasks["pos_search"]
 
 
-@dataclass
-class RiskStatus:
-    running: bool = False
-    limit_hit: bool = False
-    reason: Optional[str] = None
-    action_taken: Optional[str] = None
+def _monitor_tick(risk_percent: float, profit_percent: float, start_balance: float):
+    if not _strategy_running():
+        reason = strategy_manager.last_stop_reason
+        if reason:
+            append_log("risk", f"[WARNING] {reason}")
+        stop_task("account_management")
+        patch_path("risk_monitor", {"running": False})
+        return
 
-    balance: Optional[float] = None
-    equity: Optional[float] = None
-    floating_pnl: Optional[float] = None
-    today_pnl: Optional[float] = None
+    status, text_status, text = account_management(profit_percent, risk_percent, start_balance)
+    append_log("risk", f"[{text_status.upper()}] {text}")
 
-    config: Optional[Dict[str, Any]] = None
-
-
-class RiskService:
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._thread: Optional[threading.Thread] = None
-        self._stop = threading.Event()
-
-        self.config = RiskConfig()
-        self.status = RiskStatus(running=False, config=asdict(self.config))
-
-        self._peak_equity: Optional[float] = None
-        self.block_new_trades: bool = False
-
-    def start(self, cfg: Dict[str, Any]):
-        with self._lock:
-            base = asdict(RiskConfig())
-            base.update(cfg or {})
-            self.config = RiskConfig(**base)
-
-            self.status = RiskStatus(
-                running=True,
-                limit_hit=False,
-                reason=None,
-                action_taken=None,
-                config=asdict(self.config),
-            )
-            self._peak_equity = None
-            self.block_new_trades = False
-            self._stop.clear()
-
-            if self._thread is None or not self._thread.is_alive():
-                self._thread = threading.Thread(target=self._loop, daemon=True)
-                self._thread.start()
-
-    def stop(self):
-        with self._lock:
-            self.status.running = False
-            self._stop.set()
-
-    def get_status(self) -> Dict[str, Any]:
-        with self._lock:
-            return asdict(self.status)
-
-    def _today_realized_pnl(self) -> float:
-        if not is_logged_in():
-            return 0.0
-
-        now = datetime.now()
-        start = datetime.combine(now.date(), dtime(0, 0, 0))
-        end = now
-
-        deals = mt5.history_deals_get(start, end)
-        if deals is None:
-            return 0.0
-
-        total = 0.0
-        for d in deals:
-            try:
-                total += float(d.profit)
-            except Exception:
-                pass
-        return float(total)
-
-    def _hit(self, reason: str):
-        # stop strategy immediately
-        try:
-            strategy_service.stop()
-        except Exception:
-            pass
-
-        action = "strategy_stopped"
-
-        if self.config.closePositionsOnLimit:
-            try:
-                close_all_positions()
-                action += "+positions_closed"
-            except Exception:
-                action += "+close_failed"
-
-        if self.config.disableNewTradesOnLimit:
-            self.block_new_trades = True
-
-        self.status.limit_hit = True
-        self.status.reason = reason
-        self.status.action_taken = action
-
-    def _loop(self):
-        while not self._stop.is_set():
-            time.sleep(1.0)
-
-            with self._lock:
-                if not self.status.running:
-                    continue
-                if not self.config.enabled:
-                    continue
-
-                # if already hit, keep updating stats but don't trigger again
-                already_hit = bool(self.status.limit_hit)
-
-            if not is_logged_in():
-                with self._lock:
-                    self.status.balance = None
-                    self.status.equity = None
-                    self.status.floating_pnl = None
-                    self.status.today_pnl = None
-                continue
-
-            acc = get_account_info() or {}
-            balance = float(acc.get("balance") or 0.0)
-            equity = float(acc.get("equity") or 0.0)
-            floating = float(acc.get("profit") or 0.0)
-            today = float(self._today_realized_pnl())
-
-            open_positions = get_open_positions(symbol=None) or []
-            open_count = len(open_positions)
-
-            with self._lock:
-                self.status.balance = balance
-                self.status.equity = equity
-                self.status.floating_pnl = floating
-                self.status.today_pnl = today
-
-                if self._peak_equity is None:
-                    self._peak_equity = equity
-                else:
-                    self._peak_equity = max(self._peak_equity, equity)
-
-                if already_hit:
-                    continue
-
-                # drawdown check
-                if self.config.maxDrawdown and self.config.maxDrawdown > 0 and self._peak_equity is not None:
-                    dd = self._peak_equity - equity
-                    if dd >= float(self.config.maxDrawdown):
-                        self._hit(f"MaxDrawdown hit (dd={dd:.2f} >= {self.config.maxDrawdown:.2f})")
-                        continue
-
-                # daily loss
-                if self.config.maxDailyLoss and self.config.maxDailyLoss > 0:
-                    if today <= -float(self.config.maxDailyLoss):
-                        self._hit(f"MaxDailyLoss hit (today_pnl={today:.2f} <= -{self.config.maxDailyLoss:.2f})")
-                        continue
-
-                # stop after profit
-                if self.config.stopAfterProfit and self.config.stopAfterProfit > 0:
-                    if today >= float(self.config.stopAfterProfit):
-                        self._hit(f"StopAfterProfit hit (today_pnl={today:.2f} >= {self.config.stopAfterProfit:.2f})")
-                        continue
-
-                # max open positions
-                if self.config.maxOpenPositions and self.config.maxOpenPositions > 0:
-                    if open_count >= int(self.config.maxOpenPositions):
-                        self._hit(f"MaxOpenPositions hit (open={open_count} >= {self.config.maxOpenPositions})")
-                        continue
+    if not status:
+        stop_task("account_management")
+        stop_strategy_system()
+        patch_path("risk_monitor", {"running": False})
+        append_log("risk", "[WARNING] Strategy stopped due to account risk/profit rule.")
 
 
-risk_service = RiskService()
+def start_risk_monitor(
+    *,
+    risk_percent: float,
+    profit_percent: float,
+    orders_limit: int,
+    interval_sec: int,
+) -> dict[str, Any]:
+    if not _strategy_running():
+        return {"status": "error", "message": "Please start strategy first."}
+    if orders_limit <= 0:
+        return {"status": "error", "message": "Orders Limit must be at least 1."}
+
+    strategy_manager.set_orders_limit(orders_limit)
+
+    # Prefer MT5 equity when available; fallback to aggregated configured equity.
+    start_balance = 0.0
+    settings = get("bootstrap_cache.settings", {})
+    for acc in settings.get("trading_accounts", []):
+        start_balance += float(acc.get("equity", acc.get("balance", 0)) or 0)
+    if start_balance <= 0:
+        start_balance = 10000.0
+
+    strategy_task_start = datetime.now()
+    start_task(
+        "account_management",
+        _monitor_tick,
+        float(risk_percent),
+        float(profit_percent),
+        float(start_balance),
+        start_time=strategy_task_start,
+        interval_sec=max(1, int(interval_sec or 60)),
+    )
+    patch_path(
+        "risk_monitor",
+        {
+            "running": True,
+            "started_at": datetime.now().isoformat(),
+            "interval_sec": int(interval_sec),
+            "risk_percent": float(risk_percent),
+            "profit_percent": float(profit_percent),
+            "orders_limit": int(orders_limit),
+            "start_balance": float(start_balance),
+        },
+    )
+    append_log("risk", "[INFO] Risk monitor started.")
+    return {"status": "ok"}
+
+
+def stop_risk_monitor() -> dict[str, Any]:
+    if is_task_running("account_management"):
+        stop_task("account_management")
+    patch_path("risk_monitor", {"running": False})
+    append_log("risk", "[WARNING] Risk monitor stopped.")
+    return {"status": "ok"}

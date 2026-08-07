@@ -16,7 +16,6 @@ import dayjs from "dayjs";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { DesktopDatePicker } from "@mui/x-date-pickers/DesktopDatePicker";
-import { TimePicker } from "@mui/x-date-pickers/TimePicker";
 import { cx, decimalInput } from "../utils/format";
 import {
   AppButton,
@@ -36,13 +35,229 @@ function LogPanel({ logs }) {
   );
 }
 
+function formatTime12(value) {
+  const date = new Date(value);
+  const hour = date.getHours() % 12 || 12;
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${hour}:${minute} ${date.getHours() >= 12 ? "PM" : "AM"}`;
+}
+
+function WheelColumn({ values, selected, format = (item) => item, onChange }) {
+  const selectedIndex = Math.max(0, values.indexOf(selected));
+  const selectOffset = (offset) => {
+    const nextIndex = (selectedIndex + offset + values.length) % values.length;
+    onChange(values[nextIndex]);
+  };
+  return (
+    <div
+      className="w-20 overflow-hidden"
+      onWheel={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        selectOffset(event.deltaY > 0 ? 1 : -1);
+      }}
+    >
+      <div className="flex h-36 flex-col items-center justify-center">
+        {[-1, 0, 1].map((offset) => {
+          const index = (selectedIndex + offset + values.length) % values.length;
+          const isSelected = offset === 0;
+          return (
+            <button
+              key={`${String(values[index])}-${offset}`}
+              type="button"
+              onClick={() => onChange(values[index])}
+              className={`flex h-12 w-full items-center justify-center text-2xl font-normal transition ${
+                isSelected
+                  ? "border-y-2 border-blue-400 text-slate-950"
+                  : "text-slate-400 hover:text-slate-700"
+              }`}
+            >
+              {format(values[index])}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TimeWheelDialog({ value, title, onCancel, onConfirm }) {
+  const source = new Date(value);
+  const [hour, setHour] = useState(source.getHours() % 12 || 12);
+  const [minute, setMinute] = useState(source.getMinutes());
+  const [period, setPeriod] = useState(source.getHours() >= 12 ? "PM" : "AM");
+  const hours = Array.from({ length: 12 }, (_, index) => index + 1);
+  const minutes = Array.from({ length: 60 }, (_, index) => index);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
+  function confirm() {
+    const next = new Date(value);
+    let nextHour = hour % 12;
+    if (period === "PM") nextHour += 12;
+    next.setHours(nextHour, minute, 0, 0);
+    onConfirm(next);
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[1400] flex items-center justify-center bg-slate-950/35 p-4"
+      onWheel={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      <div className="w-full max-w-[430px] overflow-hidden rounded-2xl bg-white shadow-2xl">
+        <div className="border-b-2 border-blue-600 px-6 py-5 text-3xl font-light text-blue-600">
+          {title}
+        </div>
+        <div className="flex justify-center gap-3 px-6 py-7">
+          <WheelColumn values={hours} selected={hour} onChange={setHour} />
+          <WheelColumn
+            values={minutes}
+            selected={minute}
+            format={(item) => String(item).padStart(2, "0")}
+            onChange={setMinute}
+          />
+          <WheelColumn values={["AM", "PM"]} selected={period} onChange={setPeriod} />
+        </div>
+        <div className="flex border-t border-slate-300">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="flex-1 border-r border-slate-200 py-5 text-lg font-medium text-slate-950 hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={confirm}
+            className="flex-1 py-5 text-lg font-medium text-slate-950 hover:bg-slate-50"
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DateTimeField({ fieldKey, label, picker, value, onChange, openPicker, setPickerOpenState }) {
+  const Icon = picker === "date" ? CalendarDays : Clock3;
+  const pickerKey = fieldKey || `${label}-${picker}`;
+  const commonSlotProps = {
+    textField: {
+      fullWidth: true,
+      onClick: () => setPickerOpenState(pickerKey, true),
+      InputProps: {
+        endAdornment: <Icon className="h-4 w-4 text-slate-400" />,
+      },
+      sx: {
+        "& .MuiPickersInputBase-root": {
+          height: 46,
+          borderRadius: "1rem",
+          backgroundColor: "#ffffff",
+          fontSize: "0.875rem",
+          fontWeight: 600,
+          padding: "0 12px",
+        },
+        "& .MuiPickersOutlinedInput-notchedOutline": {
+          borderColor: "#cbd5e1",
+        },
+        "&:hover .MuiPickersOutlinedInput-notchedOutline": {
+          borderColor: "#60a5fa",
+        },
+        "& .MuiPickersInputBase-root.Mui-focused .MuiPickersOutlinedInput-notchedOutline": {
+          borderColor: "#3b82f6",
+          borderWidth: 1,
+        },
+        "& .MuiPickersInputBase-sectionContent": {
+          color: "#0f172a",
+          fontSize: "0.875rem",
+          fontWeight: 600,
+        },
+        "& .MuiPickersInputBase-input": {
+          padding: 0,
+        },
+        "& .MuiIconButton-root": {
+          color: "#64748b",
+          padding: 0,
+        },
+      },
+    },
+    popper: { placement: "bottom-start" },
+  };
+  const dayValue = dayjs(value);
+  const isOpen = openPicker === pickerKey;
+
+  return (
+    <>
+      <label className="block">
+        <span className="text-xs font-bold uppercase tracking-wide text-slate-500">{label}</span>
+        <div className="mt-1">
+          {picker === "date" ? (
+            <DesktopDatePicker
+              value={dayValue}
+              format="DD/MM/YYYY"
+              open={isOpen}
+              onOpen={() => setPickerOpenState(pickerKey, true)}
+              onClose={() => setPickerOpenState(pickerKey, false)}
+              onChange={(newValue) => {
+                if (newValue?.isValid?.()) {
+                  const next = new Date(value);
+                  next.setFullYear(newValue.year(), newValue.month(), newValue.date());
+                  onChange(next);
+                }
+              }}
+              slotProps={commonSlotProps}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setPickerOpenState(pickerKey, true)}
+              className="flex h-[46px] w-full items-center justify-between rounded-2xl border border-slate-300 bg-white px-3 text-left text-sm font-semibold leading-none text-slate-900 outline-none transition hover:border-blue-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+            >
+              <span>{formatTime12(value)}</span>
+              <Clock3 className="h-4 w-4 text-slate-400" />
+            </button>
+          )}
+        </div>
+      </label>
+      {picker === "time" && isOpen ? (
+        <TimeWheelDialog
+          value={value}
+          title="Select time"
+          onCancel={() => setPickerOpenState(pickerKey, false)}
+          onConfirm={(next) => {
+            onChange(next);
+            setPickerOpenState(pickerKey, false);
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
 export default function SearchPage({
   runtime,
+  searchLogs = [],
   onRefreshRuntime,
   onPickerInteractionChange = () => {},
+  timeRange,
+  onTimeRangeChange = () => {},
 }) {
   const timeframeOptions = ["M1", "M3", "M5", "M15"];
   const didHydrateDefaults = useRef(false);
+  const strategyCommand = useRef(null);
   const [activeTab, setActiveTab] = useState("search");
   const [showDefaultsDialog, setShowDefaultsDialog] = useState(false);
   const [errorText, setErrorText] = useState("");
@@ -50,11 +265,11 @@ export default function SearchPage({
   const [leqList, setLeqList] = useState([]);
   const [leqPrice, setLeqPrice] = useState("3348.20");
   const [leqSide, setLeqSide] = useState("BUY");
-  const [startDate, setStartDate] = useState(new Date());
-  const [startTime, setStartTime] = useState(new Date());
-  const [endDate, setEndDate] = useState(new Date());
-  const [endTime, setEndTime] = useState(new Date());
-  const [endEnabled, setEndEnabled] = useState(false);
+  const [startDate, setStartDate] = useState(() => timeRange?.startDate || new Date());
+  const [startTime, setStartTime] = useState(() => timeRange?.startTime || new Date());
+  const [endDate, setEndDate] = useState(() => timeRange?.endDate || new Date());
+  const [endTime, setEndTime] = useState(() => timeRange?.endTime || new Date());
+  const [endEnabled, setEndEnabled] = useState(() => timeRange?.endEnabled ?? false);
   const [pauseSearch, setPauseSearch] = useState(false);
   const [enableBuy, setEnableBuy] = useState(true);
   const [enableSell, setEnableSell] = useState(true);
@@ -63,26 +278,30 @@ export default function SearchPage({
   const [slPips, setSlPips] = useState(true);
   const [tpValue, setTpValue] = useState("400");
   const [slValue, setSlValue] = useState("200");
-  const [lotValue, setLotValue] = useState("0.03");
-  const [riskPercentValue, setRiskPercentValue] = useState("1");
+  const [calculatedLot, setCalculatedLot] = useState(null);
   const [timeframeValue, setTimeframeValue] = useState("M1");
   const [minPipsValue, setMinPipsValue] = useState("10");
   const [maxPipsValue, setMaxPipsValue] = useState("100");
   const [maxPositionsValue, setMaxPositionsValue] = useState("1");
   const [openPicker, setOpenPicker] = useState(null);
 
-  const logs = useMemo(() => runtime?.logs?.search || [], [runtime]);
+  const logs = useMemo(
+    () =>
+      [...new Set([...(runtime?.logs?.search || []), ...searchLogs])].filter(
+        (line) =>
+          !/Search defaults saved|scheduling task|task scheduled to start|Strategy started in .* mode/i.test(line),
+      ),
+    [runtime, searchLogs],
+  );
 
   function applySavedSearchConfig(searchConfig) {
     if (!searchConfig || typeof searchConfig !== "object") return;
     setTimeframeValue(String(searchConfig.timeframe ?? "M1"));
-    setLotValue(String(searchConfig.lot ?? 0.03));
     setMinPipsValue(String(searchConfig.pips ?? searchConfig.min_pips ?? 10));
     setMaxPipsValue(String(searchConfig.max_pips ?? 100));
     setMaxPositionsValue(String(searchConfig.max_positions ?? 1));
     setTpValue(String(searchConfig.tp ?? 400));
     setSlValue(String(searchConfig.sl ?? 200));
-    setRiskPercentValue(String(searchConfig.risk_percent ?? 1));
     setEnableBuy(Boolean(searchConfig.enable_buy ?? true));
     setEnableSell(Boolean(searchConfig.enable_sell ?? true));
     setLiquidityTrigger(Boolean(searchConfig.enable_liquidity ?? true));
@@ -91,7 +310,25 @@ export default function SearchPage({
     setSlPips(Boolean(searchConfig.sl_type ?? true));
   }
 
+  function updateTimeRange(field, value) {
+    const setters = {
+      startDate: setStartDate,
+      startTime: setStartTime,
+      endDate: setEndDate,
+      endTime: setEndTime,
+      endEnabled: setEndEnabled,
+    };
+    setters[field](value);
+    onTimeRangeChange((current) => ({ ...current, [field]: value }));
+  }
+
   useEffect(() => {
+    if (strategyCommand.current === "stopped" && runtime?.strategy?.running) {
+      return;
+    }
+    if (!runtime?.strategy?.running) {
+      strategyCommand.current = null;
+    }
     setStrategyRunning(Boolean(runtime?.strategy?.running));
     setLeqList(
       Array.isArray(runtime?.liquidity_levels) ? runtime.liquidity_levels : [],
@@ -102,10 +339,60 @@ export default function SearchPage({
       const saved = runtime?.bootstrap_cache?.settings?.search_config;
       if (saved) {
         applySavedSearchConfig(saved);
-        didHydrateDefaults.current = true;
       }
+      didHydrateDefaults.current = true;
     }
   }, [runtime]);
+
+  useEffect(() => {
+    if (!didHydrateDefaults.current) return undefined;
+    const timer = setTimeout(() => {
+      const normalizedMaxPositions = parseIntegerField(maxPositionsValue, 1, 1, 999);
+      const normalizedMinPips = parseIntegerField(minPipsValue, 0, 0, 99999);
+      const normalizedMaxPips = parseIntegerField(maxPipsValue, 100, 1, 99999);
+      const normalizedTp = tpPips ? parseIntegerField(tpValue, 400, 1, 99999) : parseDecimalField(tpValue, 400, 0.01, 99999, 2);
+      const normalizedSl = slPips ? parseIntegerField(slValue, 200, 1, 99999) : parseDecimalField(slValue, 200, 0.01, 99999, 2);
+      api.saveSearchConfig({
+        timeframe: timeframeValue,
+        max_positions: normalizedMaxPositions,
+        orders_limit: normalizedMaxPositions * 10,
+        pips: normalizedMinPips,
+        max_pips: normalizedMaxPips,
+        tp: normalizedTp,
+        sl: normalizedSl,
+        enable_liquidity: Boolean(liquidityTrigger),
+        enable_buy: Boolean(enableBuy),
+        enable_sell: Boolean(enableSell),
+        stop_on_first_close: Boolean(pauseSearch),
+        tp_type: Boolean(tpPips),
+        sl_type: Boolean(slPips),
+      }).catch(() => {});
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [timeframeValue, minPipsValue, maxPipsValue, maxPositionsValue, tpValue, slValue, enableBuy, enableSell, liquidityTrigger, pauseSearch, tpPips, slPips]);
+
+  useEffect(() => {
+    const stop = Number(slValue);
+    if (!stop || stop <= 0) {
+      setCalculatedLot(null);
+      return undefined;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const result = await api.calculateLot({
+          side: "BUY",
+          sl: stop,
+          sl_in_pips: slPips,
+          sl_price: !slPips,
+          symbol: "XAUUSD",
+        });
+        setCalculatedLot(Number(result?.lot || 0));
+      } catch {
+        setCalculatedLot(null);
+      }
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [slValue, slPips]);
 
   function combineDateTime(datePart, timePart) {
     const d = new Date(datePart);
@@ -115,7 +402,10 @@ export default function SearchPage({
       timePart.getSeconds(),
       0,
     );
-    return d.toISOString();
+    // Search settings represent the user's local wall-clock time. Avoid
+    // converting it to UTC, which made the picker appear shifted on reload.
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
   function parseIntegerField(
@@ -190,21 +480,13 @@ export default function SearchPage({
         return;
       }
 
-      const normalizedLot = parseDecimalField(lotValue, 0.03, 0.01, 10, 2);
-      const normalizedRiskPercent = parseDecimalField(
-        riskPercentValue,
-        1,
-        0.01,
-        100,
-        2,
-      );
       const normalizedMaxPositions = parseIntegerField(
         maxPositionsValue,
         1,
         1,
         999,
       );
-      const normalizedMinPips = parseIntegerField(minPipsValue, 10, 1, 99999);
+      const normalizedMinPips = parseIntegerField(minPipsValue, 0, 0, 99999);
       const normalizedMaxPips = parseIntegerField(maxPipsValue, 100, 1, 99999);
       const normalizedTp = tpPips
         ? parseIntegerField(tpValue, 400, 1, 99999)
@@ -214,11 +496,7 @@ export default function SearchPage({
         : parseDecimalField(slValue, 200, 0.01, 99999, 2);
 
       const searchConfig = {
-        time: 900,
         timeframe: timeframeValue,
-        lot: normalizedLot,
-        risk_percent: normalizedRiskPercent,
-        order_delay: 0,
         max_positions: normalizedMaxPositions,
         orders_limit: normalizedMaxPositions * 10,
         pips: normalizedMinPips,
@@ -238,8 +516,9 @@ export default function SearchPage({
         start_time: startIso,
         end_time: endIso,
       });
-      await onRefreshRuntime?.();
+      strategyCommand.current = "started";
       setStrategyRunning(true);
+      await onRefreshRuntime?.({ silent: true });
       setErrorText("");
     } catch (error) {
       setErrorText(String(error?.message || error));
@@ -248,11 +527,15 @@ export default function SearchPage({
 
   async function stopStrategy() {
     try {
+      strategyCommand.current = "stopped";
+      setStrategyRunning(false);
       await api.stopStrategy();
-      await onRefreshRuntime?.();
+      await onRefreshRuntime?.({ silent: true });
       setStrategyRunning(false);
       setErrorText("");
     } catch (error) {
+      strategyCommand.current = null;
+      setStrategyRunning(Boolean(runtime?.strategy?.running));
       setErrorText(String(error?.message || error));
     }
   }
@@ -298,82 +581,6 @@ export default function SearchPage({
         <span>{label}</span>
         <SwitchKnob checked={checked} />
       </button>
-    );
-  }
-
-  function DateTimeField({ fieldKey, label, picker, value, onChange }) {
-    const Icon = picker === "date" ? CalendarDays : Clock3;
-    const pickerKey = fieldKey || `${label}-${picker}`;
-    const commonSlotProps = {
-      textField: {
-        fullWidth: true,
-        onFocus: () => setPickerOpenState(pickerKey, true),
-        InputProps: {
-          endAdornment: <Icon className="h-4 w-4 text-slate-400" />,
-        },
-        sx: {
-          "& .MuiOutlinedInput-root": {
-            height: 46,
-            borderRadius: "1rem",
-            backgroundColor: "#ffffff",
-            fontSize: "0.875rem",
-            fontWeight: 600,
-          },
-        },
-      },
-      popper: {
-        placement: "bottom-start",
-      },
-    };
-
-    const dayValue = dayjs(value);
-
-    return (
-      <label className="block">
-        <span className="text-xs font-bold uppercase tracking-wide text-slate-500">
-          {label}
-        </span>
-        <div className="mt-1">
-          {picker === "date" ? (
-            <DesktopDatePicker
-              value={dayValue}
-              format="DD/MM/YYYY"
-              open={openPicker === pickerKey}
-              onOpen={() => setPickerOpenState(pickerKey, true)}
-              onClose={() => setPickerOpenState(pickerKey, false)}
-              onChange={(newValue) => {
-                if (newValue?.isValid?.()) {
-                  const next = new Date(value);
-                  next.setFullYear(
-                    newValue.year(),
-                    newValue.month(),
-                    newValue.date(),
-                  );
-                  onChange(next);
-                }
-              }}
-              slotProps={commonSlotProps}
-            />
-          ) : (
-            <TimePicker
-              value={dayValue}
-              ampm={false}
-              views={["hours", "minutes"]}
-              open={openPicker === pickerKey}
-              onOpen={() => setPickerOpenState(pickerKey, true)}
-              onClose={() => setPickerOpenState(pickerKey, false)}
-              onChange={(newValue) => {
-                if (newValue?.isValid?.()) {
-                  const next = new Date(value);
-                  next.setHours(newValue.hour(), newValue.minute(), 0, 0);
-                  onChange(next);
-                }
-              }}
-              slotProps={commonSlotProps}
-            />
-          )}
-        </div>
-      </label>
     );
   }
 
@@ -453,7 +660,7 @@ export default function SearchPage({
             </div>
           </div>
 
-          <div className="mt-5 grid gap-4 md:grid-cols-3">
+          <div className="mt-5 grid gap-4 md:grid-cols-4">
             <SelectBox
               label="Time Frame"
               value={timeframeValue}
@@ -461,33 +668,10 @@ export default function SearchPage({
               onChange={(e) => setTimeframeValue(e.target.value)}
             />
             <Field
-              label="Lot"
-              value={lotValue}
-              type="number"
-              min="0.01"
-              max="10"
-              step="0.01"
-              inputMode="decimal"
-              onChange={(e) => setLotValue(e.target.value)}
-            />
-            <Field
-              label="Risk % (by SL)"
-              value={riskPercentValue}
-              type="number"
-              min="0.01"
-              max="100"
-              step="0.01"
-              inputMode="decimal"
-              onChange={(e) => setRiskPercentValue(e.target.value)}
-            />
-          </div>
-
-          <div className="mt-4 grid gap-4 md:grid-cols-3">
-            <Field
               label="Min Pips"
               value={minPipsValue}
               type="number"
-              min="1"
+              min="0"
               step="1"
               inputMode="numeric"
               onChange={(e) => setMinPipsValue(e.target.value)}
@@ -525,22 +709,40 @@ export default function SearchPage({
               min={tpPips ? "1" : "0.01"}
               step={tpPips ? "1" : "0.01"}
               inputMode={tpPips ? "numeric" : "decimal"}
-              onChange={(e) => setTpValue(tpPips ? e.target.value : decimalInput(e.target.value))}
+              onChange={(e) =>
+                setTpValue(
+                  tpPips ? e.target.value : decimalInput(e.target.value),
+                )
+              }
             />
             <InlineSwitcher
               label="SL in Pips"
               checked={slPips}
               onChange={setSlPips}
             />
-            <Field
-              label="SL"
-              value={slValue}
-              type="number"
-              min={slPips ? "1" : "0.01"}
-              step={slPips ? "1" : "0.01"}
-              inputMode={slPips ? "numeric" : "decimal"}
-              onChange={(e) => setSlValue(slPips ? e.target.value : decimalInput(e.target.value))}
-            />
+            <div>
+              <Field
+                label="SL "
+                labelExtra={
+                  <span className="normal-case tracking-normal text-[11px] font-semibold text-slate-500">
+                    lot:{" "}
+                    <span className="font-black text-slate-900">
+                      {calculatedLot ? calculatedLot.toFixed(2) : "-"}
+                    </span>
+                  </span>
+                }
+                value={slValue}
+                type="number"
+                min={slPips ? "1" : "0.01"}
+                step={slPips ? "1" : "0.01"}
+                inputMode={slPips ? "numeric" : "decimal"}
+                onChange={(e) =>
+                  setSlValue(
+                    slPips ? e.target.value : decimalInput(e.target.value),
+                  )
+                }
+              />
+            </div>
           </div>
 
           <div className="mt-5 grid gap-3 md:grid-cols-4">
@@ -575,14 +777,18 @@ export default function SearchPage({
                   label="Date"
                   picker="date"
                   value={startDate}
-                  onChange={setStartDate}
+                  onChange={(value) => updateTimeRange("startDate", value)}
+                  openPicker={openPicker}
+                  setPickerOpenState={setPickerOpenState}
                 />
                 <DateTimeField
                   fieldKey="start-time"
                   label="Time"
                   picker="time"
                   value={startTime}
-                  onChange={setStartTime}
+                  onChange={(value) => updateTimeRange("startTime", value)}
+                  openPicker={openPicker}
+                  setPickerOpenState={setPickerOpenState}
                 />
               </div>
             </div>
@@ -591,7 +797,7 @@ export default function SearchPage({
                 <h4 className="font-black text-slate-950">End Time</h4>
                 <button
                   type="button"
-                  onClick={() => setEndEnabled((v) => !v)}
+                  onClick={() => updateTimeRange("endEnabled", !endEnabled)}
                   className="flex items-center gap-2 text-xs font-bold text-blue-700"
                 >
                   <SwitchKnob checked={endEnabled} />
@@ -604,14 +810,18 @@ export default function SearchPage({
                   label="Date"
                   picker="date"
                   value={endDate}
-                  onChange={setEndDate}
+                  onChange={(value) => updateTimeRange("endDate", value)}
+                  openPicker={openPicker}
+                  setPickerOpenState={setPickerOpenState}
                 />
                 <DateTimeField
                   fieldKey="end-time"
                   label="Time"
                   picker="time"
                   value={endTime}
-                  onChange={setEndTime}
+                  onChange={(value) => updateTimeRange("endTime", value)}
+                  openPicker={openPicker}
+                  setPickerOpenState={setPickerOpenState}
                 />
               </div>
             </div>
@@ -709,7 +919,9 @@ export default function SearchPage({
               </div>
               <div>
                 <div>
-                  <h3 className="font-black text-slate-950">Execution Safety</h3>
+                  <h3 className="font-black text-slate-950">
+                    Execution Safety
+                  </h3>
                   <p className="mt-1 text-sm text-slate-500">
                     Before sending orders, validate terminal connection, symbol
                     visibility, spread, max positions, and account risk.
@@ -728,30 +940,10 @@ export default function SearchPage({
       >
         <div className="grid gap-4 md:grid-cols-3">
           <Field
-            label="Lot"
-            value={lotValue}
-            type="number"
-            min="0.01"
-            max="10"
-            step="0.01"
-            inputMode="decimal"
-            onChange={(e) => setLotValue(e.target.value)}
-          />
-          <Field
-            label="Risk % (by SL)"
-            value={riskPercentValue}
-            type="number"
-            min="0.01"
-            max="100"
-            step="0.01"
-            inputMode="decimal"
-            onChange={(e) => setRiskPercentValue(e.target.value)}
-          />
-          <Field
             label="Min Pips"
             value={minPipsValue}
             type="number"
-            min="1"
+            min="0"
             step="1"
             inputMode="numeric"
             onChange={(e) => setMinPipsValue(e.target.value)}
@@ -781,7 +973,9 @@ export default function SearchPage({
             min={tpPips ? "1" : "0.01"}
             step={tpPips ? "1" : "0.01"}
             inputMode={tpPips ? "numeric" : "decimal"}
-            onChange={(e) => setTpValue(tpPips ? e.target.value : decimalInput(e.target.value))}
+            onChange={(e) =>
+              setTpValue(tpPips ? e.target.value : decimalInput(e.target.value))
+            }
           />
           <Field
             label="SL"
@@ -790,7 +984,9 @@ export default function SearchPage({
             min={slPips ? "1" : "0.01"}
             step={slPips ? "1" : "0.01"}
             inputMode={slPips ? "numeric" : "decimal"}
-            onChange={(e) => setSlValue(slPips ? e.target.value : decimalInput(e.target.value))}
+            onChange={(e) =>
+              setSlValue(slPips ? e.target.value : decimalInput(e.target.value))
+            }
           />
         </div>
         <div className="mt-4 flex justify-end gap-2">

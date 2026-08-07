@@ -25,13 +25,13 @@ function SortHeader({ active, direction, label, onSort, className = "" }) {
   );
 }
 
-export default function TradeHistoryPage({ runtime }) {
+export default function TradeHistoryPage({ runtime, historyRows = [] }) {
   const [timeFilter, setTimeFilter] = useState("today");
   const [sortColumn, setSortColumn] = useState("time");
   const [sortDirection, setSortDirection] = useState("desc");
 
   const tradeRows = useMemo(() => {
-    const rows = runtime?.orders || [];
+    const rows = historyRows.length ? historyRows : (runtime?.orders || []);
     return rows
       .map((order, idx) => {
         const createdAt = order.created_at ? new Date(order.created_at) : null;
@@ -39,12 +39,12 @@ export default function TradeHistoryPage({ runtime }) {
           id: order.id || idx + 1,
           createdAt,
           time: createdAt && !Number.isNaN(createdAt.getTime()) ? createdAt.toLocaleString() : "-",
-          account: order.origin === "strategy" ? "Strategy Engine" : "Manual",
+          account: order.account_name || (order.origin === "strategy" ? "Strategy Engine" : "Manual"),
           symbol: order.symbol || "XAUUSD",
           side: order.side || "-",
           lot: Number(order.lot ?? 0),
           open: order.entry != null ? String(order.entry) : "-",
-          close: order.status === "closed" ? "Closed" : "-",
+          close: String(order.status || "").toLowerCase() === "closed" ? "Closed" : "-",
           profit: Number(order.profit ?? 0),
           status: order.status === "open" ? "Open" : "Closed",
           comment: order.origin || "",
@@ -69,7 +69,7 @@ export default function TradeHistoryPage({ runtime }) {
         }
         return direction * String(a[sortColumn] || "").localeCompare(String(b[sortColumn] || ""));
       });
-  }, [runtime, sortColumn, sortDirection]);
+  }, [runtime, historyRows, sortColumn, sortDirection]);
 
   const filteredTradeRows = useMemo(() => {
     const now = new Date();

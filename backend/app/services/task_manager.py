@@ -60,7 +60,6 @@ def start_task(
     log_schedule: bool = True,
 ) -> None:
     stop_task(task_name)
-    emit_log(f"[{task_name}] scheduling task", "debug")
 
     now = _normalize_dt(datetime.now())
     normalized_start = _normalize_dt(start_time) if start_time else None
@@ -119,8 +118,6 @@ def start_task(
             emit_log(f"[{task_name}] on_task_start error: {ex}", "error")
 
     timer.start()
-    if log_schedule:
-        emit_log(f"[{task_name}] task scheduled to start in {delay:.2f} seconds", "debug")
 
 
 def stop_task(task_name: str) -> None:
@@ -134,7 +131,6 @@ def stop_task(task_name: str) -> None:
         except Exception:
             pass
         tasks.pop(task_name, None)
-    emit_log(f"[{task_name}] task stopped", "warning")
 
 
 def stop_all_tasks() -> None:

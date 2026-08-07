@@ -6,6 +6,19 @@ type LogListProps = {
   className?: string;
 };
 
+function logLineClass(line: string) {
+  if (/STOP|STOPPED|STRATEGY STOPPED|MANUAL STOP/i.test(line)) {
+    return "log-list__line log-list__line--error";
+  }
+  if (/ERROR/i.test(line)) return "log-list__line log-list__line--error";
+  if (/WARNING|PAUSE|PAUSED/i.test(line)) {
+    return "log-list__line log-list__line--warning";
+  }
+  if (/INFO/i.test(line)) return "log-list__line log-list__line--info";
+  if (/SUCCESS|TP/i.test(line)) return "log-list__line log-list__line--success";
+  return "log-list__line";
+}
+
 export function LogList({ logs = [], emptyMessage, className = "" }: LogListProps) {
   const entries = logs.length ? logs : [emptyMessage];
   return (
@@ -13,15 +26,7 @@ export function LogList({ logs = [], emptyMessage, className = "" }: LogListProp
       {entries.map((line, index) => (
         <div
           key={`${line}-${index}`}
-          className={
-            /ERROR/i.test(line)
-              ? "log-list__line log-list__line--error"
-              : /WARNING/i.test(line)
-                ? "log-list__line log-list__line--warning"
-                : /SUCCESS|TP/i.test(line)
-                  ? "log-list__line log-list__line--success"
-                  : "log-list__line"
-          }
+          className={logLineClass(line)}
         >
           {line}
         </div>

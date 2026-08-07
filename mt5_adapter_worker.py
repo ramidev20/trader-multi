@@ -57,6 +57,9 @@ def main():
 
     try:
         while True:
+            terminal = mt5.terminal_info()
+            ping_last = float(getattr(terminal, "ping_last", 0.0) or 0.0) if terminal is not None else 0.0
+            algo_enabled = bool(getattr(terminal, "trade_allowed", True)) and not bool(getattr(terminal, "tradeapi_disabled", False)) if terminal is not None else None
             info = mt5.account_info()
             if info is None:
                 write_status(
@@ -67,6 +70,8 @@ def main():
                         "login": args.login,
                         "server": args.server,
                         "terminal_path": args.terminal_path,
+                        "latency": round(ping_last / 1000.0, 2) if ping_last > 0 else 0.0,
+                        "algo_enabled": algo_enabled,
                         "error": "No account info available",
                         "updated_at": int(time.time()),
                     },
@@ -81,6 +86,8 @@ def main():
                         "server": str(getattr(info, "server", args.server) or args.server),
                         "balance": float(getattr(info, "balance", 0.0) or 0.0),
                         "equity": float(getattr(info, "equity", 0.0) or 0.0),
+                        "latency": round(ping_last / 1000.0, 2) if ping_last > 0 else 0.0,
+                        "algo_enabled": algo_enabled,
                         "terminal_path": args.terminal_path,
                         "updated_at": int(time.time()),
                     },

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from .services.strategy_service import (
     stop_strategy_system,
     close_all_positions,
     calculate_manual_lot,
+    _initialize_mt5_for_account,
 )
 from .services.task_manager import set_runtime_logger
 
@@ -38,15 +40,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "trading_accounts": [],
     "master_account_login": None,
     "search_config": {
-        "time": 900,
         "lot": 0.05,
-        "risk_percent": 1.0,
-        "order_delay": 0,
+        "timeframe": "M1",
         "max_positions": 3,
         "orders_limit": 10,
         "pips": 25,
         "max_pips": 70,
-        "last_position_pips": -150,
         "enable_pullback": False,
         "pullback_pips": 20,
         "tp": 150,
@@ -54,8 +53,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enable_liquidity": True,
         "stop_on_first_close": True,
     },
-    "terminal_path": "",
-    "copy_accounts": [],
     "theme_mode": "LIGHT",
 }
 
@@ -75,14 +72,9 @@ class AccountPayload(BaseModel):
     server: str
     terminal_path: str
     role: str = "sub"
-    risk_multiplier: float = 1.0
-
-
-class CopyAccountPayload(BaseModel):
-    account_login: int
-    risk_multiplier: float
-    enabled: bool = True
-    terminal_path: str = ""
+    risk_percent: float | None = None
+    risk_multiplier: float | None = None
+    order_delay_sec: int = 0
 
 
 class ActionPayload(BaseModel):
@@ -117,7 +109,7 @@ class OpenPositionPayload(BaseModel):
 
 class LotCalculationPayload(BaseModel):
     side: str
-    risk_percent: float
+    risk_percent: float | None = None
     sl: float
     sl_in_pips: bool = True
     sl_price: bool = False
@@ -159,7 +151,7 @@ set_runtime_logger(_runtime_logger)
 
 
 def _load_config() -> dict[str, Any]:
-    config = dict(DEFAULT_CONFIG)
+    config = deepcopy(DEFAULT_CONFIG)
     if not CONFIG_FILE.exists():
         return config
     try:
@@ -170,15 +162,45 @@ def _load_config() -> dict[str, Any]:
         config.update(loaded)
     if not isinstance(config.get("trading_accounts"), list):
         config["trading_accounts"] = []
-    if not isinstance(config.get("copy_accounts"), list):
-        config["copy_accounts"] = []
+    for account in config["trading_accounts"]:
+        if "risk_percent" not in account and "risk_multiplier" in account:
+            account["risk_percent"] = account.get("risk_multiplier")
+        account.pop("risk_multiplier", None)
+        account.pop("orderDelaySec", None)
+        account["order_delay_sec"] = int(account.get("order_delay_sec", 0) or 0)
     if not isinstance(config.get("search_config"), dict):
         config["search_config"] = dict(DEFAULT_CONFIG["search_config"])
+    for unused_key in (
+        "time",
+        "order_delay",
+        "risk_percent",
+        "start_at",
+        "end_at",
+        "start_time",
+        "end_time",
+        "end_enabled",
+    ):
+        config["search_config"].pop(unused_key, None)
+    config.pop("terminal_path", None)
+    config.pop("copy_accounts", None)
     return config
 
 
 def _save_config(config: dict[str, Any]) -> None:
     CONFIG_FILE.write_text(json.dumps(config, indent=4), encoding="utf-8")
+
+
+def _ensure_config_file() -> None:
+    """Create a usable empty configuration on a first launch."""
+    if CONFIG_FILE.exists():
+        return
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(deepcopy(DEFAULT_CONFIG), indent=4), encoding="utf-8")
+
+
+@app.on_event("startup")
+def ensure_config_on_startup() -> None:
+    _ensure_config_file()
 
 
 def _refresh_bootstrap_cache() -> dict[str, Any]:
@@ -206,8 +228,10 @@ def _to_front_account(index: int, account: dict[str, Any], session: dict[str, An
     connected = session_state == "connected"
     starting = session_state == "starting"
     disconnected = session_state in {"", "disconnected", "stopped", "error"}
-    balance = float((session or {}).get("balance", account.get("balance", 0)) or 0)
-    equity = float((session or {}).get("equity", account.get("equity", balance)) or balance)
+    session_balance = float((session or {}).get("balance", 0) or 0)
+    session_equity = float((session or {}).get("equity", 0) or 0)
+    balance = session_balance if session_balance > 0 else float(account.get("balance", 0) or 0)
+    equity = session_equity if session_equity > 0 else float(account.get("equity", balance) or balance)
     pnl = float(equity - balance)
     return {
         "id": index + 1,
@@ -222,10 +246,10 @@ def _to_front_account(index: int, account: dict[str, Any], session: dict[str, An
         "balance": balance,
         "equity": equity,
         "pnl": pnl,
-        "risk": float(account.get("risk_multiplier", 1.0) or 1.0),
-        "lotMultiplier": float(account.get("risk_multiplier", 1.0) or 1.0),
-        "orderDelaySec": int(_load_config().get("search_config", {}).get("order_delay", 0) or 0),
-        "latency": None,
+        "risk": float(account.get("risk_percent", account.get("risk_multiplier", 1.0)) or 1.0),
+        "orderDelaySec": int(account.get("order_delay_sec", account.get("orderDelaySec", 0)) or 0),
+        "latency": float((session or {}).get("latency", 0.0) or 0.0) or None,
+        "algoEnabled": (session or {}).get("algo_enabled"),
         "color": "from-blue-600 to-indigo-600" if role == "MASTER" else "from-cyan-500 to-blue-600",
     }
 
@@ -368,6 +392,69 @@ def _fetch_live_positions() -> tuple[list[dict[str, Any]], list[str]]:
     return positions, errors
 
 
+def _fetch_all_live_positions() -> tuple[list[dict[str, Any]], list[str], float | None]:
+    """Read positions from every account that is already connected."""
+    if not mt5_available():
+        positions, errors = _fetch_live_positions()
+        return positions, errors, 0.10
+
+    config = _load_config()
+    accounts = config.get("trading_accounts", [])
+    positions: list[dict[str, Any]] = []
+    errors: list[str] = []
+    spreads: list[float] = []
+
+    with MT5_LOCK:
+        connected_logins = {
+            _safe_int(session.get("login"))
+            for session in list_sessions(accounts)
+            if str(session.get("state", "")).lower() == "connected"
+        }
+        connected_accounts = [
+            account for account in accounts if _safe_int(account.get("user")) in connected_logins
+        ]
+        if not connected_accounts:
+            return [], ["Connect an account from Dashboard before loading live positions."], None
+
+        for account in connected_accounts:
+            login = _safe_int(account.get("user"))
+            init_ok, init_detail = _initialize_mt5_for_account(account)
+            if not init_ok:
+                errors.append(f"{login}: {init_detail}")
+                continue
+            role = "MASTER" if str(account.get("role", "sub")).lower() == "master" else "SUB"
+            try:
+                tick = mt5.symbol_info_tick(SYMBOL_DEFAULT)
+                if tick is not None:
+                    current_spread = abs(float(getattr(tick, "ask", 0.0)) - float(getattr(tick, "bid", 0.0)))
+                    if current_spread > 0:
+                        spreads.append(current_spread)
+                for pos in mt5.positions_get() or []:
+                    positions.append(
+                        {
+                            "account_login": login,
+                            "account_name": str(account.get("username", f"Account {login}")),
+                            "account_role": role,
+                            "tag": "Main" if role == "MASTER" else "Cloned",
+                            "ticket": int(getattr(pos, "ticket", 0) or 0),
+                            "symbol": str(getattr(pos, "symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT),
+                            "side": "BUY" if int(getattr(pos, "type", 0) or 0) == mt5.ORDER_TYPE_BUY else "SELL",
+                            "lot": float(getattr(pos, "volume", 0.0) or 0.0),
+                            "open_price": float(getattr(pos, "price_open", 0.0) or 0.0),
+                            "sl": float(getattr(pos, "sl", 0.0) or 0.0),
+                            "tp": float(getattr(pos, "tp", 0.0) or 0.0),
+                            "profit": float(getattr(pos, "profit", 0.0) or 0.0),
+                            "comment": str(getattr(pos, "comment", "") or ""),
+                            "opened_at": _to_iso_from_epoch(getattr(pos, "time", 0)),
+                        }
+                    )
+            except Exception as exc:
+                errors.append(f"{login}: positions read error {exc}")
+
+    positions.sort(key=lambda item: str(item.get("opened_at") or ""), reverse=True)
+    return positions, errors, (max(spreads) if spreads else None)
+
+
 def _require_master_connected() -> int:
     config = _load_config()
     ok, message, master_login = master_adapter_ready(config)
@@ -397,7 +484,6 @@ def bootstrap() -> dict[str, Any]:
     return {
         "settings": config,
         "accounts": front_accounts,
-        "copy_accounts": config.get("copy_accounts", []),
         "metrics": _metrics(front_accounts),
         "logs": {
             "search": runtime["logs"]["search"][-200:] or ["[INFO] Strategy engine initialized for XAUUSD M1."],
@@ -442,7 +528,6 @@ def set_search_config(payload: SearchConfigUpdate) -> dict[str, str]:
     config["search_config"] = payload.search_config
     _save_config(config)
     _refresh_bootstrap_cache()
-    append_log("search", "[INFO] Search defaults saved.")
     return {"status": "ok"}
 
 
@@ -452,6 +537,12 @@ def save_account(payload: AccountPayload) -> dict[str, Any]:
     accounts = config["trading_accounts"]
     updated = False
     account_data = payload.model_dump()
+    account_data["risk_percent"] = float(
+        payload.risk_percent
+        if payload.risk_percent is not None
+        else (payload.risk_multiplier or 1.0)
+    )
+    account_data.pop("risk_multiplier", None)
     account_data["terminal_path"] = _sanitize_terminal_path(account_data.get("terminal_path", ""))
 
     for idx, existing in enumerate(accounts):
@@ -468,20 +559,6 @@ def save_account(payload: AccountPayload) -> dict[str, Any]:
             if int(acc.get("user", 0) or 0) != payload.user and str(acc.get("role", "sub")).lower() == "master":
                 acc["role"] = "sub"
 
-    # keep copy_accounts in sync with sub accounts
-    copy_accounts = []
-    for acc in accounts:
-        if str(acc.get("role", "sub")).lower() != "sub":
-            continue
-        copy_accounts.append(
-            {
-                "account_login": int(acc.get("user")),
-                "risk_multiplier": float(acc.get("risk_multiplier", 1.0) or 1.0),
-                "enabled": True,
-                "terminal_path": str(acc.get("terminal_path", "") or ""),
-            }
-        )
-    config["copy_accounts"] = copy_accounts
     _save_config(config)
     _refresh_bootstrap_cache()
     append_log("adapter", f"[INFO] Account {'updated' if updated else 'added'}: {payload.user}")
@@ -492,7 +569,6 @@ def save_account(payload: AccountPayload) -> dict[str, Any]:
 def delete_account(login: int) -> dict[str, str]:
     config = _load_config()
     config["trading_accounts"] = [a for a in config["trading_accounts"] if int(a.get("user", 0) or 0) != login]
-    config["copy_accounts"] = [c for c in config["copy_accounts"] if int(c.get("account_login", 0) or 0) != login]
     if int(config.get("master_account_login") or 0) == login:
         config["master_account_login"] = None
     _save_config(config)
@@ -521,30 +597,41 @@ def account_sessions() -> dict[str, Any]:
     return {"status": "ok", "sessions": list_sessions(config.get("trading_accounts", []))}
 
 
-@app.post("/copy-accounts")
-def save_copy_account(payload: CopyAccountPayload) -> dict[str, Any]:
+@app.get("/accounts/snapshots")
+def account_snapshots() -> dict[str, Any]:
+    """Read fresh balance, equity, and terminal ping for all saved accounts."""
     config = _load_config()
-    copy_accounts = config["copy_accounts"]
-    updated = False
-    for idx, existing in enumerate(copy_accounts):
-        if int(existing.get("account_login", 0) or 0) == payload.account_login:
-            copy_accounts[idx] = payload.model_dump()
-            updated = True
-            break
-    if not updated:
-        copy_accounts.append(payload.model_dump())
-    _save_config(config)
-    _refresh_bootstrap_cache()
-    return {"status": "ok", "updated": updated}
-
-
-@app.delete("/copy-accounts/{login}")
-def delete_copy_account(login: int) -> dict[str, str]:
-    config = _load_config()
-    config["copy_accounts"] = [c for c in config["copy_accounts"] if int(c.get("account_login", 0) or 0) != login]
-    _save_config(config)
-    _refresh_bootstrap_cache()
-    return {"status": "ok"}
+    snapshots: list[dict[str, Any]] = []
+    errors: list[str] = []
+    with MT5_LOCK:
+        for account in config.get("trading_accounts", []):
+            login = _safe_int(account.get("user"))
+            if login <= 0:
+                continue
+            ok, detail = _initialize_mt5_for_account(account)
+            if not ok:
+                errors.append(f"{login}: {detail}")
+                continue
+            try:
+                info = mt5.account_info()
+                terminal = mt5.terminal_info()
+                if info is None:
+                    errors.append(f"{login}: account information is not available")
+                    continue
+                ping_last = float(getattr(terminal, "ping_last", 0.0) or 0.0) if terminal is not None else 0.0
+                floating_pnl = sum(float(getattr(position, "profit", 0.0) or 0.0) for position in (mt5.positions_get() or []))
+                algo_enabled = bool(getattr(terminal, "trade_allowed", True)) and not bool(getattr(terminal, "tradeapi_disabled", False)) if terminal is not None else None
+                snapshots.append({
+                    "login": login,
+                    "balance": float(getattr(info, "balance", 0.0) or 0.0),
+                    "equity": float(getattr(info, "equity", 0.0) or 0.0),
+                    "floating_pnl": floating_pnl,
+                    "latency": round(ping_last / 1000.0, 2) if ping_last > 0 else None,
+                    "algo_enabled": algo_enabled,
+                })
+            except Exception as exc:
+                errors.append(f"{login}: snapshot error {exc}")
+    return {"status": "ok", "snapshots": snapshots, "errors": errors}
 
 
 @app.get("/runtime")
@@ -554,13 +641,94 @@ def runtime() -> dict[str, Any]:
 
 @app.get("/positions/live")
 def live_positions() -> dict[str, Any]:
-    positions, errors = _fetch_live_positions()
+    positions, errors, spread = _fetch_all_live_positions()
     return {
         "status": "ok",
         "positions": positions,
         "errors": errors,
+        "spread": spread,
         "updated_at": datetime.now().isoformat(),
     }
+
+
+@app.get("/trade-history")
+def trade_history() -> dict[str, Any]:
+    """Read closed MT5 deals and account performance for every connected account."""
+    config = _load_config()
+    accounts = config.get("trading_accounts", [])
+    history: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+
+    if not mt5_available():
+        orders = state_get("orders", [])
+        master_login = _safe_int(config.get("master_account_login"))
+        master = next((a for a in accounts if _safe_int(a.get("user")) == master_login), None)
+        profit = sum(float(o.get("profit", 0) or 0) for o in orders if str(o.get("status", "")).lower() == "closed")
+        balance = float((master or {}).get("balance", 0) or 0)
+        summaries.append({"login": master_login, "initial_balance": balance - profit, "profit": profit, "profit_percent": (profit / (balance - profit) * 100) if balance - profit else 0})
+        return {"status": "ok", "history": orders, "summaries": summaries, "errors": []}
+
+    errors: list[str] = []
+    with MT5_LOCK:
+        for account in accounts:
+            login = _safe_int(account.get("user"))
+            if login <= 0:
+                continue
+            init_ok, init_detail = _initialize_mt5_for_account(account)
+            if not init_ok:
+                errors.append(f"{login}: {init_detail}")
+                continue
+            try:
+                info = mt5.account_info()
+                current_balance = float(getattr(info, "balance", 0.0) or 0.0) if info is not None else 0.0
+                deals = mt5.history_deals_get(datetime(2000, 1, 1), datetime.now()) or []
+                account_profit = 0.0
+                account_rows: list[dict[str, Any]] = []
+                for deal in deals:
+                    deal_type = int(getattr(deal, "type", -1))
+                    buy_type = int(getattr(mt5, "DEAL_TYPE_BUY", 0))
+                    sell_type = int(getattr(mt5, "DEAL_TYPE_SELL", 1))
+                    if deal_type not in {buy_type, sell_type}:
+                        continue
+                    deal_entry = int(getattr(deal, "entry", -1))
+                    closing_entries = {
+                        int(getattr(mt5, "DEAL_ENTRY_OUT", 1)),
+                        int(getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)),
+                        int(getattr(mt5, "DEAL_ENTRY_INOUT", 2)),
+                    }
+                    if deal_entry not in closing_entries:
+                        continue
+                    profit = float(getattr(deal, "profit", 0.0) or 0.0) + float(getattr(deal, "swap", 0.0) or 0.0) + float(getattr(deal, "commission", 0.0) or 0.0)
+                    account_profit += profit
+                    row = {
+                        "id": f"{login}-{int(getattr(deal, 'ticket', 0) or 0)}",
+                        "ticket": int(getattr(deal, "ticket", 0) or 0),
+                        "account_login": login,
+                        "account_name": str(account.get("username", f"Account {login}")),
+                        "symbol": str(getattr(deal, "symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT),
+                        "side": "BUY" if deal_type == buy_type else "SELL",
+                        "lot": float(getattr(deal, "volume", 0.0) or 0.0),
+                        "entry": float(getattr(deal, "price", 0.0) or 0.0),
+                        "profit": profit,
+                        "status": "Closed",
+                        "comment": str(getattr(deal, "comment", "") or ""),
+                        "created_at": _to_iso_from_epoch(getattr(deal, "time", 0)),
+                    }
+                    account_rows.append(row)
+                initial_balance = current_balance - account_profit
+                summaries.append({
+                    "login": login,
+                    "balance": current_balance,
+                    "initial_balance": initial_balance,
+                    "profit": account_profit,
+                    "profit_percent": (account_profit / initial_balance * 100) if initial_balance else 0,
+                })
+                history.extend(account_rows)
+            except Exception as exc:
+                errors.append(f"{login}: history read error {exc}")
+
+    history.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    return {"status": "ok", "history": history, "summaries": summaries, "errors": errors}
 
 
 @app.post("/strategy/start")
@@ -611,7 +779,7 @@ def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
     try:
         open_manual_position(
             str(payload.side).upper(),
-            float(payload.lot),
+            payload.lot,
             payload.tp,
             payload.sl,
             symbol=payload.symbol,
@@ -633,10 +801,11 @@ def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
 
 @app.post("/positions/calculate-lot")
 def calculate_lot(payload: LotCalculationPayload) -> dict[str, Any]:
+    _require_master_connected()
     try:
         lot, message = calculate_manual_lot(
             str(payload.side).upper(),
-            float(payload.risk_percent),
+            float(payload.risk_percent) if payload.risk_percent is not None else None,
             float(payload.sl),
             sl_in_pips=bool(payload.sl_in_pips),
             sl_price=bool(payload.sl_price),
@@ -691,7 +860,6 @@ def action(payload: ActionPayload) -> dict[str, Any]:
     if action_name == "stop_risk_monitor":
         return risk_stop()
     if action_name == "load_defaults":
-        append_log("search", "[INFO] Search defaults loaded.")
         return {"status": "ok", "message": "Defaults loaded."}
     if action_name == "connect_account":
         login = int(data.get("login", 0) or 0)

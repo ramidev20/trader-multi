@@ -52,12 +52,14 @@ type FieldProps = Omit<
   "value" | "onChange"
 > & {
   label: string;
+  labelExtra?: React.ReactNode;
   value?: string | number;
   onChange?: React.ChangeEventHandler<HTMLInputElement>;
 };
 
 export function Field({
   label,
+  labelExtra,
   value,
   type = "text",
   onChange,
@@ -65,7 +67,13 @@ export function Field({
 }: FieldProps) {
   return (
     <label style={styles.fieldLabel}>
-      <span style={styles.fieldCaption}>{label}</span>
+      <span
+        style={styles.fieldCaption}
+        className={labelExtra ? "flex items-center justify-between gap-2" : undefined}
+      >
+        <span>{label}</span>
+        {labelExtra}
+      </span>
       <input
         type={type}
         value={onChange ? value : undefined}

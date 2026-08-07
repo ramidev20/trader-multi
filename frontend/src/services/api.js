@@ -37,7 +37,9 @@ export const api = {
   connectAccount: (login) => request(`/accounts/${login}/connect`, { method: "POST" }),
   disconnectAccount: (login) => request(`/accounts/${login}/disconnect`, { method: "POST" }),
   sessions: () => request("/accounts/sessions"),
+  accountSnapshots: () => request("/accounts/snapshots"),
   livePositions: () => request("/positions/live"),
+  tradeHistory: () => request("/trade-history"),
   calculateLot: (payload) => request("/positions/calculate-lot", { method: "POST", body: JSON.stringify(payload) }),
 
   startStrategy: (payload) => request("/strategy/start", { method: "POST", body: JSON.stringify(payload) }),

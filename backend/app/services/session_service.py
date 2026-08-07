@@ -115,6 +115,8 @@ def list_sessions(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "alive": alive,
                 "balance": float(status.get("balance", 0.0) or 0.0),
                 "equity": float(status.get("equity", 0.0) or 0.0),
+                "latency": float(status.get("latency", 0.0) or 0.0),
+                "algo_enabled": status.get("algo_enabled"),
                 "error": status.get("error"),
                 "updated_at": status.get("updated_at"),
             }
@@ -225,6 +227,14 @@ def disconnect_account(login: int) -> dict[str, Any]:
         except Exception:
             pass
     _adapter_processes.pop(login, None)
+    _write_status(
+        login,
+        {
+            "state": "stopped",
+            "error": None,
+            "updated_at": int(time.time()),
+        },
+    )
     append_log("adapter", f"[WARNING] Adapter stopped for account {login}.")
     return {"status": "ok", "message": f"Stopped adapter for {login}"}
 

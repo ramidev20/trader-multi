@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
+import { WifiOff } from "lucide-react";
 import Sidebar from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
 import { AppButton, Dialog, Field, SelectBox } from "./components/ui/Primitives";
 import DashboardPage from "./pages/DashboardPage";
 import SearchPage from "./pages/SearchPage";
-import { RiskManagementPage, SettingsPlaceholder, TradePage } from "./pages/Placeholders";
+import { NotificationsPage, ProfilePage, RiskManagementPage, SettingsPlaceholder, TradePage } from "./pages/Placeholders";
 import TradeHistoryPage from "./pages/TradeHistoryPage";
 import { cx } from "./utils/format";
 import { api } from "./services/api";
@@ -27,11 +28,25 @@ export default function App() {
   const [activePage, setActivePage] = useState("dashboard");
   const [accountList, setAccountList] = useState([]);
   const [runtime, setRuntime] = useState(null);
+  const [searchLogs, setSearchLogs] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const dismissedNotificationIds = useRef(new Set());
+  const [tradeHistory, setTradeHistory] = useState({ history: [], summaries: [] });
   const [loadingBootstrap, setLoadingBootstrap] = useState(true);
   const [errorText, setErrorText] = useState("");
-  const [refreshPausedByPage, setRefreshPausedByPage] = useState(false);
+  const [settingsTabRequest, setSettingsTabRequest] = useState("accounts");
   const [dialogMode, setDialogMode] = useState(null);
   const [selectedAccount, setSelectedAccount] = useState(null);
+  const [searchTimeRange, setSearchTimeRange] = useState(() => {
+    const now = new Date();
+    return {
+      startDate: now,
+      startTime: now,
+      endDate: now,
+      endTime: now,
+      endEnabled: false,
+    };
+  });
   const [formState, setFormState] = useState({
     name: "",
     role: "SUB",
@@ -50,14 +65,70 @@ export default function App() {
     color: "from-blue-600 to-indigo-600",
   });
 
+  const mergeAccountSnapshots = useCallback((snapshotData) => {
+    const snapshots = new Map(
+      (snapshotData?.snapshots || []).map((item) => [String(item.login), item]),
+    );
+    setAccountList((current) =>
+      current.map((account) => {
+        const snapshot = snapshots.get(String(account.login));
+        if (!snapshot) return account;
+        const hasNumber = (value) =>
+          value !== null && value !== undefined && Number.isFinite(Number(value));
+        return {
+          ...account,
+          balance: hasNumber(snapshot.balance) ? Number(snapshot.balance) : account.balance,
+          equity: hasNumber(snapshot.equity) ? Number(snapshot.equity) : account.equity,
+          pnl: hasNumber(snapshot.floating_pnl) ? Number(snapshot.floating_pnl) : account.pnl,
+          floatingPnl: hasNumber(snapshot.floating_pnl) ? Number(snapshot.floating_pnl) : account.floatingPnl,
+          latency: snapshot.latency ?? account.latency,
+          algoEnabled: snapshot.algo_enabled ?? account.algoEnabled,
+        };
+      }),
+    );
+  }, []);
+
   const refreshBootstrap = useCallback(async (options = {}) => {
-    const { silent = false } = options;
+    const { silent = false, withSnapshots = false } = options;
     if (!silent) setLoadingBootstrap(true);
     try {
       const data = await api.bootstrap();
-      setAccountList(Array.isArray(data.accounts) ? data.accounts : []);
+      setAccountList((current) => {
+        const previousByLogin = new Map(current.map((account) => [String(account.login), account]));
+        return (Array.isArray(data.accounts) ? data.accounts : []).map((account) => {
+          const previous = previousByLogin.get(String(account.login));
+          const balance = Number(account.balance || 0) > 0 ? account.balance : previous?.balance || 0;
+          const equity = Number(account.equity || 0) > 0 ? account.equity : previous?.equity || balance;
+          const latency = Number(account.latency || 0) > 0 ? account.latency : previous?.latency || null;
+          const floatingPnl = Number(previous?.floatingPnl ?? previous?.pnl ?? 0);
+          return { ...account, balance, equity, pnl: floatingPnl, floatingPnl, latency };
+        });
+      });
       setRuntime(data.runtime || null);
+      const incomingSearchLogs = data.logs?.search || data.runtime?.logs?.search;
+      if (Array.isArray(incomingSearchLogs) && incomingSearchLogs.length) {
+        setSearchLogs((current) => {
+          const known = new Set(current);
+          const merged = [...current];
+          incomingSearchLogs.forEach((line) => {
+            if (!known.has(line)) {
+              known.add(line);
+              merged.push(line);
+            }
+          });
+          return merged.slice(-500);
+        });
+      }
+      setNotifications(buildNotifications(data).filter((item) => !dismissedNotificationIds.current.has(item.id)));
       setErrorText("");
+      if (withSnapshots) {
+        try {
+          const snapshotData = await api.accountSnapshots();
+          mergeAccountSnapshots(snapshotData);
+        } catch (error) {
+          setErrorText(String(error?.message || error));
+        }
+      }
       return data;
     } catch (error) {
       setErrorText(String(error?.message || error));
@@ -65,28 +136,29 @@ export default function App() {
     } finally {
       if (!silent) setLoadingBootstrap(false);
     }
-  }, []);
+  }, [mergeAccountSnapshots]);
+
+  function clearNotifications() {
+    notifications.filter((item) => item.category !== "system").forEach((item) => dismissedNotificationIds.current.add(item.id));
+    setNotifications((current) => current.filter((item) => item.category === "system"));
+  }
 
   useEffect(() => {
-    refreshBootstrap();
+    refreshBootstrap({ withSnapshots: true });
   }, [refreshBootstrap]);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      if (refreshPausedByPage) {
-        return;
-      }
-      refreshBootstrap({ silent: true });
-    }, 2500);
+    const timer = setInterval(() => refreshBootstrap({ silent: true }), 5000);
     return () => clearInterval(timer);
-  }, [refreshBootstrap, refreshPausedByPage]);
+  }, [refreshBootstrap]);
+
 
   const totals = useMemo(
     () => ({
       balance: accountList.reduce((sum, account) => sum + account.balance, 0),
       equity: accountList.reduce((sum, account) => sum + account.equity, 0),
       connected: accountList.filter((account) => account.status === "Connected").length,
-      pnl: accountList.reduce((sum, account) => sum + account.pnl, 0),
+      pnl: accountList.reduce((sum, account) => sum + Number(account.floatingPnl ?? account.pnl ?? 0), 0),
     }),
     [accountList]
   );
@@ -95,6 +167,14 @@ export default function App() {
     () => accountList.find((account) => account.role === "MASTER") || null,
     [accountList],
   );
+  const masterConnected = masterAccount?.status === "Connected";
+
+  useEffect(() => {
+    if (!masterConnected || !["history", "profile"].includes(activePage)) return;
+    api.tradeHistory()
+      .then((data) => setTradeHistory({ history: data.history || [], summaries: data.summaries || [] }))
+      .catch((error) => setErrorText(String(error?.message || error)));
+  }, [activePage, masterConnected]);
 
   function openAddDialog() {
     setSelectedAccount(null);
@@ -150,6 +230,23 @@ export default function App() {
     setSelectedAccount(null);
   }
 
+  async function handleLogout() {
+    if (!masterAccount?.login) return;
+    try {
+      await api.disconnectAccount(Number(masterAccount.login));
+      setActivePage("dashboard");
+      await refreshBootstrap({ silent: true });
+      setErrorText("");
+    } catch (error) {
+      setErrorText(String(error?.message || error));
+    }
+  }
+
+  function openSettingsTab(tab) {
+    setSettingsTabRequest(tab);
+    setActivePage("settings");
+  }
+
   async function saveAccount() {
     if (!formState.name.trim() || !String(formState.login).trim()) return;
     const shouldBeMain = !!formState.setAsMain;
@@ -161,7 +258,8 @@ export default function App() {
         server: formState.server,
         terminal_path: formState.path,
         role: shouldBeMain ? "master" : "sub",
-        risk_multiplier: Number(formState.risk || 1),
+        risk_percent: Number(formState.risk || 1),
+        order_delay_sec: Number(formState.orderDelaySec || 0),
       });
       await refreshBootstrap();
       closeDialog();
@@ -188,6 +286,11 @@ export default function App() {
   async function connectAccountAndSync(account) {
     if (!account) return;
     try {
+      if (account.status === "Connected") {
+        await api.disconnectAccount(Number(account.login));
+        await refreshBootstrap({ silent: true });
+        return;
+      }
       await api.connectAccount(Number(account.login));
       let connected = false;
       for (let i = 0; i < 8; i += 1) {
@@ -208,6 +311,17 @@ export default function App() {
     }
   }
 
+  async function refreshDashboard() {
+    const data = await refreshBootstrap({ silent: true });
+    try {
+      const snapshotData = await api.accountSnapshots();
+      mergeAccountSnapshots(snapshotData);
+    } catch (error) {
+      setErrorText(String(error?.message || error));
+    }
+    return data;
+  }
+
   const pageTitle =
     activePage === "search"
       ? "Strategy Search"
@@ -219,23 +333,29 @@ export default function App() {
               ? "Risk Management"
               : activePage === "settings"
                 ? "Settings"
+                : activePage === "profile"
+                  ? "Profile"
+                : activePage === "notifications"
+                  ? "Notifications"
                 : "Trading Control Center";
 
   return (
     <div className="lg:grid lg:grid-cols-[264px_minmax(0,1fr)]" style={styles.appShell}>
       <Sidebar activePage={activePage} onChangePage={setActivePage} connectedCount={totals.connected} totalCount={accountList.length} />
       <main className="min-w-0">
-        <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onAddAccount={openAddDialog} masterAccount={masterAccount} />
+        <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
         <div className="px-5 py-6 lg:px-8" style={styles.pageContent}>
           <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }}>
             {errorText ? <div style={styles.errorBanner}>{errorText}</div> : null}
             {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}
-            {activePage === "dashboard" && <DashboardPage totals={totals} accountsData={accountList} onAdd={openAddDialog} onEdit={openEditDialog} onDelete={openDeleteDialog} onConnect={connectAccountAndSync} />}
-            {activePage === "search" && <SearchPage runtime={runtime} onRefreshRuntime={refreshBootstrap} onPickerInteractionChange={setRefreshPausedByPage} />}
-            {activePage === "trade" && <TradePage runtime={runtime} onRefreshRuntime={refreshBootstrap} />}
-            {activePage === "history" && <TradeHistoryPage runtime={runtime} />}
-            {activePage === "risk" && <RiskManagementPage runtime={runtime} onRefreshRuntime={refreshBootstrap} />}
-            {activePage === "settings" && <SettingsPlaceholder accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} />}
+            {activePage === "dashboard" && <DashboardPage totals={totals} accountsData={accountList} onAdd={openAddDialog} onEdit={openEditDialog} onDelete={openDeleteDialog} onConnect={connectAccountAndSync} onRefresh={refreshDashboard} />}
+            {activePage === "search" && (masterConnected ? <SearchPage runtime={runtime} searchLogs={searchLogs} onRefreshRuntime={refreshBootstrap} timeRange={searchTimeRange} onTimeRangeChange={setSearchTimeRange} /> : <MasterConnectionRequiredPage />)}
+            {activePage === "trade" && (masterConnected ? <TradePage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
+            {activePage === "history" && (masterConnected ? <TradeHistoryPage runtime={runtime} historyRows={tradeHistory.history} /> : <MasterConnectionRequiredPage />)}
+            {activePage === "risk" && (masterConnected ? <RiskManagementPage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
+            {activePage === "settings" && <SettingsPlaceholder initialTab={settingsTabRequest} accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} />}
+            {activePage === "profile" && <ProfilePage accountsData={accountList} runtime={runtime} historyRows={tradeHistory.history} summaries={tradeHistory.summaries} />}
+            {activePage === "notifications" && <NotificationsPage notifications={notifications} />}
           </motion.div>
         </div>
       </main>
@@ -250,7 +370,7 @@ export default function App() {
           {dialogMode === "edit" && (
             <>
               <Field label="Risk %" value={String(formState.risk)} type="number" onChange={(e) => setFormState((s) => ({ ...s, risk: e.target.value }))} />
-              <SelectBox label="Position Delay (sec)" value={String(formState.orderDelaySec)} options={["0","1","2","3","4","5","6","7","8","9","10"]} onChange={(e) => setFormState((s) => ({ ...s, orderDelaySec: e.target.value }))} />
+              <Field label="Position Delay (seconds)" value={String(formState.orderDelaySec)} type="number" min={0} max={10} onChange={(e) => setFormState((s) => ({ ...s, orderDelaySec: Math.min(10, Math.max(0, Number(e.target.value || 0))) }))} />
               <label className="block">
                 <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Avatar Color</span>
                 <select
@@ -289,6 +409,49 @@ export default function App() {
         <p className="text-sm text-slate-600">Are you sure you want to delete <span className="font-bold">{selectedAccount?.name}</span>?</p>
         <div className="mt-4 flex justify-end gap-2"><AppButton variant="soft" onClick={closeDialog}>Cancel</AppButton><AppButton variant="red" onClick={confirmDelete}>Delete</AppButton></div>
       </Dialog>
+    </div>
+  );
+}
+
+function buildNotifications(data) {
+  const runtime = data?.runtime || {};
+  const notifications = [];
+  const logs = [
+    ...(runtime.logs?.search || []).map((message) => ({ source: "search", message })),
+    ...(runtime.logs?.risk || []).map((message) => ({ source: "risk", message })),
+    ...(runtime.logs?.adapter || []).map((message) => ({ source: "adapter", message })),
+  ];
+  logs.slice(-40).forEach(({ source, message }, index) => {
+    const text = String(message || "");
+    const normalizedMessage = text.replace(/^\[[^\]]+\]\s*/, "").replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, "").trim();
+    const id = `${source}-${normalizedMessage}`;
+    if (notifications.some((item) => item.id === id)) return;
+    const lower = normalizedMessage.toLowerCase();
+    const level = text.includes("[ERROR]") || lower.includes("failed") || lower.includes("blocked") ? "error" : text.includes("[WARNING]") || lower.includes("disabled") || lower.includes("disconnected") ? "warning" : text.includes("[SUCCESS]") ? "success" : "info";
+    const title = lower.includes("algo") || lower.includes("algorithmic") ? "MT5 Algo Trading" : source === "risk" || lower.includes("risk") ? "Risk management" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
+    notifications.push({ id, title, message: normalizedMessage, level, category: title === "System update" ? "system" : "other" });
+  });
+  (data?.accounts || []).filter((account) => account.status === "Disconnected").forEach((account) => {
+    notifications.push({ id: `disconnected-${account.login}`, title: "Account disconnected", message: `${account.name} is not connected.`, level: "warning" });
+  });
+  (data?.accounts || []).filter((account) => account.algoEnabled === false).forEach((account) => {
+    notifications.push({ id: `algo-disabled-${account.login}`, title: "Algorithmic trading disabled", message: `${account.name} has Algo Trading disabled in MT5.`, level: "warning" });
+  });
+  return notifications.slice(-30).reverse();
+}
+
+function MasterConnectionRequiredPage() {
+  return (
+    <div className="flex min-h-[420px] items-center justify-center rounded-3xl border border-slate-200 bg-white px-6 py-16 shadow-sm">
+      <div className="max-w-md text-center">
+        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-50 text-amber-600">
+          <WifiOff className="h-8 w-8" strokeWidth={2.5} />
+        </div>
+        <h3 className="mt-5 text-xl font-black text-slate-950">Master account is not connected</h3>
+        <p className="mt-2 text-sm font-medium leading-6 text-slate-500">
+          Connect the master account from the Dashboard to use this page.
+        </p>
+      </div>
     </div>
   );
 }

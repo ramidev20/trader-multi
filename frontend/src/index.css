@@ -41,6 +41,7 @@ body {
 .log-list__line--success { color: #34d399; }
 .log-list__line--warning { color: #fbbf24; }
 .log-list__line--error { color: #fb7185; }
+.log-list__line--info { color: #60a5fa; }
 
 .note-hint {
   display: inline-grid;

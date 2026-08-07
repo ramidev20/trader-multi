@@ -5,6 +5,7 @@ import {
   Gauge,
   Percent,
   Play,
+  RefreshCcw,
   Server,
   SlidersHorizontal,
   Terminal,
@@ -386,8 +387,19 @@ export default function DashboardPage({
   accountsData,
   onAdd,
   onConnect,
+  onRefresh,
 }) {
   const [dashboardTab, setDashboardTab] = useState("login");
+  const [refreshing, setRefreshing] = useState(false);
+
+  async function refreshDashboard() {
+    setRefreshing(true);
+    try {
+      await onRefresh?.({ silent: true });
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   return (
     <>
@@ -471,6 +483,9 @@ export default function DashboardPage({
                   <AppButton variant="soft">
                     <SlidersHorizontal className="h-4 w-4" /> Filter
                   </AppButton>
+                  <AppButton variant="soft" onClick={refreshDashboard} disabled={refreshing}>
+                    <RefreshCcw className={cx("h-4 w-4", refreshing && "animate-spin")} /> Refresh
+                  </AppButton>
                   <AppButton onClick={onAdd}>
                     <Play className="h-4 w-4" /> Add New Account
                   </AppButton>
@@ -527,6 +542,9 @@ export default function DashboardPage({
                                   {account.role}
                                 </span>
                               </div>
+                              <p className={cx("mt-1 text-xs font-semibold", account.status === "Connected" ? "text-emerald-600" : "text-slate-400")}>
+                                {account.status || "Disconnected"}
+                              </p>
                             </div>
                           </div>
                         </td>
@@ -541,6 +559,7 @@ export default function DashboardPage({
                         <td className="px-2 py-4 text-center">
                           <button
                             onClick={() => onConnect?.(account)}
+                            title={account.status === "Connected" ? "Disconnect account" : "Connect account"}
                             className="rounded-xl border border-slate-200 p-2 text-slate-500 hover:bg-white hover:text-blue-600"
                           >
                             <Terminal className="h-4 w-4" />

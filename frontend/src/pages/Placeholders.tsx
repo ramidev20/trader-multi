@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Activity,
+  AlertTriangle,
+  Bell,
+  CheckCircle2,
   Gauge,
   Play,
   RefreshCcw,
@@ -10,6 +13,7 @@ import {
   Terminal,
   Trash2,
   Wrench,
+  Info,
 } from "lucide-react";
 import { AppButton, Card, Dialog, Field } from "../components/ui/Primitives";
 import { TableFrame } from "../components/ui/TableFrame";
@@ -19,7 +23,6 @@ import { cx, decimalInput, money } from "../utils/format";
 import { api } from "../services/api";
 
 export function TradePage({ runtime, onRefreshRuntime }) {
-  const [riskPercent, setRiskPercent] = useState("1");
   const [side, setSide] = useState("BUY");
   const [tp, setTp] = useState("150");
   const [sl, setSl] = useState("600");
@@ -30,13 +33,15 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [tp3Enabled, setTp3Enabled] = useState(false);
   const [tp1Percent, setTp1Percent] = useState("100");
   const [tp2Percent, setTp2Percent] = useState("100");
-  const [calculatedLot, setCalculatedLot] = useState(null);
   const [errorText, setErrorText] = useState("");
   const [pendingSide, setPendingSide] = useState(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [positions, setPositions] = useState([]);
   const [positionsErrors, setPositionsErrors] = useState([]);
+  const [spread, setSpread] = useState(null);
   const [positionsTab, setPositionsTab] = useState("live");
   const openOrders = useMemo(
     () => (runtime?.orders || []).filter((o) => o.status === "open"),
@@ -57,31 +62,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       setTp1Percent("50");
     if (multiTp && tp3Enabled && tp2Percent === "100") setTp2Percent("50");
   }, [multiTp, tp2Enabled, tp3Enabled]);
-
-  useEffect(() => {
-    const risk = Number(riskPercent);
-    const stop = Number(multiTp ? slPrice : sl);
-    if (!risk || risk <= 0 || !stop || stop <= 0) {
-      setCalculatedLot(null);
-      return undefined;
-    }
-    const timer = setTimeout(async () => {
-      try {
-        const result = await api.calculateLot({
-          side,
-          risk_percent: risk,
-          sl: stop,
-          sl_in_pips: !multiTp,
-          sl_price: multiTp,
-          symbol: "XAUUSD",
-        });
-        setCalculatedLot(Number(result?.lot || 0));
-      } catch (error) {
-        setCalculatedLot(null);
-      }
-    }, 450);
-    return () => clearTimeout(timer);
-  }, [riskPercent, sl, slPrice, side, multiTp]);
 
   function SummaryCard({ label, value, hint, icon: Icon, tone = "slate" }) {
     const toneStyle = {
@@ -155,6 +135,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     return (
       <button
         type="button"
+        disabled={submitting}
         onClick={() => {
           setSide(value);
           setPendingSide(value);
@@ -176,6 +157,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       const data = await api.livePositions();
       setPositions(Array.isArray(data?.positions) ? data.positions : []);
       setPositionsErrors(Array.isArray(data?.errors) ? data.errors : []);
+      setSpread(data?.spread ?? null);
     } catch (error) {
       setErrorText(String(error?.message || error));
     }
@@ -183,11 +165,18 @@ export function TradePage({ runtime, onRefreshRuntime }) {
 
   useEffect(() => {
     loadPositions();
-    const timer = setInterval(() => {
-      loadPositions({ silent: true });
-    }, 30000);
-    return () => clearInterval(timer);
   }, []);
+
+  async function refreshTradeData() {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefreshRuntime?.({ silent: true });
+      await loadPositions({ silent: true });
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   function fmtDateTime(value) {
     if (!value) return "-";
@@ -197,10 +186,11 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   }
 
   async function openPosition(orderSide) {
+    if (submitting) return;
+    setSubmitting(true);
     try {
       await api.openPosition({
         side: orderSide,
-        risk_percent: riskPercent.trim() ? Number(riskPercent) : null,
         tp: Number(tp || 0),
         sl: Number(sl || 0),
         tp_in_pips: true,
@@ -219,6 +209,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       setErrorText("");
     } catch (error) {
       setErrorText(String(error?.message || error));
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -267,7 +259,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         />
         <SummaryCard
           label="Spread"
-          value={latestOrder ? "0.10" : "-"}
+          value={spread == null ? "-" : Number(spread).toFixed(2)}
           hint="Current spread estimate"
           icon={Gauge}
           tone="amber"
@@ -320,8 +312,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
               >
                 Close All Positions
               </button>
-              <AppButton variant="soft" onClick={() => loadPositions()}>
-                <RefreshCcw className="h-4 w-4" /> Refresh
+              <AppButton variant="soft" onClick={refreshTradeData} disabled={refreshing}>
+                <RefreshCcw className={cx("h-4 w-4", refreshing && "animate-spin")} />
+                {refreshing ? "Refreshing..." : "Refresh"}
               </AppButton>
             </div>
           </div>
@@ -351,7 +344,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                           side: "-",
                           lot: "-",
                           open_price: "-",
-                            profit: "No open positions.",
+                          profit: "No open positions.",
                         },
                       ]
                   ).map((row) => (
@@ -426,18 +419,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                 activeClassName="border-rose-600 bg-rose-600 text-white shadow-lg shadow-rose-600/20"
                 idleClassName="border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
               />
-            </div>
-            <div>
-              <Field
-                label="Risk % (auto lot)"
-                value={riskPercent}
-                onChange={(e) => setRiskPercent(e.target.value)}
-              />
-              <p className="mt-1 min-h-[16px] text-xs font-semibold text-slate-500">
-                {calculatedLot
-                  ? `Calculated lot: ${calculatedLot.toFixed(2)}`
-                  : "\u00a0"}
-              </p>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
               <Field
@@ -539,10 +520,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             <span className="font-bold">{pendingSide || "BUY"}</span> order.
           </p>
           <div className="rounded-[8px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-            Lot from risk:{" "}
-            <span className="font-bold text-slate-950">
-              {calculatedLot?.toFixed(2) || "Auto"}
-            </span>
+            Lot:{" "}
+            <span className="font-bold text-slate-950">Account setting</span>
             <br />
             {multiTp ? (
               <>
@@ -580,6 +559,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           </AppButton>
           <AppButton
             variant={pendingSide === "SELL" ? "red" : "green"}
+            disabled={submitting}
             onClick={async () => {
               const chosenSide = pendingSide || "BUY";
               setConfirmOpen(false);
@@ -587,7 +567,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
               await openPosition(chosenSide);
             }}
           >
-            Confirm
+            {submitting ? "Opening..." : "Confirm"}
           </AppButton>
         </div>
       </Dialog>
@@ -706,11 +686,262 @@ export function RiskManagementPage({ runtime, onRefreshRuntime }) {
   );
 }
 
-export function SettingsPlaceholder({ accountsData = [], onEdit, onDelete }) {
+export function ProfilePage({
+  accountsData = [],
+  runtime,
+  historyRows = [],
+  summaries = [],
+}) {
+  const historyOrders = historyRows.length
+    ? historyRows
+    : Array.isArray(runtime?.orders)
+      ? runtime.orders
+      : [];
+
+  return (
+    <div className="grid gap-5">
+      <Card>
+        <h3 className="text-xl font-black text-slate-950">Account Profiles</h3>
+        <p className="mt-1 text-sm font-medium text-slate-500">
+          Detailed balance and performance overview for every trading account.
+        </p>
+      </Card>
+      <div className="grid gap-5 xl:grid-cols-2">
+        {accountsData.length ? (
+          accountsData.map((account) => {
+            const balance = Number(account.balance || 0);
+            const accountLogin = String(account.login || "");
+            const accountHistory = historyOrders.filter((order) => {
+              const orderLogin = order.account_login ?? order.login;
+              // Older runtime orders have no account login and belong to the master.
+              return orderLogin == null
+                ? String(account.role).toUpperCase() === "MASTER"
+                : String(orderLogin) === accountLogin;
+            });
+            const historyProfit = accountHistory
+              .filter(
+                (order) =>
+                  String(order.status || "").toLowerCase() === "closed",
+              )
+              .reduce((sum, order) => sum + Number(order.profit || 0), 0);
+            const pnl = historyProfit || Number(account.pnl || 0);
+            const firstBalanceFromHistory = accountHistory
+              .map((order) => ({
+                balance: Number(
+                  order.balance_before || order.initial_balance || 0,
+                ),
+                createdAt: new Date(order.created_at || 0).getTime(),
+              }))
+              .filter((item) => item.balance > 0)
+              .sort((a, b) => a.createdAt - b.createdAt)[0]?.balance;
+            const summary = summaries.find(
+              (item) => String(item.login) === accountLogin,
+            );
+            const firstBalance = Number(
+              summary?.initial_balance ||
+                firstBalanceFromHistory ||
+                balance - historyProfit,
+            );
+            const profitPercent = firstBalance ? (pnl / firstBalance) * 100 : 0;
+            return (
+              <Card key={account.login}>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={cx(
+                        "grid h-12 w-12 place-items-center rounded-xl bg-gradient-to-br text-lg font-black text-white",
+                        account.color || "from-slate-500 to-slate-700",
+                      )}
+                    >
+                      {(account.name || "A").charAt(0).toUpperCase()}
+                    </div>
+                    <div>
+                      <h4 className="font-black text-slate-950">
+                        {account.name || "Trading Account"}
+                      </h4>
+                      <p className="mt-1 text-xs font-semibold text-slate-500">
+                        {account.role} - Login {account.login}
+                      </p>
+                    </div>
+                  </div>
+                  <span
+                    className={cx(
+                      "rounded-full px-2.5 py-1 text-xs font-bold",
+                      account.status === "Connected"
+                        ? "bg-emerald-50 text-emerald-700"
+                        : "bg-rose-50 text-rose-700",
+                    )}
+                  >
+                    {account.status || "Disconnected"}
+                  </span>
+                </div>
+                <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <ProfileMetric label="Balance" value={money(balance)} />
+                  <ProfileMetric label="Equity" value={money(account.equity)} />
+                  <ProfileMetric
+                    label="Profit / Loss"
+                    value={money(pnl)}
+                    positive={pnl >= 0}
+                  />
+                  <ProfileMetric
+                    label="Profit %"
+                    value={`${profitPercent.toFixed(2)}%`}
+                    positive={profitPercent >= 0}
+                  />
+                </div>
+                <div className="mt-4 grid gap-2 border-t border-slate-100 pt-4 text-xs font-semibold text-slate-500 sm:grid-cols-2">
+                  <span>
+                    Server:{" "}
+                    <strong className="text-slate-700">
+                      {account.server || "-"}
+                    </strong>
+                  </span>
+                  <span>
+                    Risk:{" "}
+                    <strong className="text-slate-700">
+                      {Number(account.risk || 0).toFixed(2)}%
+                    </strong>
+                  </span>
+                  <span>
+                    Order delay:{" "}
+                    <strong className="text-slate-700">
+                      {account.orderDelaySec ?? 0}s
+                    </strong>
+                  </span>
+                  <span>
+                    Connection:{" "}
+                    <strong className="text-slate-700">
+                      {account.sessionState || "-"}
+                    </strong>
+                  </span>
+                </div>
+              </Card>
+            );
+          })
+        ) : (
+          <Card>
+            <p className="text-sm font-semibold text-slate-500">
+              No trading accounts configured.
+            </p>
+          </Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function NotificationsPage({ notifications = [] }) {
+  const [filter, setFilter] = useState("all");
+  const visible = notifications.filter(
+    (notification) => filter === "all" || notification.category === filter,
+  );
+
+  return (
+    <Card className="min-h-[calc(100vh-150px)]">
+      <div className="flex flex-col gap-4 border-b border-slate-100 pb-5 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h3 className="flex items-center gap-2 text-xl font-black text-slate-950">
+            <Bell className="h-5 w-5 text-blue-600" /> Notifications
+          </h3>
+          <p className="mt-1 text-sm font-medium text-slate-500">
+            System updates are preserved here for auditing and awareness.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          {["all", "system", "other"].map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setFilter(value)}
+              className={cx(
+                "rounded-full px-3 py-1.5 text-xs font-bold capitalize",
+                filter === value
+                  ? "bg-slate-950 text-white"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200",
+              )}
+            >
+              {value === "other" ? "Other notifications" : value}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="mt-5 divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-white">
+        {visible.length ? (
+          visible.map((notification) => {
+            const Icon =
+              notification.level === "error" || notification.level === "warning"
+                ? AlertTriangle
+                : notification.level === "success"
+                  ? CheckCircle2
+                  : Info;
+            return (
+              <div key={notification.id} className="flex gap-4 px-4 py-4">
+                <Icon
+                  className={cx(
+                    "mt-0.5 h-5 w-5 shrink-0",
+                    notification.level === "error"
+                      ? "text-rose-500"
+                      : notification.level === "warning"
+                        ? "text-amber-500"
+                        : notification.level === "success"
+                          ? "text-emerald-500"
+                          : "text-blue-500",
+                  )}
+                />
+                <div>
+                  <p className="text-sm font-black text-slate-800">
+                    {notification.title}
+                  </p>
+                  <p className="mt-1 text-sm leading-6 text-slate-500">
+                    {notification.message}
+                  </p>
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <p className="px-4 py-12 text-center text-sm font-semibold text-slate-400">
+            No notifications in this category.
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function ProfileMetric({ label, value, positive }) {
+  return (
+    <div className="rounded-xl bg-slate-50 p-3">
+      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400">
+        {label}
+      </p>
+      <p
+        className={cx(
+          "mt-1 text-sm font-black",
+          positive === undefined
+            ? "text-slate-950"
+            : positive
+              ? "text-emerald-600"
+              : "text-rose-600",
+        )}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+export function SettingsPlaceholder({
+  initialTab = "accounts",
+  accountsData = [],
+  onEdit,
+  onDelete,
+}) {
   const [defaults, setDefaults] = useState({
     autoStartMonitoring: false,
   });
-  const [settingsTab, setSettingsTab] = useState("accounts");
+  const [settingsTab, setSettingsTab] = useState(initialTab);
+  useEffect(() => setSettingsTab(initialTab), [initialTab]);
   const settingsTabs = ["accounts", "search", "notifications", "appearance"];
   const tabNavigation = (
     <div className="flex flex-wrap gap-5 border-b border-slate-200">
@@ -762,8 +993,13 @@ export function SettingsPlaceholder({ accountsData = [], onEdit, onDelete }) {
       <div className="space-y-6">
         {tabNavigation}
         <Card>
-          <h3 className="text-lg font-black capitalize text-slate-950">{settingsTab} Settings</h3>
-          <p className="mt-1 text-sm text-slate-500">These settings are ready for configuration and will be persisted with the selected section.</p>
+          <h3 className="text-lg font-black capitalize text-slate-950">
+            {settingsTab} Settings
+          </h3>
+          <p className="mt-1 text-sm text-slate-500">
+            These settings are ready for configuration and will be persisted
+            with the selected section.
+          </p>
         </Card>
       </div>
     );
@@ -781,7 +1017,7 @@ export function SettingsPlaceholder({ accountsData = [], onEdit, onDelete }) {
                   <th className="py-3 pl-4 pr-3 font-bold">Account</th>
                   <th className="px-3 py-3 font-bold">Server</th>
                   <th className="px-3 py-3 font-bold">Balance</th>
-                  <th className="px-3 py-3 font-bold">Risk Ratio</th>
+                  <th className="px-3 py-3 font-bold">Risk Percent</th>
                   <th className="py-3 pl-3 pr-4 text-right font-bold">
                     Actions
                   </th>
@@ -819,12 +1055,6 @@ export function SettingsPlaceholder({ accountsData = [], onEdit, onDelete }) {
                               {account.role}
                             </span>
                           </div>
-                          <p className="mt-1 text-xs font-semibold text-slate-500">
-                            Risk x
-                            {Number(
-                              account.risk ?? 1,
-                            ).toFixed(2)}
-                          </p>
                         </div>
                       </div>
                     </td>
@@ -835,10 +1065,7 @@ export function SettingsPlaceholder({ accountsData = [], onEdit, onDelete }) {
                       {money(account.balance)}
                     </td>
                     <td className="px-3 py-4 text-sm font-semibold text-slate-800">
-                      x
-                      {Number(
-                        account.risk ?? 1,
-                      ).toFixed(2)}
+                      {Number(account.risk ?? 1).toFixed(2)}
                     </td>
                     <td className="py-4 pl-3 pr-4">
                       <div className="flex justify-end gap-2">

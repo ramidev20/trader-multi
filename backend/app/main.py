@@ -101,6 +101,9 @@ class OpenPositionPayload(BaseModel):
     advanced: bool = False
     sl_price: float | None = None
     ratio: float = 3.0
+    tp1_ratio: float = 1.0
+    tp2_ratio: float = 1.0
+    tp3_ratio: float = 1.0
     tp2_enabled: bool = False
     tp3_enabled: bool = False
     tp1_percent: float = 100.0
@@ -603,10 +606,16 @@ def account_snapshots() -> dict[str, Any]:
     config = _load_config()
     snapshots: list[dict[str, Any]] = []
     errors: list[str] = []
+    accounts = config.get("trading_accounts", [])
+    connected_logins = {
+        _safe_int(session.get("login"))
+        for session in list_sessions(accounts)
+        if str(session.get("state", "")).lower() == "connected"
+    }
     with MT5_LOCK:
-        for account in config.get("trading_accounts", []):
+        for account in accounts:
             login = _safe_int(account.get("user"))
-            if login <= 0:
+            if login <= 0 or login not in connected_logins:
                 continue
             ok, detail = _initialize_mt5_for_account(account)
             if not ok:
@@ -631,6 +640,8 @@ def account_snapshots() -> dict[str, Any]:
                 })
             except Exception as exc:
                 errors.append(f"{login}: snapshot error {exc}")
+    if not snapshots and not errors:
+        errors.append("No connected accounts available for snapshots.")
     return {"status": "ok", "snapshots": snapshots, "errors": errors}
 
 
@@ -669,10 +680,15 @@ def trade_history() -> dict[str, Any]:
         return {"status": "ok", "history": orders, "summaries": summaries, "errors": []}
 
     errors: list[str] = []
+    connected_logins = {
+        _safe_int(session.get("login"))
+        for session in list_sessions(accounts)
+        if str(session.get("state", "")).lower() == "connected"
+    }
     with MT5_LOCK:
         for account in accounts:
             login = _safe_int(account.get("user"))
-            if login <= 0:
+            if login <= 0 or login not in connected_logins:
                 continue
             init_ok, init_detail = _initialize_mt5_for_account(account)
             if not init_ok:
@@ -726,6 +742,8 @@ def trade_history() -> dict[str, Any]:
                 history.extend(account_rows)
             except Exception as exc:
                 errors.append(f"{login}: history read error {exc}")
+    if not summaries and not errors:
+        errors.append("No connected accounts available for trade history.")
 
     history.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
     return {"status": "ok", "history": history, "summaries": summaries, "errors": errors}
@@ -789,6 +807,9 @@ def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
             advanced=bool(payload.advanced),
             sl_price=payload.sl_price,
             ratio=float(payload.ratio),
+            tp1_ratio=float(payload.tp1_ratio),
+            tp2_ratio=float(payload.tp2_ratio),
+            tp3_ratio=float(payload.tp3_ratio),
             tp2_enabled=bool(payload.tp2_enabled),
             tp3_enabled=bool(payload.tp3_enabled),
             tp1_percent=float(payload.tp1_percent),

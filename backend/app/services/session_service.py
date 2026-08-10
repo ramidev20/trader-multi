@@ -8,6 +8,7 @@ import sys
 from typing import Any
 
 from .runtime_state import append_log
+from .path_utils import resolve_terminal_path, sanitize_terminal_path
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 # Connection status is runtime state, not application source/log history.
@@ -38,11 +39,7 @@ def _write_status(login: int, payload: dict[str, Any]) -> None:
 
 
 def _normalize_terminal_path(path_value: str) -> str:
-    # Users often paste quoted Windows paths; strip wrapping quotes safely.
-    path = str(path_value or "").strip()
-    if len(path) >= 2 and path[0] == path[-1] and path[0] in {'"', "'"}:
-        path = path[1:-1].strip()
-    return path
+    return sanitize_terminal_path(path_value)
 
 
 def _launch_terminal(terminal_path: str) -> tuple[bool, str]:
@@ -161,7 +158,7 @@ def connect_account(account: dict[str, Any]) -> dict[str, Any]:
     login = _safe_int(account.get("user"))
     if login <= 0:
         return {"status": "error", "message": "Invalid account login"}
-    terminal_path = _normalize_terminal_path(str(account.get("terminal_path", "") or ""))
+    terminal_path = resolve_terminal_path(account.get("terminal_path", ""))
     if not terminal_path:
         return {"status": "error", "message": "Missing terminal path"}
 

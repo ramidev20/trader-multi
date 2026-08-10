@@ -6,6 +6,8 @@ from pathlib import Path
 
 import MetaTrader5 as mt5
 
+from backend.app.services.path_utils import resolve_terminal_path
+
 
 def write_status(path: Path, payload: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -20,6 +22,7 @@ def main():
     parser.add_argument("--terminal-path", required=True)
     parser.add_argument("--status-file", required=True)
     args = parser.parse_args()
+    terminal_path = resolve_terminal_path(args.terminal_path)
 
     status_file = Path(args.status_file)
     write_status(
@@ -29,7 +32,7 @@ def main():
             "pid": os.getpid(),
             "login": args.login,
             "server": args.server,
-            "terminal_path": args.terminal_path,
+            "terminal_path": terminal_path,
             "updated_at": int(time.time()),
         },
     )
@@ -38,7 +41,7 @@ def main():
         login=args.login,
         password=args.password,
         server=args.server,
-        path=args.terminal_path,
+        path=terminal_path,
     )
     if not ok:
         write_status(
@@ -48,7 +51,7 @@ def main():
                 "pid": os.getpid(),
                 "login": args.login,
                 "server": args.server,
-                "terminal_path": args.terminal_path,
+                "terminal_path": terminal_path,
                 "error": str(mt5.last_error()),
                 "updated_at": int(time.time()),
             },
@@ -69,7 +72,7 @@ def main():
                         "pid": os.getpid(),
                         "login": args.login,
                         "server": args.server,
-                        "terminal_path": args.terminal_path,
+                        "terminal_path": terminal_path,
                         "latency": round(ping_last / 1000.0, 2) if ping_last > 0 else 0.0,
                         "algo_enabled": algo_enabled,
                         "error": "No account info available",
@@ -88,7 +91,7 @@ def main():
                         "equity": float(getattr(info, "equity", 0.0) or 0.0),
                         "latency": round(ping_last / 1000.0, 2) if ping_last > 0 else 0.0,
                         "algo_enabled": algo_enabled,
-                        "terminal_path": args.terminal_path,
+                        "terminal_path": terminal_path,
                         "updated_at": int(time.time()),
                     },
                 )
@@ -104,7 +107,7 @@ def main():
                     "pid": os.getpid(),
                     "login": args.login,
                     "server": args.server,
-                    "terminal_path": args.terminal_path,
+                    "terminal_path": terminal_path,
                     "updated_at": int(time.time()),
                 },
             )

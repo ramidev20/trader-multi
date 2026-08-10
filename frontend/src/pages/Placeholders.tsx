@@ -28,7 +28,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [sl, setSl] = useState("600");
   const [multiTp, setMultiTp] = useState(false);
   const [slPrice, setSlPrice] = useState("");
-  const [ratio, setRatio] = useState("3.0");
+  const [tp1Ratio, setTp1Ratio] = useState("1.0");
+  const [tp2Ratio, setTp2Ratio] = useState("1.0");
+  const [tp3Ratio, setTp3Ratio] = useState("1.0");
   const [tp2Enabled, setTp2Enabled] = useState(false);
   const [tp3Enabled, setTp3Enabled] = useState(false);
   const [tp1Percent, setTp1Percent] = useState("100");
@@ -55,6 +57,12 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       ),
     [runtime],
   );
+  const totalRatio = useMemo(() => {
+    let total = Number(tp1Ratio || 0);
+    if (tp2Enabled) total += Number(tp2Ratio || 0);
+    if (tp3Enabled) total += Number(tp3Ratio || 0);
+    return total;
+  }, [tp1Ratio, tp2Enabled, tp2Ratio, tp3Enabled, tp3Ratio]);
 
   useEffect(() => {
     if (!multiTp && tp3Enabled) setTp3Enabled(false);
@@ -121,10 +129,10 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         className={cx(
           compact
             ? "inline-flex items-center gap-2 text-sm font-semibold text-slate-700 disabled:pointer-events-none disabled:opacity-60"
-            : "flex h-[50px] w-full items-center justify-between rounded-[8px] border border-slate-200 bg-slate-50 px-4 text-sm font-semibold text-slate-700 transition hover:bg-white disabled:pointer-events-none disabled:opacity-60",
+            : "flex min-w-0 h-[50px] w-full items-center justify-between rounded-[8px] border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-700 transition hover:bg-white disabled:pointer-events-none disabled:opacity-60 sm:px-4",
         )}
       >
-        <span>{label}</span>
+        <span className="min-w-0 text-left leading-tight">{label}</span>
         <SwitchKnob checked={checked} />
       </button>
     );
@@ -197,7 +205,10 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         sl_in_pips: true,
         advanced: multiTp,
         sl_price: multiTp ? Number(slPrice || 0) : null,
-        ratio: Number(ratio || 0),
+        ratio: totalRatio,
+        tp1_ratio: Number(tp1Ratio || 0),
+        tp2_ratio: Number(tp2Ratio || 0),
+        tp3_ratio: Number(tp3Ratio || 0),
         tp2_enabled: tp2Enabled,
         tp3_enabled: tp3Enabled,
         tp1_percent: Number(tp1Percent || 0),
@@ -457,17 +468,23 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                   disabled={!multiTp}
                 />
                 <Field
-                  label="Ratio"
-                  value={ratio}
+                  label="Total Ratio"
+                  value={String(totalRatio || 0)}
                   type="number"
-                  min="0.5"
-                  max="10"
-                  step="0.5"
-                  onChange={(e) => setRatio(decimalInput(e.target.value))}
-                  disabled={!multiTp}
+                  step="0.1"
+                  disabled
                 />
               </div>
-              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_140px] items-end">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3 items-end">
+                <Field
+                  label="TP1 Ratio"
+                  value={tp1Ratio}
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  onChange={(e) => setTp1Ratio(decimalInput(e.target.value))}
+                  disabled={!multiTp}
+                />
                 <InlineSwitcher
                   label="Enable TP2"
                   checked={tp2Enabled}
@@ -484,7 +501,16 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                   disabled={!multiTp || !tp2Enabled}
                 />
               </div>
-              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_140px] items-end">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3 items-end">
+                <Field
+                  label="TP2 Ratio"
+                  value={tp2Ratio}
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  onChange={(e) => setTp2Ratio(decimalInput(e.target.value))}
+                  disabled={!multiTp || !tp2Enabled}
+                />
                 <InlineSwitcher
                   label="Enable TP3"
                   checked={tp3Enabled}
@@ -498,6 +524,15 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                   min="1"
                   max="100"
                   onChange={(e) => setTp2Percent(e.target.value)}
+                  disabled={!multiTp || !tp3Enabled}
+                />
+                <Field
+                  label="TP3 Ratio"
+                  value={tp3Ratio}
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  onChange={(e) => setTp3Ratio(decimalInput(e.target.value))}
                   disabled={!multiTp || !tp3Enabled}
                 />
               </div>
@@ -530,8 +565,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                   {slPrice || "-"}
                 </span>
                 <br />
-                Ratio:{" "}
-                <span className="font-bold text-slate-950">{ratio}R</span>
+                Total Ratio:{" "}
+                <span className="font-bold text-slate-950">{totalRatio}R</span>
                 <br />
                 TP stages:{" "}
                 <span className="font-bold text-slate-950">

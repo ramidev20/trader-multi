@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from .mt5_compat import mt5, mt5_available
 from .mt5_lock import MT5_LOCK
+from .path_utils import resolve_terminal_path, sanitize_terminal_path
 from .runtime_state import append_list, append_log, get, patch_path, replace_list, set_path
 from .task_manager import emit_log, is_task_running, start_task, stop_task
 
@@ -92,10 +93,7 @@ def _safe_int(value) -> int:
 
 
 def _normalize_terminal_path(path_value: str) -> str:
-    path = str(path_value or "").strip()
-    if len(path) >= 2 and path[0] == path[-1] and path[0] in {'"', "'"}:
-        path = path[1:-1].strip()
-    return path
+    return sanitize_terminal_path(path_value)
 
 
 def _resolve_master_account(cfg: dict) -> dict | None:
@@ -145,7 +143,7 @@ def _initialize_mt5_for_account(account: dict) -> tuple[bool, str]:
     login = _safe_int(account.get("user"))
     password = str(account.get("password", "") or "")
     server = str(account.get("server", "") or "")
-    terminal_path = _normalize_terminal_path(str(account.get("terminal_path", "") or ""))
+    terminal_path = resolve_terminal_path(account.get("terminal_path", ""))
     if login <= 0 or not password or not server or not terminal_path:
         return False, f"missing account credentials/path for login={login}"
     with MT5_LOCK:
@@ -642,6 +640,9 @@ def open_manual_position(
     advanced: bool = False,
     sl_price: float | None = None,
     ratio: float = 3.0,
+    tp1_ratio: float = 1.0,
+    tp2_ratio: float = 1.0,
+    tp3_ratio: float = 1.0,
     tp2_enabled: bool = False,
     tp3_enabled: bool = False,
     tp1_percent: float = 100.0,
@@ -729,12 +730,19 @@ def open_manual_position(
             raise RuntimeError("TP withdrawal percentages must be between 0 and 100.")
         if any(percent >= 100 for percent in enabled_withdrawals[:-1]):
             raise RuntimeError("Only the last enabled TP can withdraw 100% of its remaining position.")
-        ratio_value = float(ratio or 0)
-        if ratio_value <= 0:
-            raise RuntimeError("Global TP ratio must be greater than 0.")
-        ratio_step = ratio_value / len(enabled_withdrawals)
-        for index, percent in enumerate(enabled_withdrawals, start=1):
-            distance = risk_distance * ratio_step * index
+        tp_ratios = [float(tp1_ratio or 0)]
+        if tp2_enabled:
+            tp_ratios.append(float(tp2_ratio or 0))
+        elif float(ratio or 0) > 0:
+            tp_ratios[0] = float(ratio or 0)
+        if tp3_enabled:
+            tp_ratios.append(float(tp3_ratio or 0))
+        if any(stage_ratio <= 0 for stage_ratio in tp_ratios):
+            raise RuntimeError("Each enabled TP ratio must be greater than 0.")
+        cumulative_ratio = 0.0
+        for stage_ratio, percent in zip(tp_ratios, enabled_withdrawals):
+            cumulative_ratio += stage_ratio
+            distance = risk_distance * cumulative_ratio
             target = entry_price + distance if is_buy else entry_price - distance
             take_profit_specs.append((target, percent))
         take_profit = take_profit_specs[-1][0]
@@ -785,6 +793,11 @@ def open_manual_position(
                     {"price": round(float(target), 2), "withdraw_percent": float(percent)}
                     for target, percent in take_profit_specs
                 ],
+                "tp_ratio_total": round(sum(float(stage_ratio or 0) for stage_ratio in (
+                    [tp1_ratio]
+                    + ([tp2_ratio] if tp2_enabled else [])
+                    + ([tp3_ratio] if tp3_enabled else [])
+                )), 4) if advanced else 0.0,
                 "risk_percent": float(risk_percent or 0),
                 "balance_before": balance_before,
                 "status": "open",

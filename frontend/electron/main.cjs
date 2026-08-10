@@ -4,7 +4,8 @@ const path = require("node:path");
 
 const HOST = "127.0.0.1";
 const PORT = 8000;
-const URL = `http://${HOST}:${PORT}/`;
+const BACKEND_URL = `http://${HOST}:${PORT}/`;
+const FRONTEND_URL = process.env.FRONTEND_URL || BACKEND_URL;
 const projectRoot = path.resolve(__dirname, "..", "..");
 let backend;
 
@@ -24,7 +25,7 @@ async function waitForBackend(timeoutMs = 20000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${URL}health`);
+      const response = await fetch(`${BACKEND_URL}health`);
       if (response.ok) return true;
     } catch {
       // Backend is still starting.
@@ -34,10 +35,30 @@ async function waitForBackend(timeoutMs = 20000) {
   return false;
 }
 
+async function waitForFrontend(timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(FRONTEND_URL);
+      if (response.ok) return true;
+    } catch {
+      // Frontend is still starting.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
+}
+
 async function createWindow() {
-  const ready = await waitForBackend();
-  if (!ready) {
+  const backendReady = await waitForBackend();
+  if (!backendReady) {
     console.error("Python backend did not become ready.");
+    app.quit();
+    return;
+  }
+  const frontendReady = await waitForFrontend();
+  if (!frontendReady) {
+    console.error(`Frontend did not become ready at ${FRONTEND_URL}.`);
     app.quit();
     return;
   }
@@ -82,7 +103,7 @@ async function createWindow() {
     }
   });
 
-  await window.loadURL(URL);
+  await window.loadURL(FRONTEND_URL);
 }
 
 app.whenReady().then(() => {

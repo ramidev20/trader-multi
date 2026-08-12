@@ -12,6 +12,7 @@ from typing import Callable, Optional
 from uuid import uuid4
 
 from .mt5_compat import mt5, mt5_available
+from .env_utils import is_dev_mode
 from .mt5_lock import MT5_LOCK
 from .path_utils import resolve_terminal_path, sanitize_terminal_path
 from .runtime_state import append_list, append_log, get, patch_path, replace_list, set_path
@@ -22,6 +23,7 @@ CONFIG_FILE = Path(__file__).resolve().parents[3] / "config.json"
 _sim_ticks = {"XAUUSD": 3350.0}
 _sim_last_candle_ts: dict[str, int] = {}
 MANUAL_TP_TASK_NAME = "manual_multi_tp"
+MANUAL_AUTO_CLOSE_TASK_NAME = "manual_auto_close_all"
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
     "M3": mt5.TIMEFRAME_M3,
@@ -278,6 +280,10 @@ def _risk_adjusted_volume(
 def _ensure_master_session() -> tuple[bool, str, dict | None, dict]:
     cfg = _load_config()
     master = _resolve_master_account(cfg)
+    if is_dev_mode():
+        if master:
+            return True, "developer mode", master, cfg
+        return True, "developer mode", {"user": 0, "username": "Developer Mode", "risk_percent": 1.0, "role": "master"}, cfg
     if not master:
         return False, "No master account configured for execution.", None, cfg
     if not mt5_available():
@@ -310,15 +316,19 @@ def _build_copy_request(master_request: dict, risk_percent: float, origin: str) 
     if not symbol_ok:
         return req
     order_type = int(master_request.get("type", mt5.ORDER_TYPE_BUY) or mt5.ORDER_TYPE_BUY)
+    is_pending_limit = order_type in {mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT}
     tick = mt5.symbol_info_tick(symbol) if mt5_available() else None
-    if tick is None:
+    if tick is None and not is_pending_limit:
         return req
 
     master_price = float(master_request.get("price", 0.0) or 0.0)
     master_tp = float(master_request.get("tp", 0.0) or 0.0)
     master_sl = float(master_request.get("sl", 0.0) or 0.0)
 
-    if order_type == mt5.ORDER_TYPE_BUY:
+    if is_pending_limit:
+        price = master_price
+        req["price"] = price
+    elif order_type == mt5.ORDER_TYPE_BUY:
         price = float(getattr(tick, "ask", master_price) or master_price)
         req["price"] = price
         if master_tp:
@@ -335,7 +345,7 @@ def _build_copy_request(master_request: dict, risk_percent: float, origin: str) 
     req["volume"] = round(
         _risk_adjusted_volume(
             symbol,
-            order_type,
+            mt5.ORDER_TYPE_BUY if order_type in {mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT} else mt5.ORDER_TYPE_SELL,
             float(req.get("price", master_price) or master_price),
             float(req.get("sl", master_sl) or master_sl),
             float(risk_percent or 0.0),
@@ -627,6 +637,44 @@ def _register_manual_tp_session(side: str, entry: float, targets: list[tuple[flo
         start_task(MANUAL_TP_TASK_NAME, _monitor_manual_multi_tp, interval_sec=1, log_schedule=False)
 
 
+def cancel_manual_auto_close() -> None:
+    stop_task(MANUAL_AUTO_CLOSE_TASK_NAME)
+    patch_path(
+        "manual_trade",
+        {
+            "auto_close_at": None,
+            "scheduled_at": None,
+        },
+    )
+
+
+def schedule_manual_auto_close(close_at: datetime, side: str = "all", symbol: str | None = None) -> None:
+    close_at_value = close_at.isoformat()
+
+    def _run_close_all() -> None:
+        try:
+            close_all_positions(side=side, symbol=symbol)
+            append_log("search", f"[WARNING] Auto close executed at scheduled end time {close_at_value}.")
+        finally:
+            cancel_manual_auto_close()
+
+    start_task(
+        MANUAL_AUTO_CLOSE_TASK_NAME,
+        _run_close_all,
+        interval_sec=86400,
+        start_time=close_at,
+        log_schedule=False,
+    )
+    patch_path(
+        "manual_trade",
+        {
+            "auto_close_at": close_at_value,
+            "scheduled_at": datetime.now().isoformat(),
+        },
+    )
+    append_log("search", f"[INFO] Auto close scheduled for {close_at_value}.")
+
+
 @_mt5_session_locked
 def open_manual_position(
     order_type: str,
@@ -634,6 +682,8 @@ def open_manual_position(
     tp: float | None = None,
     sl: float | None = None,
     symbol: str = SYMBOL_DEFAULT,
+    order_kind: str = "MARKET",
+    limit_price: float | None = None,
     tp_in_pips: bool = False,
     sl_in_pips: bool = False,
     risk_percent: float | None = None,
@@ -647,6 +697,7 @@ def open_manual_position(
     tp3_enabled: bool = False,
     tp1_percent: float = 100.0,
     tp2_percent: float = 100.0,
+    auto_close_at: datetime | None = None,
 ):
     master_ok, master_detail, _master, _cfg = _ensure_master_session()
     if not master_ok:
@@ -675,8 +726,21 @@ def open_manual_position(
         append_log("search", f"[ERROR] {message}")
         raise RuntimeError(message)
     order_type_upper = str(order_type).upper()
+    order_kind_upper = str(order_kind or "MARKET").upper()
     is_buy = order_type_upper == "BUY"
-    entry_price = float(tick.ask) if is_buy else float(tick.bid)
+    market_entry_price = float(tick.ask) if is_buy else float(tick.bid)
+    if order_kind_upper not in {"MARKET", "LIMIT"}:
+        raise RuntimeError("Order type must be MARKET or LIMIT.")
+    if order_kind_upper == "LIMIT":
+        if limit_price is None or float(limit_price) <= 0:
+            raise RuntimeError("Enter a valid limit price.")
+        entry_price = float(limit_price)
+        if is_buy and entry_price >= float(tick.ask):
+            raise RuntimeError("BUY limit price must be below the current market price.")
+        if (not is_buy) and entry_price <= float(tick.bid):
+            raise RuntimeError("SELL limit price must be above the current market price.")
+    else:
+        entry_price = market_entry_price
 
     # Risk is configured per account. Keep accepting an explicit value for
     # backwards compatibility, but use the master account setting by default.
@@ -754,18 +818,22 @@ def open_manual_position(
         take_profit = float(tp)
 
     request = {
-        "action": mt5.TRADE_ACTION_DEAL,
+        "action": mt5.TRADE_ACTION_PENDING if order_kind_upper == "LIMIT" else mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
         "volume": round(float(effective_lot), 2),
-        "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
+        "type": (
+            mt5.ORDER_TYPE_BUY_LIMIT if order_kind_upper == "LIMIT" and is_buy else
+            mt5.ORDER_TYPE_SELL_LIMIT if order_kind_upper == "LIMIT" else
+            mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+        ),
         "price": float(entry_price),
         "sl": round(float(stop_loss), 2),
         "tp": round(float(take_profit), 2),
         "deviation": 20,
         "magic": 123456,
-        "comment": "manual position",
+        "comment": "manual limit order" if order_kind_upper == "LIMIT" else "manual position",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_FOK,
+        "type_filling": mt5.ORDER_FILLING_RETURN if order_kind_upper == "LIMIT" else mt5.ORDER_FILLING_FOK,
     }
 
     check_ok, check_detail = _check_request(request)
@@ -785,6 +853,7 @@ def open_manual_position(
                 "ticket": ticket,
                 "symbol": symbol,
                 "side": str(order_type).upper(),
+                "order_kind": order_kind_upper,
                 "lot": round(float(effective_lot), 2),
                 "entry": round(float(entry_price), 2),
                 "tp": round(float(take_profit), 2),
@@ -802,13 +871,18 @@ def open_manual_position(
                 "balance_before": balance_before,
                 "status": "open",
                 "origin": "manual",
+                "auto_close_at": auto_close_at.isoformat() if isinstance(auto_close_at, datetime) else None,
                 "created_at": datetime.now().isoformat(),
             },
             limit=2000,
         )
         copy_summary = _clone_trade_to_sub_accounts(request, origin="manual")
         copy_suffix = f" ({copy_summary})" if copy_summary else ""
-        append_log("search", f"[SUCCESS] [order] success {order_type_upper} {symbol}{copy_suffix}")
+        if isinstance(auto_close_at, datetime):
+            schedule_manual_auto_close(auto_close_at)
+        else:
+            cancel_manual_auto_close()
+        append_log("search", f"[SUCCESS] [order] success {order_kind_upper} {order_type_upper} {symbol}{copy_suffix}")
         if len(take_profit_specs) > 1:
             _register_manual_tp_session(
                 order_type_upper,
@@ -875,6 +949,7 @@ def calculate_manual_lot(
 def close_all_positions(side: str = "all", symbol: str | None = None):
     _manual_tp_sessions.clear()
     stop_task(MANUAL_TP_TASK_NAME)
+    cancel_manual_auto_close()
     closed_tickets: set[int] = set()
     attempted = 0
     errors: list[str] = []

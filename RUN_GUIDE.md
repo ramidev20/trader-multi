@@ -57,16 +57,24 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 From project root:
 
 ```powershell
-pip install -r requirements-desktop.txt
-.\run_desktop.ps1
+pip install -r requirements.txt
+python run.py
 ```
 
-This builds the React frontend when needed, starts the Python backend automatically, and opens the React app in an Electron desktop window.
+This starts the Python backend and Vite development server automatically, then opens the React app in a Python `pywebview` desktop window. Saved frontend changes hot-reload immediately; it does not use `frontend/dist`.
 
-## 5) Build the React frontend
+The desktop launcher now uses Python `pywebview` instead of Electron, so the same launcher flow works across Windows and Linux.
 
-```powershell
-.\build_desktop.ps1
-```
+## 5) Developer Mode
 
-The desktop launcher uses Electron from `frontend/node_modules` and does not use pywebview or Flet.
+The project reads the root `.env` file for both backend and frontend dev flags.
+
+Use these flags in `.env`:
+- `TRADER_DEV_MODE=true`
+- `VITE_DEV_MODE=true`
+
+With developer mode enabled, the UI loads mock trading data and simulated MT5 behavior so you can test pages without connecting a real MT5 account.
+
+## 6) Remote Control (Two PCs)
+
+On the PC running MT5, install Tailscale and set `TRADER_REMOTE_TOKEN` to a long secret in `.env`. For live commands, set `TRADER_DEV_MODE=false`, `DEV_MODE=false`, and `TRADER_REMOTE_ENABLED=true`, then launch with `python run.py`. Use the **Remote Control** page from the other PC to connect to `ws://<tailscale-ip>:8000/remote/ws` with the same token.

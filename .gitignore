@@ -6,3 +6,4 @@ logs/
 .runtime/
 *.zip
 config.json
+.env

@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
+import asyncio
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from .services.mt5_compat import mt5, mt5_available
+from .services.env_utils import is_dev_mode, load_project_env
 from .services.risk_service import start_risk_monitor, stop_risk_monitor
 from .services.mt5_lock import MT5_LOCK
 from .services.runtime_state import append_log, get as state_get, patch_path as state_patch, set_path as state_set, snapshot
@@ -31,10 +36,14 @@ from .services.strategy_service import (
 from .services.task_manager import set_runtime_logger
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+load_project_env()
 CONFIG_FILE = ROOT_DIR / "config.json"
 FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
 FRONTEND_INDEX = FRONTEND_DIST / "index.html"
 SYMBOL_DEFAULT = "XAUUSD"
+REMOTE_COMMAND_CACHE_LIMIT = 500
+_remote_command_cache: dict[str, dict[str, Any]] = {}
+_remote_command_lock = RLock()
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "trading_accounts": [],
@@ -93,6 +102,8 @@ class OpenPositionPayload(BaseModel):
     side: str
     lot: float | None = None
     symbol: str = "XAUUSD"
+    order_kind: str = "MARKET"
+    limit_price: float | None = None
     tp: float | None = None
     sl: float | None = None
     tp_in_pips: bool = False
@@ -108,6 +119,24 @@ class OpenPositionPayload(BaseModel):
     tp3_enabled: bool = False
     tp1_percent: float = 100.0
     tp2_percent: float = 100.0
+    auto_close_at: datetime | None = None
+
+
+def _remote_token() -> str:
+    return str(os.environ.get("TRADER_REMOTE_TOKEN", "")).strip()
+
+
+def _execute_remote_command(action_name: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Run remote commands through the same guarded operations as the local UI."""
+    if action_name == "open":
+        return open_position(OpenPositionPayload(**data))
+    if action_name == "close_all":
+        return close_positions()
+    if action_name == "start_search":
+        return start_strategy(StrategyStartPayload(**data))
+    if action_name == "stop_search":
+        return stop_strategy()
+    raise ValueError(f"Unsupported remote action: {action_name}")
 
 
 class LotCalculationPayload(BaseModel):
@@ -459,6 +488,8 @@ def _fetch_all_live_positions() -> tuple[list[dict[str, Any]], list[str], float 
 
 
 def _require_master_connected() -> int:
+    if is_dev_mode():
+        return 0
     config = _load_config()
     ok, message, master_login = master_adapter_ready(config)
     if not ok:
@@ -801,6 +832,8 @@ def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
             payload.tp,
             payload.sl,
             symbol=payload.symbol,
+            order_kind=str(payload.order_kind).upper(),
+            limit_price=payload.limit_price,
             tp_in_pips=bool(payload.tp_in_pips),
             sl_in_pips=bool(payload.sl_in_pips),
             risk_percent=payload.risk_percent,
@@ -814,6 +847,7 @@ def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
             tp3_enabled=bool(payload.tp3_enabled),
             tp1_percent=float(payload.tp1_percent),
             tp2_percent=float(payload.tp2_percent),
+            auto_close_at=payload.auto_close_at,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -892,6 +926,81 @@ def action(payload: ActionPayload) -> dict[str, Any]:
     return {"status": "ok", "message": f"Action handled: {action_name}"}
 
 
+@app.websocket("/remote/ws")
+async def remote_command_socket(websocket: WebSocket) -> None:
+    """Authenticated command receiver intended for a private Tailscale network."""
+    configured_token = _remote_token()
+    await websocket.accept()
+    try:
+        authentication = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+    except (TimeoutError, WebSocketDisconnect):
+        await websocket.close(code=1008, reason="Remote control authentication timed out.")
+        return
+    provided_token = str(authentication.get("token", "")) if isinstance(authentication, dict) else ""
+    if (
+        not configured_token
+        or not isinstance(authentication, dict)
+        or authentication.get("type") != "authenticate"
+        or not secrets.compare_digest(provided_token, configured_token)
+    ):
+        await websocket.close(code=1008, reason="Remote control authentication failed.")
+        return
+    connections = int(state_get("remote_control.connections", 0) or 0) + 1
+    state_patch("remote_control", {"connections": connections})
+    await websocket.send_json({
+        "type": "connection",
+        "status": "connected",
+        "message": "Authenticated remote command receiver is ready.",
+        "server_time": datetime.now().isoformat(),
+    })
+    try:
+        while True:
+            raw_message = await websocket.receive_json()
+            command_id = str(raw_message.get("id", "")).strip()
+            action_name = str(raw_message.get("action", "")).strip().lower()
+            data = raw_message.get("data", {})
+            if not command_id or not action_name or not isinstance(data, dict):
+                await websocket.send_json({
+                    "type": "result",
+                    "id": command_id or None,
+                    "status": "error",
+                    "message": "Each command requires an id, action, and object data.",
+                })
+                continue
+
+            with _remote_command_lock:
+                cached_result = _remote_command_cache.get(command_id)
+            if cached_result:
+                await websocket.send_json(cached_result)
+                continue
+
+            try:
+                result = _execute_remote_command(action_name, data)
+                response = {"type": "result", "id": command_id, "status": "success", "result": result}
+                append_log("adapter", f"[REMOTE] Executed {action_name} ({command_id}).")
+                state_patch("remote_control", {
+                    "last_command_at": datetime.now().isoformat(),
+                    "last_command_action": action_name,
+                })
+            except HTTPException as exc:
+                response = {"type": "result", "id": command_id, "status": "error", "message": str(exc.detail)}
+            except (TypeError, ValueError, RuntimeError) as exc:
+                response = {"type": "result", "id": command_id, "status": "error", "message": str(exc)}
+            except Exception:
+                response = {"type": "result", "id": command_id, "status": "error", "message": "The remote command could not be completed."}
+
+            with _remote_command_lock:
+                if len(_remote_command_cache) >= REMOTE_COMMAND_CACHE_LIMIT:
+                    _remote_command_cache.pop(next(iter(_remote_command_cache)))
+                _remote_command_cache[command_id] = response
+            await websocket.send_json(response)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        remaining_connections = max(0, int(state_get("remote_control.connections", 1) or 1) - 1)
+        state_patch("remote_control", {"connections": remaining_connections})
+
+
 @app.get("/", include_in_schema=False)
 def serve_frontend_root():
     if FRONTEND_INDEX.exists():
@@ -919,6 +1028,10 @@ def serve_frontend_assets(full_path: str):
 
     if candidate.exists() and candidate.is_file():
         return FileResponse(candidate)
+
+    # Static assets must fail visibly; only application routes should fall back to the SPA shell.
+    if Path(full_path).suffix:
+        raise HTTPException(status_code=404, detail="Static asset not found")
 
     if FRONTEND_INDEX.exists():
         return FileResponse(FRONTEND_INDEX)

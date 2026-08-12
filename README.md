@@ -7,7 +7,7 @@ Lequidity Trader is a React/Vite dashboard with a FastAPI backend for managing M
 Install the backend dependencies:
 
 ```powershell
-pip install -r backend/requirements.txt
+pip install -r requirements.txt
 ```
 
 Start the backend from the project root:
@@ -31,20 +31,26 @@ The development dashboard is available at `http://localhost:5173`.
 Install the desktop dependencies and launch the single-window app from the project root:
 
 ```powershell
-pip install -r requirements-desktop.txt
-.\run_desktop.ps1
+pip install -r requirements.txt
+python run.py
 ```
 
-The launcher builds `frontend/dist` when needed, starts the Python FastAPI backend, and opens the React dashboard in an Electron desktop window. The old Flet and pywebview launchers have been removed.
+The launcher starts the FastAPI backend and Vite development server, then opens the React dashboard in a Python `pywebview` desktop window. Saved frontend changes hot-reload in the window; no `frontend/dist` build is used by `python run.py`.
 
-## Windows executable
+## Developer Mode
 
-```powershell
-.\build_desktop.ps1
-```
-
-The packaged executable is written to `dist\LequidityTraderDesktop\`.
+The root `.env` file controls developer mode. With `TRADER_DEV_MODE=true` and `VITE_DEV_MODE=true`, the app uses mock MT5 data so you can browse and test pages without logging into a live MT5 account.
 
 ## Configuration
 
 Account and strategy settings are stored in the local `config.json` file. It is intentionally ignored by Git because it can contain account credentials.
+
+## Remote Control With Tailscale
+
+On the trading PC, install and sign in to Tailscale, set a long `TRADER_REMOTE_TOKEN` in `.env`, set `TRADER_DEV_MODE=false`, `DEV_MODE=false`, and `TRADER_REMOTE_ENABLED=true` so commands reach live MT5 and the receiver is exposed to Tailscale. Then launch normally:
+
+```powershell
+python run.py
+```
+
+On the controller PC, open **Remote Control**, enter `ws://<trading-pc-tailscale-ip>:8000/remote/ws` and the same token, then connect. The token is sent in the initial WebSocket message rather than the URL. The command channel supports opening market or limit orders, starting/stopping search, and closing all positions. It only accepts authenticated WebSocket connections and stores recent command IDs to make retried commands idempotent.

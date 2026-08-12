@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -9,12 +11,12 @@ import MetaTrader5 as mt5
 from backend.app.services.path_utils import resolve_terminal_path
 
 
-def write_status(path: Path, payload: dict):
+def write_status(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--login", required=True, type=int)
     parser.add_argument("--password", required=True)
@@ -103,14 +105,14 @@ def main():
         write_status(
             status_file,
             {
-                    "state": "stopped",
-                    "pid": os.getpid(),
-                    "login": args.login,
-                    "server": args.server,
-                    "terminal_path": terminal_path,
-                    "updated_at": int(time.time()),
-                },
-            )
+                "state": "stopped",
+                "pid": os.getpid(),
+                "login": args.login,
+                "server": args.server,
+                "terminal_path": terminal_path,
+                "updated_at": int(time.time()),
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -8,6 +8,15 @@ from typing import Any
 _lock = RLock()
 
 _state: dict[str, Any] = {
+    "remote_control": {
+        "connections": 0,
+        "last_command_at": None,
+        "last_command_action": None,
+    },
+    "manual_trade": {
+        "auto_close_at": None,
+        "scheduled_at": None,
+    },
     "strategy": {
         "running": False,
         "mode": None,

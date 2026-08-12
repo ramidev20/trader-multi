@@ -15,15 +15,18 @@ import {
   Wrench,
   Info,
 } from "lucide-react";
-import { AppButton, Card, Dialog, Field } from "../components/ui/Primitives";
+import { AppButton, Card, Dialog, Field, SelectBox } from "../components/ui/Primitives";
 import { TableFrame } from "../components/ui/TableFrame";
 import { LogList } from "../components/ui/LogList";
 import { MetricCard } from "./shared/MetricCard";
 import { cx, decimalInput, money } from "../utils/format";
 import { api } from "../services/api";
+import { isRemoteConnected, sendRemoteCommand } from "../services/remoteControl";
 
 export function TradePage({ runtime, onRefreshRuntime }) {
   const [side, setSide] = useState("BUY");
+  const [orderKind, setOrderKind] = useState("MARKET");
+  const [limitPrice, setLimitPrice] = useState("");
   const [tp, setTp] = useState("150");
   const [sl, setSl] = useState("600");
   const [multiTp, setMultiTp] = useState(false);
@@ -35,9 +38,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [tp3Enabled, setTp3Enabled] = useState(false);
   const [tp1Percent, setTp1Percent] = useState("100");
   const [tp2Percent, setTp2Percent] = useState("100");
+  const [autoCloseEnabled, setAutoCloseEnabled] = useState(false);
+  const [autoCloseAt, setAutoCloseAt] = useState(() => defaultAutoCloseValue());
   const [errorText, setErrorText] = useState("");
-  const [pendingSide, setPendingSide] = useState(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -63,6 +66,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     if (tp3Enabled) total += Number(tp3Ratio || 0);
     return total;
   }, [tp1Ratio, tp2Enabled, tp2Ratio, tp3Enabled, tp3Ratio]);
+  const scheduledAutoCloseAt = runtime?.manual_trade?.auto_close_at || null;
 
   useEffect(() => {
     if (!multiTp && tp3Enabled) setTp3Enabled(false);
@@ -70,6 +74,14 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       setTp1Percent("50");
     if (multiTp && tp3Enabled && tp2Percent === "100") setTp2Percent("50");
   }, [multiTp, tp2Enabled, tp3Enabled]);
+
+  useEffect(() => {
+    if (!scheduledAutoCloseAt) return;
+    const dt = new Date(scheduledAutoCloseAt);
+    if (Number.isNaN(dt.getTime())) return;
+    setAutoCloseEnabled(true);
+    setAutoCloseAt(toDateTimeLocalValue(dt));
+  }, [scheduledAutoCloseAt]);
 
   function SummaryCard({ label, value, hint, icon: Icon, tone = "slate" }) {
     const toneStyle = {
@@ -146,8 +158,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         disabled={submitting}
         onClick={() => {
           setSide(value);
-          setPendingSide(value);
-          setConfirmOpen(true);
+          openPosition(value);
         }}
         className={cx(
           "flex h-[50px] w-full items-center justify-center rounded-2xl border px-4 text-sm font-bold transition",
@@ -195,10 +206,16 @@ export function TradePage({ runtime, onRefreshRuntime }) {
 
   async function openPosition(orderSide) {
     if (submitting) return;
+    if (autoCloseEnabled && !autoCloseAt) {
+      setErrorText("Choose an end time for auto close.");
+      return;
+    }
     setSubmitting(true);
     try {
-      await api.openPosition({
+      const orderPayload = {
         side: orderSide,
+        order_kind: orderKind,
+        limit_price: orderKind === "LIMIT" ? Number(limitPrice || 0) : null,
         tp: Number(tp || 0),
         sl: Number(sl || 0),
         tp_in_pips: true,
@@ -213,8 +230,18 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         tp3_enabled: tp3Enabled,
         tp1_percent: Number(tp1Percent || 0),
         tp2_percent: Number(tp2Percent || 0),
+        auto_close_at: autoCloseEnabled ? new Date(autoCloseAt).toISOString() : null,
         symbol: "XAUUSD",
-      });
+      };
+      await api.openPosition(orderPayload);
+      if (isRemoteConnected()) {
+        const { risk_percent, riskPercent, ...receiverPayload } = orderPayload;
+        try {
+          await sendRemoteCommand("open", receiverPayload);
+        } catch (error) {
+          throw new Error(`Order opened locally, but PC B did not mirror it: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       await onRefreshRuntime?.();
       await loadPositions({ silent: true });
       setErrorText("");
@@ -229,6 +256,13 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     try {
       setCloseConfirmOpen(false);
       const response = await api.closePositions();
+      if (isRemoteConnected()) {
+        try {
+          await sendRemoteCommand("close_all", {});
+        } catch (error) {
+          throw new Error(`Positions closed locally, but PC B did not receive the close request: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       await onRefreshRuntime?.();
       await loadPositions({ silent: true });
       const summary = response?.summary || {};
@@ -418,6 +452,28 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           </p>
           <div className="mt-4 space-y-3">
             <div className="grid gap-3 md:grid-cols-2">
+              <SelectBox
+                label="Order Type"
+                value={orderKind}
+                options={["MARKET", "LIMIT"]}
+                onChange={(e) => setOrderKind(e.target.value)}
+              />
+              <Field
+                label={orderKind === "LIMIT" ? "Limit Entry Price" : "Entry Mode"}
+                value={orderKind === "LIMIT" ? limitPrice : "Market execution"}
+                type={orderKind === "LIMIT" ? "number" : "text"}
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                onChange={
+                  orderKind === "LIMIT"
+                    ? (e) => setLimitPrice(decimalInput(e.target.value))
+                    : undefined
+                }
+                disabled={orderKind !== "LIMIT"}
+              />
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
               <SideButton
                 value="BUY"
                 label="BUY"
@@ -444,6 +500,29 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                 onChange={(e) => setSl(e.target.value)}
                 disabled={multiTp}
               />
+            </div>
+            <div className="space-y-3 rounded-[8px] border border-slate-200 bg-slate-50 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h4 className="font-black text-slate-950">Auto Close All Positions</h4>
+                  <p className="text-xs font-medium text-slate-500">
+                    Close all open positions automatically at the selected end time.
+                  </p>
+                </div>
+                <InlineSwitcher compact checked={autoCloseEnabled} onChange={setAutoCloseEnabled} />
+              </div>
+              <Field
+                label="End Time"
+                value={autoCloseAt}
+                type="datetime-local"
+                onChange={(e) => setAutoCloseAt(e.target.value)}
+                disabled={!autoCloseEnabled}
+              />
+              {scheduledAutoCloseAt ? (
+                <p className="text-xs font-semibold text-slate-600">
+                  Scheduled auto close: {fmtDateTime(scheduledAutoCloseAt)}
+                </p>
+              ) : null}
             </div>
             <div className={cx("space-y-3 border-t border-slate-200 pt-4")}>
               <div className="flex items-center justify-between gap-3">
@@ -542,72 +621,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       </div>
 
       <Dialog
-        open={confirmOpen}
-        title={`Confirm ${pendingSide || ""} Order`}
-        onClose={() => {
-          setConfirmOpen(false);
-          setPendingSide(null);
-        }}
-      >
-        <div className="space-y-3">
-          <p className="text-sm text-slate-600">
-            You are about to open a{" "}
-            <span className="font-bold">{pendingSide || "BUY"}</span> order.
-          </p>
-          <div className="rounded-[8px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-            Lot:{" "}
-            <span className="font-bold text-slate-950">Account setting</span>
-            <br />
-            {multiTp ? (
-              <>
-                Stop Loss:{" "}
-                <span className="font-bold text-slate-950">
-                  {slPrice || "-"}
-                </span>
-                <br />
-                Total Ratio:{" "}
-                <span className="font-bold text-slate-950">{totalRatio}R</span>
-                <br />
-                TP stages:{" "}
-                <span className="font-bold text-slate-950">
-                  {tp3Enabled ? "3" : tp2Enabled ? "2" : "1"}
-                </span>
-              </>
-            ) : (
-              <>
-                TP: <span className="font-bold text-slate-950">{tp} pips</span>
-                <br />
-                SL: <span className="font-bold text-slate-950">{sl} pips</span>
-              </>
-            )}
-          </div>
-        </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <AppButton
-            variant="soft"
-            onClick={() => {
-              setConfirmOpen(false);
-              setPendingSide(null);
-            }}
-          >
-            Cancel
-          </AppButton>
-          <AppButton
-            variant={pendingSide === "SELL" ? "red" : "green"}
-            disabled={submitting}
-            onClick={async () => {
-              const chosenSide = pendingSide || "BUY";
-              setConfirmOpen(false);
-              setPendingSide(null);
-              await openPosition(chosenSide);
-            }}
-          >
-            {submitting ? "Opening..." : "Confirm"}
-          </AppButton>
-        </div>
-      </Dialog>
-
-      <Dialog
         open={closeConfirmOpen}
         title="Close All Positions"
         onClose={() => setCloseConfirmOpen(false)}
@@ -632,6 +645,17 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       </Dialog>
     </div>
   );
+}
+
+function toDateTimeLocalValue(value) {
+  const dt = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(dt.getTime())) return "";
+  const local = new Date(dt.getTime() - dt.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function defaultAutoCloseValue() {
+  return toDateTimeLocalValue(new Date(Date.now() + 60 * 60 * 1000));
 }
 
 export function RiskManagementPage({ runtime, onRefreshRuntime }) {

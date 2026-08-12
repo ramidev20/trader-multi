@@ -4,6 +4,7 @@ import {
   Home,
   Search,
   Settings,
+  Radio,
   ShieldCheck,
   Terminal,
 } from "lucide-react";
@@ -27,6 +28,7 @@ export default function Sidebar({
     { key: "trade", label: "Trade", icon: Terminal },
     { key: "history", label: "Trade History", icon: Copy },
     { key: "risk", label: "Risk Management", icon: ShieldCheck },
+    { key: "remote", label: "Remote Control", icon: Radio },
     { key: "settings", label: "Settings", icon: Settings },
   ];
 

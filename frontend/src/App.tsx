@@ -8,6 +8,8 @@ import DashboardPage from "./pages/DashboardPage";
 import SearchPage from "./pages/SearchPage";
 import { NotificationsPage, ProfilePage, RiskManagementPage, SettingsPlaceholder, TradePage } from "./pages/Placeholders";
 import TradeHistoryPage from "./pages/TradeHistoryPage";
+import RemoteControlPage from "./pages/RemoteControlPage";
+import { initialAccounts, liquidityLevels, strategyLogs } from "./data/mockData";
 import { cx } from "./utils/format";
 import { api } from "./services/api";
 
@@ -23,6 +25,7 @@ const avatarColorOptions = [
   { name: "Lime", value: "from-lime-500 to-green-600", swatch: "#84cc16" },
   { name: "Slate", value: "from-slate-500 to-slate-700", swatch: "#64748b" },
 ];
+const devModeEnabled = String(import.meta.env.VITE_DEV_MODE || "").toLowerCase() === "true";
 
 export default function App() {
   const [activePage, setActivePage] = useState("dashboard");
@@ -92,7 +95,8 @@ export default function App() {
     const { silent = false, withSnapshots = false } = options;
     if (!silent) setLoadingBootstrap(true);
     try {
-      const data = await api.bootstrap();
+      const loaded = await api.bootstrap();
+      const data = resolveBootstrapData(loaded);
       setAccountList((current) => {
         const previousByLogin = new Map(current.map((account) => [String(account.login), account]));
         return (Array.isArray(data.accounts) ? data.accounts : []).map((account) => {
@@ -121,7 +125,7 @@ export default function App() {
       }
       setNotifications(buildNotifications(data).filter((item) => !dismissedNotificationIds.current.has(item.id)));
       setErrorText("");
-      if (withSnapshots) {
+      if (withSnapshots && !devModeEnabled) {
         try {
           const snapshotData = await api.accountSnapshots();
           mergeAccountSnapshots(snapshotData);
@@ -131,6 +135,16 @@ export default function App() {
       }
       return data;
     } catch (error) {
+      if (devModeEnabled) {
+        const data = buildDeveloperBootstrap();
+        setAccountList(data.accounts || []);
+        setRuntime(data.runtime || null);
+        setSearchLogs(data.logs?.search || []);
+        setNotifications(buildNotifications(data));
+        setTradeHistory(buildDeveloperTradeHistory());
+        setErrorText("");
+        return data;
+      }
       setErrorText(String(error?.message || error));
       return null;
     } finally {
@@ -167,10 +181,15 @@ export default function App() {
     () => accountList.find((account) => account.role === "MASTER") || null,
     [accountList],
   );
-  const masterConnected = masterAccount?.status === "Connected";
+  const masterConnected = devModeEnabled || masterAccount?.status === "Connected";
 
   useEffect(() => {
-    if (!masterConnected || !["history", "profile"].includes(activePage)) return;
+    if (!["history", "profile"].includes(activePage)) return;
+    if (devModeEnabled) {
+      setTradeHistory(buildDeveloperTradeHistory());
+      return;
+    }
+    if (!masterConnected) return;
     api.tradeHistory()
       .then((data) => setTradeHistory({ history: data.history || [], summaries: data.summaries || [] }))
       .catch((error) => setErrorText(String(error?.message || error)));
@@ -292,6 +311,10 @@ export default function App() {
         return;
       }
       await api.connectAccount(Number(account.login));
+      if (devModeEnabled) {
+        await refreshBootstrap({ silent: true });
+        return;
+      }
       let connected = false;
       for (let i = 0; i < 8; i += 1) {
         const data = await refreshBootstrap({ silent: true });
@@ -313,6 +336,7 @@ export default function App() {
 
   async function refreshDashboard() {
     const data = await refreshBootstrap({ silent: true });
+    if (devModeEnabled) return data;
     try {
       const snapshotData = await api.accountSnapshots();
       mergeAccountSnapshots(snapshotData);
@@ -333,6 +357,8 @@ export default function App() {
               ? "Risk Management"
               : activePage === "settings"
                 ? "Settings"
+                : activePage === "remote"
+                  ? "Remote Control"
                 : activePage === "profile"
                   ? "Profile"
                 : activePage === "notifications"
@@ -347,12 +373,14 @@ export default function App() {
         <div className="px-5 py-6 lg:px-8" style={styles.pageContent}>
           <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }}>
             {errorText ? <div style={styles.errorBanner}>{errorText}</div> : null}
+            {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock MT5 data unless a live backend session is available.</div> : null}
             {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}
             {activePage === "dashboard" && <DashboardPage totals={totals} accountsData={accountList} onAdd={openAddDialog} onEdit={openEditDialog} onDelete={openDeleteDialog} onConnect={connectAccountAndSync} onRefresh={refreshDashboard} />}
             {activePage === "search" && (masterConnected ? <SearchPage runtime={runtime} searchLogs={searchLogs} onRefreshRuntime={refreshBootstrap} timeRange={searchTimeRange} onTimeRangeChange={setSearchTimeRange} /> : <MasterConnectionRequiredPage />)}
             {activePage === "trade" && (masterConnected ? <TradePage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
             {activePage === "history" && (masterConnected ? <TradeHistoryPage runtime={runtime} historyRows={tradeHistory.history} /> : <MasterConnectionRequiredPage />)}
             {activePage === "risk" && (masterConnected ? <RiskManagementPage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
+            {activePage === "remote" && <RemoteControlPage />}
             {activePage === "settings" && <SettingsPlaceholder initialTab={settingsTabRequest} accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} />}
             {activePage === "profile" && <ProfilePage accountsData={accountList} runtime={runtime} historyRows={tradeHistory.history} summaries={tradeHistory.summaries} />}
             {activePage === "notifications" && <NotificationsPage notifications={notifications} />}
@@ -454,6 +482,131 @@ function MasterConnectionRequiredPage() {
       </div>
     </div>
   );
+}
+
+function resolveBootstrapData(data) {
+  if (!devModeEnabled) return data;
+  if (Array.isArray(data?.accounts) && data.accounts.length > 0) return data;
+  return buildDeveloperBootstrap();
+}
+
+function buildDeveloperBootstrap() {
+  const accounts = initialAccounts.map((account) => ({
+    ...account,
+    floatingPnl: Number(account.pnl || 0),
+    algoEnabled: true,
+    sessionState: account.status === "Connected" ? "connected" : "disconnected",
+    orderDelaySec: account.orderDelaySec ?? 0,
+  }));
+  const runtime = {
+    strategy: {
+      running: false,
+      mode: null,
+      started_at: null,
+      tasks: [],
+      start_time: null,
+      end_time: null,
+      last_stop_reason: null,
+    },
+    risk_monitor: {
+      running: false,
+      started_at: null,
+      interval_sec: 60,
+      risk_percent: 1,
+      profit_percent: 1,
+      orders_limit: 10,
+      start_balance: null,
+    },
+    manual_trade: {
+      auto_close_at: null,
+      scheduled_at: null,
+    },
+    liquidity_levels: liquidityLevels,
+    orders: [
+      {
+        id: "dev-open-1",
+        ticket: 101001,
+        symbol: "XAUUSD",
+        side: "BUY",
+        order_kind: "MARKET",
+        lot: 0.12,
+        entry: 3348.2,
+        tp: 3358.2,
+        sl: 3340.2,
+        status: "open",
+        origin: "manual",
+        created_at: new Date().toISOString(),
+      },
+    ],
+    sessions: {},
+    logs: {
+      search: strategyLogs,
+      risk: ["[INFO] Developer mode risk monitor ready."],
+      adapter: ["[INFO] Developer mode adapter simulation active."],
+    },
+    bootstrap_cache: {
+      settings: {
+        search_config: {
+          timeframe: "M1",
+          max_positions: 1,
+          orders_limit: 10,
+          pips: 10,
+          max_pips: 100,
+          tp: 400,
+          sl: 200,
+          enable_liquidity: true,
+          enable_buy: true,
+          enable_sell: true,
+          stop_on_first_close: false,
+          tp_type: true,
+          sl_type: true,
+        },
+      },
+    },
+  };
+  return {
+    settings: {},
+    accounts,
+    metrics: {
+      balance: accounts.reduce((sum, account) => sum + Number(account.balance || 0), 0),
+      equity: accounts.reduce((sum, account) => sum + Number(account.equity || 0), 0),
+      pnl: accounts.reduce((sum, account) => sum + Number(account.pnl || 0), 0),
+      connected: accounts.filter((account) => account.status === "Connected").length,
+      total: accounts.length,
+    },
+    logs: runtime.logs,
+    runtime,
+  };
+}
+
+function buildDeveloperTradeHistory() {
+  return {
+    history: [
+      {
+        id: "dev-history-1",
+        ticket: 100901,
+        account_login: "8888888",
+        account_name: "Main Strategy Account",
+        symbol: "XAUUSD",
+        side: "BUY",
+        lot: 0.1,
+        entry: 3341.8,
+        profit: 128.55,
+        status: "Closed",
+        comment: "Developer mode sample history row",
+        created_at: new Date(Date.now() - 3600 * 1000).toISOString(),
+      },
+    ],
+    summaries: [
+      {
+        login: "8888888",
+        balance: 52458.75,
+        initial_balance: 52330.2,
+        profit: 128.55,
+        profit_percent: 0.25,
+      },
+    ],
+  };
 }
 
 const styles = {

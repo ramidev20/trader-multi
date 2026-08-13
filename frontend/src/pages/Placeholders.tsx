@@ -996,12 +996,10 @@ export function SettingsPlaceholder({
   onEdit,
   onDelete,
 }) {
-  const [defaults, setDefaults] = useState({
-    autoStartMonitoring: false,
-  });
-  const [settingsTab, setSettingsTab] = useState(initialTab);
-  useEffect(() => setSettingsTab(initialTab), [initialTab]);
   const settingsTabs = ["accounts", "search", "notifications", "appearance"];
+  const normalizeSettingsTab = (tab) => settingsTabs.includes(tab) ? tab : "accounts";
+  const [settingsTab, setSettingsTab] = useState(normalizeSettingsTab(initialTab));
+  useEffect(() => setSettingsTab(normalizeSettingsTab(initialTab)), [initialTab]);
   const tabNavigation = (
     <div className="flex flex-wrap gap-5 border-b border-slate-200">
       {settingsTabs.map((tab) => (
@@ -1021,31 +1019,6 @@ export function SettingsPlaceholder({
       ))}
     </div>
   );
-
-  function SettingsSwitch({ label, value, onToggle }) {
-    return (
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center justify-between rounded-[8px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700"
-      >
-        <span>{label}</span>
-        <span
-          className={cx(
-            "relative inline-flex h-6 w-11 items-center rounded-full transition",
-            value ? "bg-blue-600" : "bg-slate-300",
-          )}
-        >
-          <span
-            className={cx(
-              "h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200",
-              value ? "translate-x-6" : "translate-x-1",
-            )}
-          />
-        </span>
-      </button>
-    );
-  }
 
   if (settingsTab !== "accounts") {
     return (

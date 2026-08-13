@@ -31,6 +31,7 @@ export const api = {
   settings: () => request("/settings"),
   saveTheme: (theme_mode) => request("/settings/theme", { method: "PATCH", body: JSON.stringify({ theme_mode }) }),
   saveSearchConfig: (search_config) => request("/settings/search", { method: "PATCH", body: JSON.stringify({ search_config }) }),
+  saveRemoteControlSettings: (payload) => request("/settings/remote-control", { method: "PATCH", body: JSON.stringify(payload) }),
 
   saveAccount: (payload) => request("/accounts", { method: "POST", body: JSON.stringify(payload) }),
   deleteAccount: (login) => request(`/accounts/${login}`, { method: "DELETE" }),

@@ -25,9 +25,8 @@ const avatarColorOptions = [
   { name: "Lime", value: "from-lime-500 to-green-600", swatch: "#84cc16" },
   { name: "Slate", value: "from-slate-500 to-slate-700", swatch: "#64748b" },
 ];
-const devModeEnabled = String(import.meta.env.VITE_DEV_MODE || "").toLowerCase() === "true";
-
 export default function App() {
+  const [devModeEnabled, setDevModeEnabled] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
   const [accountList, setAccountList] = useState([]);
   const [runtime, setRuntime] = useState(null);
@@ -96,7 +95,9 @@ export default function App() {
     if (!silent) setLoadingBootstrap(true);
     try {
       const loaded = await api.bootstrap();
-      const data = resolveBootstrapData(loaded);
+      const nextDevMode = Boolean(loaded?.dev_mode);
+      setDevModeEnabled(nextDevMode);
+      const data = resolveBootstrapData(loaded, nextDevMode);
       setAccountList((current) => {
         const previousByLogin = new Map(current.map((account) => [String(account.login), account]));
         return (Array.isArray(data.accounts) ? data.accounts : []).map((account) => {
@@ -137,6 +138,7 @@ export default function App() {
     } catch (error) {
       if (devModeEnabled) {
         const data = buildDeveloperBootstrap();
+        setDevModeEnabled(true);
         setAccountList(data.accounts || []);
         setRuntime(data.runtime || null);
         setSearchLogs(data.logs?.search || []);
@@ -150,7 +152,7 @@ export default function App() {
     } finally {
       if (!silent) setLoadingBootstrap(false);
     }
-  }, [mergeAccountSnapshots]);
+  }, [devModeEnabled, mergeAccountSnapshots]);
 
   function clearNotifications() {
     notifications.filter((item) => item.category !== "system").forEach((item) => dismissedNotificationIds.current.add(item.id));
@@ -484,7 +486,7 @@ function MasterConnectionRequiredPage() {
   );
 }
 
-function resolveBootstrapData(data) {
+function resolveBootstrapData(data, devModeEnabled) {
   if (!devModeEnabled) return data;
   if (Array.isArray(data?.accounts) && data.accounts.length > 0) return data;
   return buildDeveloperBootstrap();
@@ -565,6 +567,7 @@ function buildDeveloperBootstrap() {
     },
   };
   return {
+    dev_mode: true,
     settings: {},
     accounts,
     metrics: {
@@ -612,7 +615,7 @@ function buildDeveloperTradeHistory() {
 const styles = {
   appShell: {
     minHeight: "100vh",
-    overflowX: "hidden",
+    overflowX: "clip",
     background: "#f1f5f9",
     color: "#020617",
   } satisfies React.CSSProperties,

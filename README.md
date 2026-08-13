@@ -47,10 +47,8 @@ Account and strategy settings are stored in the local `config.json` file. It is 
 
 ## Remote Control With Tailscale
 
-On the trading PC, install and sign in to Tailscale, set a long `TRADER_REMOTE_TOKEN` in `.env`, set `TRADER_DEV_MODE=false`, `DEV_MODE=false`, and `TRADER_REMOTE_ENABLED=true` so commands reach live MT5 and the receiver is exposed to Tailscale. Then launch normally:
+Install the standard **Tailscale** desktop app on both PCs and sign in to the same Tailscale account. You do not need to configure an exit node, VPN server, subnet router, Tailscale SSH, or any additional service.
 
-```powershell
-python run.py
-```
+On the trading PC, open **Remote Control**, choose **Receiver**, enable remote trades, generate a long token, and enter `ws://<this-pc-tailscale-ip>:8000/remote/ws`. Save the setup and restart the app once.
 
-On the controller PC, open **Remote Control**, enter `ws://<trading-pc-tailscale-ip>:8000/remote/ws` and the same token, then connect. The token is sent in the initial WebSocket message rather than the URL. The command channel supports opening market or limit orders, starting/stopping search, and closing all positions. It only accepts authenticated WebSocket connections and stores recent command IDs to make retried commands idempotent.
+On the controller PC, open **Remote Control**, choose **Controller / Trader**, enter the same receiver URL and token, then connect. Tailscale encrypts the private connection between the two PCs. The command channel supports opening market or limit orders, starting or stopping search, and closing all positions. Recent command IDs are retained to make retried commands idempotent.

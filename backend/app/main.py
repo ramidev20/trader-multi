@@ -48,6 +48,11 @@ _remote_command_lock = RLock()
 DEFAULT_CONFIG: dict[str, Any] = {
     "trading_accounts": [],
     "master_account_login": None,
+    "remote_control": {
+        "enabled": False,
+        "token": "",
+        "receiver_url": "",
+    },
     "search_config": {
         "lot": 0.05,
         "timeframe": "M1",
@@ -72,6 +77,12 @@ class ThemeUpdate(BaseModel):
 
 class SearchConfigUpdate(BaseModel):
     search_config: dict[str, Any]
+
+
+class RemoteControlSettingsUpdate(BaseModel):
+    enabled: bool
+    token: str
+    receiver_url: str = ""
 
 
 class AccountPayload(BaseModel):
@@ -123,7 +134,10 @@ class OpenPositionPayload(BaseModel):
 
 
 def _remote_token() -> str:
-    return str(os.environ.get("TRADER_REMOTE_TOKEN", "")).strip()
+    config = _load_config()
+    remote_control = config.get("remote_control", {})
+    token = str(remote_control.get("token", "")).strip()
+    return token or str(os.environ.get("TRADER_REMOTE_TOKEN", "")).strip()
 
 
 def _execute_remote_command(action_name: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -202,6 +216,13 @@ def _load_config() -> dict[str, Any]:
         account["order_delay_sec"] = int(account.get("order_delay_sec", 0) or 0)
     if not isinstance(config.get("search_config"), dict):
         config["search_config"] = dict(DEFAULT_CONFIG["search_config"])
+    if not isinstance(config.get("remote_control"), dict):
+        config["remote_control"] = dict(DEFAULT_CONFIG["remote_control"])
+    config["remote_control"] = {
+        "enabled": bool(config["remote_control"].get("enabled", False)),
+        "token": str(config["remote_control"].get("token", "") or ""),
+        "receiver_url": str(config["remote_control"].get("receiver_url", "") or "").strip(),
+    }
     for unused_key in (
         "time",
         "order_delay",
@@ -516,6 +537,7 @@ def bootstrap() -> dict[str, Any]:
     ]
     runtime = snapshot()
     return {
+        "dev_mode": is_dev_mode(),
         "settings": config,
         "accounts": front_accounts,
         "metrics": _metrics(front_accounts),
@@ -560,6 +582,22 @@ def set_theme(payload: ThemeUpdate) -> dict[str, str]:
 def set_search_config(payload: SearchConfigUpdate) -> dict[str, str]:
     config = _load_config()
     config["search_config"] = payload.search_config
+    _save_config(config)
+    _refresh_bootstrap_cache()
+    return {"status": "ok"}
+
+
+@app.patch("/settings/remote-control")
+def set_remote_control_settings(payload: RemoteControlSettingsUpdate) -> dict[str, str]:
+    token = payload.token.strip()
+    if payload.enabled and not token:
+        raise HTTPException(status_code=400, detail="Remote token is required when remote control is enabled.")
+    config = _load_config()
+    config["remote_control"] = {
+        "enabled": bool(payload.enabled),
+        "token": token,
+        "receiver_url": payload.receiver_url.strip(),
+    }
     _save_config(config)
     _refresh_bootstrap_cache()
     return {"status": "ok"}

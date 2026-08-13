@@ -34,7 +34,7 @@ export default function Sidebar({
 
   return (
     <aside
-      className="sticky top-0 hidden h-screen flex-col border-r border-slate-200 p-4 lg:flex"
+      className="sticky top-0 z-20 hidden h-screen self-start flex-col border-r border-slate-200 bg-white p-4 lg:flex"
       style={styles.drawer}
     >
       <nav style={styles.navigation}>

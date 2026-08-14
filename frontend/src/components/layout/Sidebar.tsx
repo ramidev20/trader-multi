@@ -34,7 +34,7 @@ export default function Sidebar({
 
   return (
     <aside
-      className="sticky top-0 z-20 hidden h-screen self-start flex-col border-r border-slate-200 bg-white p-4 lg:flex"
+      className="app-sidebar sticky top-0 z-20 hidden h-screen self-start flex-col border-r border-slate-200 bg-white p-4 lg:flex"
       style={styles.drawer}
     >
       <nav style={styles.navigation}>
@@ -48,7 +48,7 @@ export default function Sidebar({
                 ? styles.navButtonActive
                 : styles.navButtonIdle),
             }}
-            className="flex w-full items-center gap-3 text-sm font-bold transition"
+            className="app-nav-button flex w-full items-center gap-3 text-sm font-bold transition"
           >
             <Icon className="h-5 w-5" />
             <span>{label}</span>

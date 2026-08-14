@@ -995,11 +995,51 @@ export function SettingsPlaceholder({
   accountsData = [],
   onEdit,
   onDelete,
+  notificationSettings = { enabled: true, show_warnings: true, show_success: true, show_info: false },
+  onNotificationSettingsChange,
+  themeMode = "LIGHT",
+  onThemeModeChange,
 }) {
   const settingsTabs = ["accounts", "search", "notifications", "appearance"];
   const normalizeSettingsTab = (tab) => settingsTabs.includes(tab) ? tab : "accounts";
   const [settingsTab, setSettingsTab] = useState(normalizeSettingsTab(initialTab));
+  const [searchSettings, setSearchSettings] = useState({ timeframe: "M1", pips: 25, max_pips: 70, max_positions: 3, orders_limit: 10, tp: 150, sl: 500, enable_buy: true, enable_sell: true, enable_liquidity: true, enable_pullback: false, pullback_pips: 20, stop_on_first_close: true });
+  const [settingsMessage, setSettingsMessage] = useState("");
   useEffect(() => setSettingsTab(normalizeSettingsTab(initialTab)), [initialTab]);
+  useEffect(() => {
+    api.settings().then((settings) => {
+      if (settings?.search_config) setSearchSettings((current) => ({ ...current, ...settings.search_config }));
+    }).catch(() => {});
+  }, []);
+
+  async function saveSearchSettings() {
+    try {
+      await api.saveSearchConfig(searchSettings);
+      setSettingsMessage("Search defaults saved. New searches will use these values.");
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function saveNotificationSettings(nextSettings) {
+    try {
+      await api.saveNotificationSettings(nextSettings);
+      onNotificationSettingsChange?.(nextSettings);
+      setSettingsMessage("Notification preferences saved.");
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function saveThemeMode(nextThemeMode) {
+    try {
+      await api.saveTheme(nextThemeMode);
+      onThemeModeChange?.(nextThemeMode);
+      setSettingsMessage(`${nextThemeMode === "DARK" ? "Dark" : "Light"} appearance saved.`);
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
   const tabNavigation = (
     <div className="flex flex-wrap gap-5 border-b border-slate-200">
       {settingsTabs.map((tab) => (
@@ -1025,13 +1065,35 @@ export function SettingsPlaceholder({
       <div className="space-y-6">
         {tabNavigation}
         <Card>
-          <h3 className="text-lg font-black capitalize text-slate-950">
-            {settingsTab} Settings
-          </h3>
-          <p className="mt-1 text-sm text-slate-500">
-            These settings are ready for configuration and will be persisted
-            with the selected section.
-          </p>
+          {settingsTab === "search" ? <>
+            <h3 className="text-lg font-black text-slate-950">Search Defaults</h3>
+            <p className="mt-1 text-sm text-slate-500">These values are used when you start or save a Search configuration.</p>
+            <div className="mt-6 grid gap-4 md:grid-cols-3">
+              <label className="text-sm font-bold text-slate-700">Timeframe<select value={searchSettings.timeframe} onChange={(event) => setSearchSettings({ ...searchSettings, timeframe: event.target.value })} className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-semibold"><option>M1</option><option>M3</option><option>M5</option><option>M15</option></select></label>
+              {[['pips', 'Minimum Pips'], ['max_pips', 'Maximum Pips'], ['max_positions', 'Maximum Positions'], ['orders_limit', 'Search Order Limit'], ['tp', 'Take Profit'], ['sl', 'Stop Loss'], ['pullback_pips', 'Pullback Pips']].map(([key, label]) => <label key={key} className="text-sm font-bold text-slate-700">{label}<input type="number" min="0" value={searchSettings[key] ?? ""} onChange={(event) => setSearchSettings({ ...searchSettings, [key]: Number(event.target.value) })} className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-semibold" /></label>)}
+            </div>
+            <div className="mt-5 flex flex-wrap gap-5 text-sm font-bold text-slate-700">
+              {[['enable_buy', 'Enable BUY'], ['enable_sell', 'Enable SELL'], ['enable_liquidity', 'Liquidity trigger'], ['enable_pullback', 'Enable pullback'], ['stop_on_first_close', 'Stop after first close']].map(([key, label]) => <label key={key} className="flex items-center gap-2"><input type="checkbox" checked={Boolean(searchSettings[key])} onChange={(event) => setSearchSettings({ ...searchSettings, [key]: event.target.checked })} />{label}</label>)}
+            </div>
+            <AppButton variant="blue" className="mt-6" onClick={saveSearchSettings}>Save Search Defaults</AppButton>
+          </> : null}
+
+          {settingsTab === "notifications" ? <>
+            <h3 className="text-lg font-black text-slate-950">Notification Preferences</h3>
+            <p className="mt-1 text-sm text-slate-500">Choose which backend events appear in the notification bell and notification page.</p>
+            <div className="mt-6 space-y-4">
+              {[['enabled', 'Enable notifications', 'Show notifications from account, search, remote, and risk events.'], ['show_warnings', 'Show warnings', 'Include account disconnects, blocked commands, and warning events.'], ['show_success', 'Show successful actions', 'Include successful orders, connections, and completed commands.'], ['show_info', 'Show informational updates', 'Include routine system information messages.']].map(([key, label, help]) => <label key={key} className="flex items-start justify-between gap-4 rounded-2xl border border-slate-200 p-4"><span><span className="block text-sm font-black text-slate-900">{label}</span><span className="mt-1 block text-xs leading-5 text-slate-500">{help}</span></span><input type="checkbox" checked={Boolean(notificationSettings[key])} onChange={(event) => saveNotificationSettings({ ...notificationSettings, [key]: event.target.checked })} className="mt-1 h-4 w-4" /></label>)}
+            </div>
+          </> : null}
+
+          {settingsTab === "appearance" ? <>
+            <h3 className="text-lg font-black text-slate-950">Appearance</h3>
+            <p className="mt-1 text-sm text-slate-500">The selected appearance is applied immediately and saved for the next launch.</p>
+            <div className="mt-6 grid max-w-xl gap-3 sm:grid-cols-2">
+              {[['LIGHT', 'Light', 'Clean, high-contrast workspace for daytime trading.'], ['DARK', 'Dark', 'Reduced glare for low-light trading sessions.']].map(([mode, label, help]) => <button key={mode} type="button" onClick={() => saveThemeMode(mode)} className={cx("rounded-2xl border p-4 text-left transition", themeMode === mode ? "border-blue-500 bg-blue-50" : "border-slate-200 bg-white hover:border-slate-300")}><span className="block text-sm font-black text-slate-950">{label}</span><span className="mt-1 block text-xs leading-5 text-slate-500">{help}</span></button>)}
+            </div>
+          </> : null}
+          {settingsMessage ? <p className="mt-5 text-sm font-semibold text-emerald-700">{settingsMessage}</p> : null}
         </Card>
       </div>
     );

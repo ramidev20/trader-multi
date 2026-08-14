@@ -308,7 +308,7 @@ export default function RemoteControlPage() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
+    <div className="w-full max-w-none space-y-6">
       <motion.header
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
@@ -377,7 +377,7 @@ export default function RemoteControlPage() {
           </motion.div>
         ) : role === "receiver" ? (
           <motion.div key="receiver" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-            <div className="space-y-6 rounded-3xl border border-emerald-100 bg-white p-5 shadow-sm sm:p-7">
+            <div className="space-y-6 rounded-3xl border border-emerald-100 bg-white p-4 shadow-sm sm:p-5">
               <RemoteTabs role="receiver" activeTab={activeTab} onChange={setActiveTab} />
 
               {activeTab === "settings" ? (
@@ -439,7 +439,7 @@ export default function RemoteControlPage() {
           </motion.div>
         ) : (
           <motion.div key="controller" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-            <div className="space-y-6 rounded-3xl border border-cyan-100 bg-white p-5 shadow-sm sm:p-7">
+            <div className="space-y-6 rounded-3xl border border-cyan-100 bg-white p-4 shadow-sm sm:p-5">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                 <RemoteTabs role="controller" activeTab={activeTab} onChange={setActiveTab} />
                 <div className="flex flex-col gap-3 sm:items-end sm:ml-auto">

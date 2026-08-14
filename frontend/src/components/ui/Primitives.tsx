@@ -7,7 +7,7 @@ type CardProps = React.PropsWithChildren<{
 
 export function Card({ children, className = "", style }: CardProps) {
   return (
-    <div className={className} style={{ ...styles.card, ...style }}>
+    <div className={`app-card ${className}`} style={{ ...styles.card, ...style }}>
       {children}
     </div>
   );
@@ -35,7 +35,7 @@ export function AppButton({
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className={className}
+      className={`app-button app-button--${variant} ${className}`}
       style={{
         ...styles.button,
         ...styles.buttonVariants[variant],
@@ -80,6 +80,7 @@ export function Field({
         defaultValue={onChange ? undefined : value}
         onChange={onChange}
         {...props}
+        className="app-field-control"
         style={styles.fieldInput}
       />
     </label>
@@ -101,6 +102,7 @@ export function SelectBox({ label, value, options, onChange }: SelectBoxProps) {
         value={onChange ? value : undefined}
         defaultValue={onChange ? undefined : value}
         onChange={onChange}
+        className="app-field-control"
         style={styles.fieldInput}
       >
         {options.map((option) => (
@@ -131,10 +133,10 @@ export function Dialog({ open, title, children, onClose }) {
   if (!open) return null;
   return (
     <div style={styles.dialogOverlay}>
-      <div style={styles.dialog}>
+      <div className="app-dialog" style={styles.dialog}>
         <div style={styles.dialogHeader}>
           <h3 style={styles.dialogTitle}>{title}</h3>
-          <button onClick={onClose} style={styles.dialogClose}>
+          <button className="app-dialog-close" onClick={onClose} style={styles.dialogClose}>
             Close
           </button>
         </div>

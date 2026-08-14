@@ -64,7 +64,7 @@ export default function TopBar({
 
   return (
     <header
-      className="sticky top-0 z-10 px-5 py-4 lg:px-8"
+      className="app-topbar sticky top-0 z-10 px-5 py-4 lg:px-8"
       style={styles.header}
     >
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -78,12 +78,12 @@ export default function TopBar({
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <div className="relative">
-          <button type="button" style={styles.iconButton} onClick={() => setNotificationsOpen((open) => !open)} aria-label="Notifications">
+          <button type="button" className="app-icon-button" style={styles.iconButton} onClick={() => setNotificationsOpen((open) => !open)} aria-label="Notifications">
             <Bell className="h-5 w-5" />
             {notifications.length ? <span className="absolute -right-1 -top-1 min-w-5 rounded-full bg-rose-500 px-1 text-center text-[10px] font-black leading-5 text-white">{Math.min(notifications.length, 99)}</span> : null}
           </button>
           {notificationsOpen ? (
-            <div className="absolute right-0 top-14 z-20 w-[340px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+            <div className="app-popover absolute right-0 top-14 z-20 w-[340px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
               <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
                 <span className="text-sm font-black text-slate-950">Notifications</span>
                 <div className="flex items-center gap-3">
@@ -107,6 +107,7 @@ export default function TopBar({
           <div ref={accountMenuRef} style={styles.accountMenuContainer}>
             <button
               type="button"
+              className="app-account-button"
               onClick={() => setAccountMenuOpen((open) => !open)}
               style={styles.accountCard}
               aria-expanded={accountMenuOpen}
@@ -122,7 +123,7 @@ export default function TopBar({
               <ChevronDown size={18} color="#475569" />
             </button>
             {accountMenuOpen ? (
-              <div style={styles.accountMenu}>
+              <div className="app-account-menu" style={styles.accountMenu}>
                 <div style={styles.menuHeader}>
                   <div>
                     <p style={styles.menuName}>
@@ -158,6 +159,7 @@ export default function TopBar({
                 <div style={styles.menuDivider} />
                 <button
                   type="button"
+                  className="app-menu-button"
                   style={styles.menuButton}
                   onClick={() => {
                     setAccountMenuOpen(false);
@@ -168,6 +170,7 @@ export default function TopBar({
                 </button>
                 <button
                   type="button"
+                  className="app-menu-button"
                   style={styles.menuButton}
                   onClick={() => {
                     setAccountMenuOpen(false);
@@ -178,6 +181,7 @@ export default function TopBar({
                 </button>
                 <button
                   type="button"
+                  className="app-menu-button"
                   style={styles.menuButton}
                   onClick={() => {
                     setAccountMenuOpen(false);
@@ -189,6 +193,7 @@ export default function TopBar({
                 <div style={styles.menuDivider} />
                 <button
                   type="button"
+                  className="app-menu-button"
                   style={styles.menuButton}
                   onClick={() => {
                     setAccountMenuOpen(false);
@@ -200,6 +205,7 @@ export default function TopBar({
                 {isConnected ? (
                   <button
                     type="button"
+                    className="app-menu-button"
                     style={styles.menuButton}
                     onClick={() => {
                       setAccountMenuOpen(false);

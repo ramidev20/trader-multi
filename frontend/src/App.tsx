@@ -25,6 +25,7 @@ const avatarColorOptions = [
   { name: "Lime", value: "from-lime-500 to-green-600", swatch: "#84cc16" },
   { name: "Slate", value: "from-slate-500 to-slate-700", swatch: "#64748b" },
 ];
+const defaultNotificationSettings = { enabled: true, show_warnings: true, show_success: true, show_info: false };
 export default function App() {
   const [devModeEnabled, setDevModeEnabled] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
@@ -32,6 +33,8 @@ export default function App() {
   const [runtime, setRuntime] = useState(null);
   const [searchLogs, setSearchLogs] = useState([]);
   const [notifications, setNotifications] = useState([]);
+  const [notificationSettings, setNotificationSettings] = useState(defaultNotificationSettings);
+  const [themeMode, setThemeMode] = useState("LIGHT");
   const dismissedNotificationIds = useRef(new Set());
   const [tradeHistory, setTradeHistory] = useState({ history: [], summaries: [] });
   const [loadingBootstrap, setLoadingBootstrap] = useState(true);
@@ -98,6 +101,9 @@ export default function App() {
       const nextDevMode = Boolean(loaded?.dev_mode);
       setDevModeEnabled(nextDevMode);
       const data = resolveBootstrapData(loaded, nextDevMode);
+      const nextNotificationSettings = { ...defaultNotificationSettings, ...(data.settings?.notification_settings || {}) };
+      setNotificationSettings(nextNotificationSettings);
+      setThemeMode(String(data.settings?.theme_mode || "LIGHT").toUpperCase());
       setAccountList((current) => {
         const previousByLogin = new Map(current.map((account) => [String(account.login), account]));
         return (Array.isArray(data.accounts) ? data.accounts : []).map((account) => {
@@ -124,7 +130,7 @@ export default function App() {
           return merged.slice(-500);
         });
       }
-      setNotifications(buildNotifications(data).filter((item) => !dismissedNotificationIds.current.has(item.id)));
+      setNotifications(buildNotifications(data, nextNotificationSettings).filter((item) => !dismissedNotificationIds.current.has(item.id)));
       setErrorText("");
       if (withSnapshots && !devModeEnabled) {
         try {
@@ -142,7 +148,7 @@ export default function App() {
         setAccountList(data.accounts || []);
         setRuntime(data.runtime || null);
         setSearchLogs(data.logs?.search || []);
-        setNotifications(buildNotifications(data));
+        setNotifications(buildNotifications(data, notificationSettings));
         setTradeHistory(buildDeveloperTradeHistory());
         setErrorText("");
         return data;
@@ -153,6 +159,10 @@ export default function App() {
       if (!silent) setLoadingBootstrap(false);
     }
   }, [devModeEnabled, mergeAccountSnapshots]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+  }, [themeMode]);
 
   function clearNotifications() {
     notifications.filter((item) => item.category !== "system").forEach((item) => dismissedNotificationIds.current.add(item.id));
@@ -368,9 +378,9 @@ export default function App() {
                 : "Trading Control Center";
 
   return (
-    <div className="lg:grid lg:grid-cols-[264px_minmax(0,1fr)]" style={styles.appShell}>
+    <div className="app-shell lg:grid lg:grid-cols-[264px_minmax(0,1fr)]" style={styles.appShell}>
       <Sidebar activePage={activePage} onChangePage={setActivePage} connectedCount={totals.connected} totalCount={accountList.length} />
-      <main className="min-w-0">
+      <main className="app-main min-w-0">
         <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
         <div className="px-3 py-6 lg:px-5" style={styles.pageContent}>
           <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }}>
@@ -383,7 +393,7 @@ export default function App() {
             {activePage === "history" && (masterConnected ? <TradeHistoryPage runtime={runtime} historyRows={tradeHistory.history} /> : <MasterConnectionRequiredPage />)}
             {activePage === "risk" && (masterConnected ? <RiskManagementPage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
             {activePage === "remote" && <RemoteControlPage />}
-            {activePage === "settings" && <SettingsPlaceholder initialTab={settingsTabRequest} accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} />}
+            {activePage === "settings" && <SettingsPlaceholder initialTab={settingsTabRequest} accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} notificationSettings={notificationSettings} onNotificationSettingsChange={setNotificationSettings} themeMode={themeMode} onThemeModeChange={setThemeMode} />}
             {activePage === "profile" && <ProfilePage accountsData={accountList} runtime={runtime} historyRows={tradeHistory.history} summaries={tradeHistory.summaries} />}
             {activePage === "notifications" && <NotificationsPage notifications={notifications} />}
           </motion.div>
@@ -443,7 +453,7 @@ export default function App() {
   );
 }
 
-function buildNotifications(data) {
+function buildNotifications(data, preferences = defaultNotificationSettings) {
   const runtime = data?.runtime || {};
   const notifications = [];
   const logs = [
@@ -467,7 +477,12 @@ function buildNotifications(data) {
   (data?.accounts || []).filter((account) => account.algoEnabled === false).forEach((account) => {
     notifications.push({ id: `algo-disabled-${account.login}`, title: "Algorithmic trading disabled", message: `${account.name} has Algo Trading disabled in MT5.`, level: "warning" });
   });
-  return notifications.slice(-30).reverse();
+  if (!preferences.enabled) return [];
+  return notifications.filter((item) => (
+    item.level === "error" || (item.level === "warning" && preferences.show_warnings) ||
+    (item.level === "success" && preferences.show_success) ||
+    (item.level === "info" && preferences.show_info)
+  )).slice(-30).reverse();
 }
 
 function MasterConnectionRequiredPage() {

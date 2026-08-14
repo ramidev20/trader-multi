@@ -20,7 +20,7 @@ from .services.env_utils import is_dev_mode, load_project_env
 from .services.risk_service import start_risk_monitor, stop_risk_monitor
 from .services.mt5_lock import MT5_LOCK
 from .services.runtime_state import append_log, get as state_get, patch_path as state_patch, set_path as state_set, snapshot
-from .services.session_service import connect_account, disconnect_account, list_sessions, submit_adapter_command
+from .services.session_service import connect_account, disconnect_account, disconnect_all, list_sessions, submit_adapter_command
 from .services.session_service import master_adapter_ready
 from .services.strategy_service import (
     Liquidity,
@@ -68,6 +68,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "stop_on_first_close": True,
     },
     "theme_mode": "LIGHT",
+    "notification_settings": {
+        "enabled": True,
+        "show_warnings": True,
+        "show_success": True,
+        "show_info": False,
+    },
 }
 
 
@@ -83,6 +89,13 @@ class RemoteControlSettingsUpdate(BaseModel):
     enabled: bool
     token: str
     receiver_url: str = ""
+
+
+class NotificationSettingsUpdate(BaseModel):
+    enabled: bool = True
+    show_warnings: bool = True
+    show_success: bool = True
+    show_info: bool = False
 
 
 class AccountPayload(BaseModel):
@@ -183,6 +196,12 @@ class RiskStartPayload(BaseModel):
 
 app = FastAPI(title="MT5 Trader API", version="0.3.0")
 
+
+@app.on_event("shutdown")
+def stop_account_adapters_on_backend_shutdown() -> None:
+    """Adapters are explicit Dashboard connections, never a backend startup task."""
+    disconnect_all()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -229,6 +248,14 @@ def _load_config() -> dict[str, Any]:
         "enabled": bool(config["remote_control"].get("enabled", False)),
         "token": str(config["remote_control"].get("token", "") or ""),
         "receiver_url": str(config["remote_control"].get("receiver_url", "") or "").strip(),
+    }
+    if not isinstance(config.get("notification_settings"), dict):
+        config["notification_settings"] = dict(DEFAULT_CONFIG["notification_settings"])
+    config["notification_settings"] = {
+        "enabled": bool(config["notification_settings"].get("enabled", True)),
+        "show_warnings": bool(config["notification_settings"].get("show_warnings", True)),
+        "show_success": bool(config["notification_settings"].get("show_success", True)),
+        "show_info": bool(config["notification_settings"].get("show_info", False)),
     }
     for unused_key in (
         "time",
@@ -585,6 +612,15 @@ def set_theme(payload: ThemeUpdate) -> dict[str, str]:
 def set_search_config(payload: SearchConfigUpdate) -> dict[str, str]:
     config = _load_config()
     config["search_config"] = payload.search_config
+    _save_config(config)
+    _refresh_bootstrap_cache()
+    return {"status": "ok"}
+
+
+@app.patch("/settings/notifications")
+def set_notification_settings(payload: NotificationSettingsUpdate) -> dict[str, str]:
+    config = _load_config()
+    config["notification_settings"] = payload.model_dump()
     _save_config(config)
     _refresh_bootstrap_cache()
     return {"status": "ok"}

@@ -6,6 +6,124 @@ body {
   font-family: "Inter", "Segoe UI", sans-serif;
 }
 
+html[data-theme="DARK"] body {
+  background: #0b1220;
+  color: #e2e8f0;
+}
+
+html[data-theme="DARK"] .app-shell,
+html[data-theme="DARK"] .app-main {
+  background: #0b1220 !important;
+  color: #e2e8f0 !important;
+}
+
+html[data-theme="DARK"] .app-sidebar,
+html[data-theme="DARK"] .app-topbar,
+html[data-theme="DARK"] .app-popover,
+html[data-theme="DARK"] .app-dialog {
+  background: #111827 !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+
+html[data-theme="DARK"] .app-nav-button {
+  color: #94a3b8 !important;
+}
+
+html[data-theme="DARK"] .app-nav-button:hover,
+html[data-theme="DARK"] .app-nav-button[style*="background"] {
+  background: #1e293b !important;
+  color: #f8fafc !important;
+}
+
+html[data-theme="DARK"] .app-field-control {
+  background: #0f172a !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+
+html[data-theme="DARK"] input:not([type="checkbox"]):not([type="radio"]),
+html[data-theme="DARK"] select,
+html[data-theme="DARK"] textarea {
+  background: #0f172a !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+
+html[data-theme="DARK"] .app-icon-button,
+html[data-theme="DARK"] .app-account-button,
+html[data-theme="DARK"] .app-dialog-close,
+html[data-theme="DARK"] .app-button--soft {
+  background: #172033 !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+
+html[data-theme="DARK"] .app-account-menu {
+  background: #111827 !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+
+html[data-theme="DARK"] .app-menu-button {
+  color: #cbd5e1 !important;
+}
+
+html[data-theme="DARK"] .app-menu-button:hover,
+html[data-theme="DARK"] .app-icon-button:hover,
+html[data-theme="DARK"] .app-account-button:hover,
+html[data-theme="DARK"] .app-button--soft:hover,
+html[data-theme="DARK"] .hover\:bg-white:hover,
+html[data-theme="DARK"] .hover\:bg-slate-50:hover,
+html[data-theme="DARK"] .hover\:bg-slate-100:hover {
+  background: #243047 !important;
+  color: #f8fafc !important;
+}
+
+html[data-theme="DARK"] .bg-blue-50,
+html[data-theme="DARK"] .bg-blue-50\/70 {
+  background-color: #172554 !important;
+}
+
+html[data-theme="DARK"] .hover\:bg-blue-50:hover {
+  background-color: #1e3a8a !important;
+}
+
+html[data-theme="DARK"] option {
+  background: #111827;
+  color: #e2e8f0;
+}
+
+html[data-theme="DARK"] .bg-white,
+html[data-theme="DARK"] .bg-slate-50,
+html[data-theme="DARK"] .bg-slate-100 {
+  background-color: #111827 !important;
+}
+
+html[data-theme="DARK"] .text-slate-950,
+html[data-theme="DARK"] .text-slate-900,
+html[data-theme="DARK"] .text-slate-800,
+html[data-theme="DARK"] .text-slate-700 {
+  color: #e2e8f0 !important;
+}
+
+html[data-theme="DARK"] .text-slate-600,
+html[data-theme="DARK"] .text-slate-500,
+html[data-theme="DARK"] .text-slate-400 {
+  color: #94a3b8 !important;
+}
+
+html[data-theme="DARK"] .border-slate-100,
+html[data-theme="DARK"] .border-slate-200,
+html[data-theme="DARK"] .border-slate-300 {
+  border-color: #334155 !important;
+}
+
+html[data-theme="DARK"] .app-card {
+  background: #111827 !important;
+  border-color: #334155 !important;
+}
+
 .table-frame {
   min-height: 0;
   flex: 1 1 auto;

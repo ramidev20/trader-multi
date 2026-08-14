@@ -372,7 +372,7 @@ export default function App() {
       <Sidebar activePage={activePage} onChangePage={setActivePage} connectedCount={totals.connected} totalCount={accountList.length} />
       <main className="min-w-0">
         <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
-        <div className="px-5 py-6 lg:px-8" style={styles.pageContent}>
+        <div className="px-3 py-6 lg:px-5" style={styles.pageContent}>
           <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }}>
             {errorText ? <div style={styles.errorBanner}>{errorText}</div> : null}
             {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock MT5 data unless a live backend session is available.</div> : null}

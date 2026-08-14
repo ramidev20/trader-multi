@@ -149,6 +149,10 @@ def _initialize_mt5_for_account(account: dict) -> tuple[bool, str]:
     if login <= 0 or not password or not server or not terminal_path:
         return False, f"missing account credentials/path for login={login}"
     with MT5_LOCK:
+        active = mt5.account_info()
+        active_login = _safe_int(getattr(active, "login", 0)) if active is not None else 0
+        if active_login == login:
+            return True, "already connected"
         try:
             mt5.shutdown()
         except Exception:
@@ -698,6 +702,8 @@ def open_manual_position(
     tp1_percent: float = 100.0,
     tp2_percent: float = 100.0,
     auto_close_at: datetime | None = None,
+    copy_to_sub_accounts: bool = True,
+    after_master_order: Callable[[dict], str | None] | None = None,
 ):
     master_ok, master_detail, _master, _cfg = _ensure_master_session()
     if not master_ok:
@@ -876,7 +882,12 @@ def open_manual_position(
             },
             limit=2000,
         )
-        copy_summary = _clone_trade_to_sub_accounts(request, origin="manual")
+        if after_master_order is not None:
+            copy_summary = after_master_order(dict(request))
+        elif copy_to_sub_accounts:
+            copy_summary = _clone_trade_to_sub_accounts(request, origin="manual")
+        else:
+            copy_summary = None
         copy_suffix = f" ({copy_summary})" if copy_summary else ""
         if isinstance(auto_close_at, datetime):
             schedule_manual_auto_close(auto_close_at)

@@ -20,7 +20,7 @@ from .services.env_utils import is_dev_mode, load_project_env
 from .services.risk_service import start_risk_monitor, stop_risk_monitor
 from .services.mt5_lock import MT5_LOCK
 from .services.runtime_state import append_log, get as state_get, patch_path as state_patch, set_path as state_set, snapshot
-from .services.session_service import connect_account, disconnect_account, list_sessions
+from .services.session_service import connect_account, disconnect_account, list_sessions, submit_adapter_command
 from .services.session_service import master_adapter_ready
 from .services.strategy_service import (
     Liquidity,
@@ -138,6 +138,13 @@ def _remote_token() -> str:
     remote_control = config.get("remote_control", {})
     token = str(remote_control.get("token", "")).strip()
     return token or str(os.environ.get("TRADER_REMOTE_TOKEN", "")).strip()
+
+
+def _remote_control_enabled() -> bool:
+    config = _load_config()
+    remote_control = config.get("remote_control", {})
+    env_enabled = str(os.environ.get("TRADER_REMOTE_ENABLED", "")).lower() in {"1", "true", "yes", "on"}
+    return bool(remote_control.get("enabled", False)) or env_enabled
 
 
 def _execute_remote_command(action_name: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -457,52 +464,48 @@ def _fetch_all_live_positions() -> tuple[list[dict[str, Any]], list[str], float 
     errors: list[str] = []
     spreads: list[float] = []
 
-    with MT5_LOCK:
-        connected_logins = {
-            _safe_int(session.get("login"))
-            for session in list_sessions(accounts)
-            if str(session.get("state", "")).lower() == "connected"
-        }
-        connected_accounts = [
-            account for account in accounts if _safe_int(account.get("user")) in connected_logins
-        ]
-        if not connected_accounts:
-            return [], ["Connect an account from Dashboard before loading live positions."], None
+    connected_logins = {
+        _safe_int(session.get("login"))
+        for session in list_sessions(accounts)
+        if str(session.get("state", "")).lower() == "connected"
+    }
+    connected_accounts = [
+        account for account in accounts if _safe_int(account.get("user")) in connected_logins
+    ]
+    if not connected_accounts:
+        return [], ["Connect an account from Dashboard before loading live positions."], None
 
-        for account in connected_accounts:
-            login = _safe_int(account.get("user"))
-            init_ok, init_detail = _initialize_mt5_for_account(account)
-            if not init_ok:
-                errors.append(f"{login}: {init_detail}")
+    for account in connected_accounts:
+        login = _safe_int(account.get("user"))
+        result = submit_adapter_command(login, "snapshot", {}, timeout_sec=5.0)
+        if result.get("status") != "ok":
+            errors.append(f"{login}: {result.get('message', 'adapter snapshot failed')}")
+            continue
+        role = "MASTER" if str(account.get("role", "sub")).lower() == "master" else "SUB"
+        current_spread = result.get("spread")
+        if isinstance(current_spread, (int, float)) and current_spread > 0:
+            spreads.append(float(current_spread))
+        for pos in result.get("positions", []):
+            if not isinstance(pos, dict):
                 continue
-            role = "MASTER" if str(account.get("role", "sub")).lower() == "master" else "SUB"
-            try:
-                tick = mt5.symbol_info_tick(SYMBOL_DEFAULT)
-                if tick is not None:
-                    current_spread = abs(float(getattr(tick, "ask", 0.0)) - float(getattr(tick, "bid", 0.0)))
-                    if current_spread > 0:
-                        spreads.append(current_spread)
-                for pos in mt5.positions_get() or []:
-                    positions.append(
-                        {
-                            "account_login": login,
-                            "account_name": str(account.get("username", f"Account {login}")),
-                            "account_role": role,
-                            "tag": "Main" if role == "MASTER" else "Cloned",
-                            "ticket": int(getattr(pos, "ticket", 0) or 0),
-                            "symbol": str(getattr(pos, "symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT),
-                            "side": "BUY" if int(getattr(pos, "type", 0) or 0) == mt5.ORDER_TYPE_BUY else "SELL",
-                            "lot": float(getattr(pos, "volume", 0.0) or 0.0),
-                            "open_price": float(getattr(pos, "price_open", 0.0) or 0.0),
-                            "sl": float(getattr(pos, "sl", 0.0) or 0.0),
-                            "tp": float(getattr(pos, "tp", 0.0) or 0.0),
-                            "profit": float(getattr(pos, "profit", 0.0) or 0.0),
-                            "comment": str(getattr(pos, "comment", "") or ""),
-                            "opened_at": _to_iso_from_epoch(getattr(pos, "time", 0)),
-                        }
-                    )
-            except Exception as exc:
-                errors.append(f"{login}: positions read error {exc}")
+            positions.append(
+                {
+                    "account_login": login,
+                    "account_name": str(account.get("username", f"Account {login}")),
+                    "account_role": role,
+                    "tag": "Main" if role == "MASTER" else "Cloned",
+                    "ticket": int(pos.get("ticket", 0) or 0),
+                    "symbol": str(pos.get("symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT),
+                    "side": str(pos.get("side", "BUY")).upper(),
+                    "lot": float(pos.get("lot", 0.0) or 0.0),
+                    "open_price": float(pos.get("open_price", 0.0) or 0.0),
+                    "sl": float(pos.get("sl", 0.0) or 0.0),
+                    "tp": float(pos.get("tp", 0.0) or 0.0),
+                    "profit": float(pos.get("profit", 0.0) or 0.0),
+                    "comment": str(pos.get("comment", "") or ""),
+                    "opened_at": _to_iso_from_epoch(pos.get("opened_at")),
+                }
+            )
 
     positions.sort(key=lambda item: str(item.get("opened_at") or ""), reverse=True)
     return positions, errors, (max(spreads) if spreads else None)
@@ -671,7 +674,7 @@ def account_sessions() -> dict[str, Any]:
 
 @app.get("/accounts/snapshots")
 def account_snapshots() -> dict[str, Any]:
-    """Read fresh balance, equity, and terminal ping for all saved accounts."""
+    """Read fresh account values through the process that owns each MT5 session."""
     config = _load_config()
     snapshots: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -681,34 +684,32 @@ def account_snapshots() -> dict[str, Any]:
         for session in list_sessions(accounts)
         if str(session.get("state", "")).lower() == "connected"
     }
-    with MT5_LOCK:
-        for account in accounts:
-            login = _safe_int(account.get("user"))
-            if login <= 0 or login not in connected_logins:
-                continue
-            ok, detail = _initialize_mt5_for_account(account)
-            if not ok:
-                errors.append(f"{login}: {detail}")
-                continue
-            try:
-                info = mt5.account_info()
-                terminal = mt5.terminal_info()
-                if info is None:
-                    errors.append(f"{login}: account information is not available")
-                    continue
-                ping_last = float(getattr(terminal, "ping_last", 0.0) or 0.0) if terminal is not None else 0.0
-                floating_pnl = sum(float(getattr(position, "profit", 0.0) or 0.0) for position in (mt5.positions_get() or []))
-                algo_enabled = bool(getattr(terminal, "trade_allowed", True)) and not bool(getattr(terminal, "tradeapi_disabled", False)) if terminal is not None else None
-                snapshots.append({
-                    "login": login,
-                    "balance": float(getattr(info, "balance", 0.0) or 0.0),
-                    "equity": float(getattr(info, "equity", 0.0) or 0.0),
-                    "floating_pnl": floating_pnl,
-                    "latency": round(ping_last / 1000.0, 2) if ping_last > 0 else None,
-                    "algo_enabled": algo_enabled,
-                })
-            except Exception as exc:
-                errors.append(f"{login}: snapshot error {exc}")
+    for account in accounts:
+        login = _safe_int(account.get("user"))
+        if login <= 0 or login not in connected_logins:
+            continue
+        result = submit_adapter_command(login, "snapshot", {}, timeout_sec=5.0)
+        if result.get("status") != "ok":
+            errors.append(f"{login}: {result.get('message', 'adapter snapshot failed')}")
+            continue
+        account_data = result.get("account", {})
+        if not isinstance(account_data, dict):
+            errors.append(f"{login}: invalid adapter snapshot")
+            continue
+        positions = result.get("positions", [])
+        floating_pnl = sum(
+            float(position.get("profit", 0.0) or 0.0)
+            for position in positions
+            if isinstance(position, dict)
+        )
+        snapshots.append({
+            "login": login,
+            "balance": float(account_data.get("balance", 0.0) or 0.0),
+            "equity": float(account_data.get("equity", 0.0) or 0.0),
+            "floating_pnl": floating_pnl,
+            "latency": account_data.get("latency"),
+            "algo_enabled": account_data.get("algo_enabled"),
+        })
     if not snapshots and not errors:
         errors.append("No connected accounts available for snapshots.")
     return {"status": "ok", "snapshots": snapshots, "errors": errors}
@@ -862,7 +863,17 @@ def remove_liquidity_level(level_id: int) -> dict[str, Any]:
 
 @app.post("/positions/open")
 def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
-    _require_master_connected()
+    config = _load_config()
+    ready, _detail, master_login = master_adapter_ready(config)
+    if not is_dev_mode():
+        # Never initialize MT5 from the API process. Doing so can take over the
+        # terminal session that belongs to the long-running adapter process.
+        if not ready or not master_login:
+            raise HTTPException(status_code=409, detail=_detail)
+        result = submit_adapter_command(master_login, "open", payload.model_dump())
+        if result.get("status") != "ok":
+            raise HTTPException(status_code=409, detail=str(result.get("message", "MT5 adapter command failed.")))
+        return {"status": "ok", "orders": state_get("orders", []), "adapter_result": result}
     try:
         open_manual_position(
             str(payload.side).upper(),
@@ -894,7 +905,6 @@ def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
 
 @app.post("/positions/calculate-lot")
 def calculate_lot(payload: LotCalculationPayload) -> dict[str, Any]:
-    _require_master_connected()
     try:
         lot, message = calculate_manual_lot(
             str(payload.side).upper(),
@@ -967,11 +977,18 @@ def action(payload: ActionPayload) -> dict[str, Any]:
 @app.websocket("/remote/ws")
 async def remote_command_socket(websocket: WebSocket) -> None:
     """Authenticated command receiver intended for a private Tailscale network."""
+    if not _remote_control_enabled():
+        await websocket.accept()
+        append_log("adapter", "[REMOTE] Connection rejected because receiver mode is disabled.")
+        await websocket.close(code=1008, reason="Remote control receiver is disabled.")
+        return
     configured_token = _remote_token()
     await websocket.accept()
+    append_log("adapter", "[REMOTE] Incoming controller connection awaiting authentication.")
     try:
         authentication = await asyncio.wait_for(websocket.receive_json(), timeout=10)
     except (TimeoutError, WebSocketDisconnect):
+        append_log("adapter", "[REMOTE] Authentication timed out before a token was received.")
         await websocket.close(code=1008, reason="Remote control authentication timed out.")
         return
     provided_token = str(authentication.get("token", "")) if isinstance(authentication, dict) else ""
@@ -981,10 +998,12 @@ async def remote_command_socket(websocket: WebSocket) -> None:
         or authentication.get("type") != "authenticate"
         or not secrets.compare_digest(provided_token, configured_token)
     ):
+        append_log("adapter", "[REMOTE] Authentication failed for an incoming controller connection.")
         await websocket.close(code=1008, reason="Remote control authentication failed.")
         return
     connections = int(state_get("remote_control.connections", 0) or 0) + 1
     state_patch("remote_control", {"connections": connections})
+    append_log("adapter", f"[REMOTE] Controller authenticated successfully. Active connections: {connections}.")
     await websocket.send_json({
         "type": "connection",
         "status": "connected",
@@ -998,6 +1017,7 @@ async def remote_command_socket(websocket: WebSocket) -> None:
             action_name = str(raw_message.get("action", "")).strip().lower()
             data = raw_message.get("data", {})
             if not command_id or not action_name or not isinstance(data, dict):
+                append_log("adapter", "[REMOTE] Rejected malformed command payload from controller.")
                 await websocket.send_json({
                     "type": "result",
                     "id": command_id or None,
@@ -1009,6 +1029,7 @@ async def remote_command_socket(websocket: WebSocket) -> None:
             with _remote_command_lock:
                 cached_result = _remote_command_cache.get(command_id)
             if cached_result:
+                append_log("adapter", f"[REMOTE] Replayed cached result for {action_name} ({command_id}).")
                 await websocket.send_json(cached_result)
                 continue
 
@@ -1022,10 +1043,13 @@ async def remote_command_socket(websocket: WebSocket) -> None:
                 })
             except HTTPException as exc:
                 response = {"type": "result", "id": command_id, "status": "error", "message": str(exc.detail)}
+                append_log("adapter", f"[REMOTE] {action_name} ({command_id}) failed: {exc.detail}")
             except (TypeError, ValueError, RuntimeError) as exc:
                 response = {"type": "result", "id": command_id, "status": "error", "message": str(exc)}
+                append_log("adapter", f"[REMOTE] {action_name} ({command_id}) failed: {exc}")
             except Exception:
                 response = {"type": "result", "id": command_id, "status": "error", "message": "The remote command could not be completed."}
+                append_log("adapter", f"[REMOTE] {action_name} ({command_id}) failed with an unexpected server error.")
 
             with _remote_command_lock:
                 if len(_remote_command_cache) >= REMOTE_COMMAND_CACHE_LIMIT:
@@ -1033,10 +1057,12 @@ async def remote_command_socket(websocket: WebSocket) -> None:
                 _remote_command_cache[command_id] = response
             await websocket.send_json(response)
     except WebSocketDisconnect:
+        append_log("adapter", "[REMOTE] Controller disconnected.")
         pass
     finally:
         remaining_connections = max(0, int(state_get("remote_control.connections", 1) or 1) - 1)
         state_patch("remote_control", {"connections": remaining_connections})
+        append_log("adapter", f"[REMOTE] Active connections: {remaining_connections}.")
 
 
 @app.get("/", include_in_schema=False)

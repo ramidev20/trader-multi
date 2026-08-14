@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 try:
@@ -43,9 +44,11 @@ def _load_remote_control_settings() -> dict[str, object]:
     if not isinstance(remote_control, dict):
         remote_control = {}
     env_enabled = str(os.environ.get("TRADER_REMOTE_ENABLED", "")).lower() in {"1", "true", "yes", "on"}
+    receiver_url = str(remote_control.get("receiver_url", "") or "").strip()
     return {
         "enabled": bool(remote_control.get("enabled", False)) or env_enabled,
         "token": str(remote_control.get("token", "") or os.environ.get("TRADER_REMOTE_TOKEN", "")).strip(),
+        "receiver_url": receiver_url,
     }
 
 
@@ -70,11 +73,27 @@ def _http_ready(url: str) -> bool:
         return False
 
 
-def start_backend_if_needed() -> subprocess.Popen[str] | None:
-    if _http_ready(BACKEND_HEALTH_URL):
+def _receiver_health_url(receiver_url: str) -> str | None:
+    if not receiver_url:
         return None
+    parsed = urlparse(receiver_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    scheme = "https" if parsed.scheme == "wss" else "http"
+    return f"{scheme}://{parsed.netloc}/health"
+
+
+def start_backend_if_needed() -> subprocess.Popen[str] | None:
     remote_control = _load_remote_control_settings()
-    backend_bind_host = "0.0.0.0" if remote_control["enabled"] else "127.0.0.1"
+    if _http_ready(BACKEND_HEALTH_URL):
+        if remote_control["enabled"]:
+            receiver_health_url = _receiver_health_url(str(remote_control.get("receiver_url", "")))
+            if receiver_health_url and not _http_ready(receiver_health_url):
+                raise RuntimeError(
+                    "Remote control is enabled, but the running backend is only reachable on localhost. "
+                    "Stop the existing backend and restart it with host 0.0.0.0, or launch the app through run.py."
+                )
+        return None
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
     return subprocess.Popen(
@@ -84,7 +103,7 @@ def start_backend_if_needed() -> subprocess.Popen[str] | None:
             "uvicorn",
             "backend.app.main:app",
             "--host",
-            backend_bind_host,
+            "0.0.0.0",
             "--port",
             "8000",
         ],

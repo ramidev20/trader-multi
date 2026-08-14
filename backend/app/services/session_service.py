@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any
+from uuid import uuid4
 
 from .env_utils import is_dev_mode
 from .runtime_state import append_log
@@ -14,6 +15,7 @@ from .path_utils import resolve_terminal_path, sanitize_terminal_path
 ROOT_DIR = Path(__file__).resolve().parents[3]
 # Connection status is runtime state, not application source/log history.
 STATUS_DIR = ROOT_DIR / ".runtime" / "mt5_sessions"
+COMMAND_DIR = ROOT_DIR / ".runtime" / "mt5_commands"
 WORKER_MODULE = "backend.app.adapter"
 
 _adapter_processes: dict[int, subprocess.Popen] = {}
@@ -29,6 +31,57 @@ def _safe_int(value: Any) -> int:
 
 def _status_path(login: int) -> Path:
     return STATUS_DIR / f"{int(login)}.json"
+
+
+def _adapter_log_path(login: int) -> Path:
+    return STATUS_DIR / f"{int(login)}.adapter.log"
+
+
+def _recent_adapter_error(login: int) -> str:
+    try:
+        lines = _adapter_log_path(login).read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-12:]).strip()
+    except Exception:
+        return ""
+
+
+def adapter_command_paths(login: int, command_id: str) -> tuple[Path, Path]:
+    """Return the request/result files used to talk to one adapter process."""
+    account_dir = COMMAND_DIR / str(int(login))
+    return account_dir / f"{command_id}.request.json", account_dir / f"{command_id}.result.json"
+
+
+def submit_adapter_command(login: int, action: str, payload: dict[str, Any], timeout_sec: float = 30.0) -> dict[str, Any]:
+    """Send work to the process that owns this account's MT5 connection."""
+    login = _safe_int(login)
+    if login <= 0 or not _has_active_adapter(login):
+        return {"status": "error", "message": f"MT5 adapter {login} is not connected."}
+
+    command_id = uuid4().hex
+    request_path, result_path = adapter_command_paths(login, command_id)
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = request_path.with_suffix(".tmp")
+    temp_path.write_text(
+        json.dumps({"id": command_id, "action": action, "payload": payload}),
+        encoding="utf-8",
+    )
+    temp_path.replace(request_path)
+
+    deadline = time.monotonic() + max(1.0, float(timeout_sec))
+    while time.monotonic() < deadline:
+        if result_path.exists():
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+                if isinstance(result, dict):
+                    return result
+            finally:
+                result_path.unlink(missing_ok=True)
+        if not _has_active_adapter(login):
+            break
+        time.sleep(0.05)
+
+    request_path.unlink(missing_ok=True)
+    return {"status": "error", "message": "The MT5 adapter did not return a command result in time."}
 
 
 def _write_status(login: int, payload: dict[str, Any]) -> None:
@@ -229,24 +282,47 @@ def connect_account(account: dict[str, Any]) -> dict[str, Any]:
     if sys.platform.startswith("win"):
         creation_flags = subprocess.CREATE_NO_WINDOW
 
-    _adapter_processes[login] = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            WORKER_MODULE,
-            "--login",
-            str(login),
-            "--password",
-            str(account.get("password", "")),
-            "--server",
-            str(account.get("server", "")),
-            "--terminal-path",
-            terminal_path,
-            "--status-file",
-            str(_status_path(login)),
-        ],
-        creationflags=creation_flags,
-    )
+    command = [
+        sys.executable,
+        "-m",
+        WORKER_MODULE,
+        "--login",
+        str(login),
+        "--password",
+        str(account.get("password", "")),
+        "--server",
+        str(account.get("server", "")),
+        "--terminal-path",
+        terminal_path,
+        "--status-file",
+        str(_status_path(login)),
+    ]
+    log_path = _adapter_log_path(login)
+    with log_path.open("a", encoding="utf-8") as adapter_log:
+        adapter_log.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting adapter for {login}.\n")
+        proc = subprocess.Popen(
+            command,
+            cwd=ROOT_DIR,
+            stdout=adapter_log,
+            stderr=subprocess.STDOUT,
+            creationflags=creation_flags,
+        )
+    _adapter_processes[login] = proc
+    time.sleep(0.25)
+    if proc.poll() is not None:
+        detail = _recent_adapter_error(login) or f"Adapter exited with code {proc.returncode}."
+        _adapter_processes.pop(login, None)
+        _write_status(
+            login,
+            {
+                "state": "error",
+                "server": str(account.get("server", "") or ""),
+                "terminal_path": terminal_path,
+                "error": detail,
+            },
+        )
+        append_log("adapter", f"[ERROR] MT5 adapter for {login} stopped during startup: {detail}")
+        return {"status": "error", "message": detail}
     append_log("adapter", f"[INFO] {launch_message} Started MT5 adapter for account {login}.")
     return {"status": "ok", "message": f"{launch_message} Started adapter for account {login}"}
 

@@ -55,6 +55,7 @@ def _copy_to_connected_sub_adapters(master_request: dict[str, Any]) -> str | Non
 
     copied = 0
     active_targets = 0
+    target_details: list[str] = []
     for account, risk_percent in targets:
         login = _safe_int(account.get("user"))
         delay_seconds = max(
@@ -75,10 +76,12 @@ def _copy_to_connected_sub_adapters(master_request: dict[str, Any]) -> str | Non
         if result.get("status") == "ok":
             active_targets += 1
             copied += 1
+            target_details.append(f"{login}: {delay_seconds:g}s delay")
 
     if active_targets == 0:
         return f"Copied master trade to 0/{len(targets)} sub adapter(s); no sub adapter is connected"
-    return f"Copied master trade to {copied}/{len(targets)} sub adapter(s)"
+    detail = ", ".join(target_details)
+    return f"Copied master trade to {copied}/{len(targets)} sub adapter(s) ({detail})"
 
 
 def _execute_copy_open(payload: dict[str, Any]) -> dict[str, Any]:

@@ -6,7 +6,7 @@ const logListeners = new Set();
 const LOG_STORAGE_KEY = "trader.remoteControl.logs";
 const logEntries = (() => {
   try {
-    const saved = JSON.parse(globalThis.sessionStorage?.getItem(LOG_STORAGE_KEY) || "[]");
+    const saved = JSON.parse(globalThis.localStorage?.getItem(LOG_STORAGE_KEY) || "[]");
     return Array.isArray(saved) ? saved.slice(-80) : [];
   } catch {
     return [];
@@ -36,7 +36,7 @@ function appendLog(level, message) {
     logEntries.splice(0, logEntries.length - LOG_LIMIT);
   }
   try {
-    globalThis.sessionStorage?.setItem(LOG_STORAGE_KEY, JSON.stringify(logEntries));
+    globalThis.localStorage?.setItem(LOG_STORAGE_KEY, JSON.stringify(logEntries));
   } catch {
     // Logging must continue when browser storage is unavailable.
   }
@@ -113,7 +113,9 @@ function openRemoteSocket(url, token, reconnecting = false) {
     const nextSocket = new WebSocket(url);
     socket = nextSocket;
     let settled = false;
+    let socketOpened = false;
     nextSocket.onopen = () => {
+      socketOpened = true;
       appendLog("info", "Socket opened. Sending authentication token.");
       nextSocket.send(JSON.stringify({ type: "authenticate", token }));
     };
@@ -165,7 +167,12 @@ function openRemoteSocket(url, token, reconnecting = false) {
       if (heartbeatTimer) globalThis.clearInterval(heartbeatTimer);
       heartbeatTimer = null;
       const closeReason = event.reason || "Connection closed. Check the token or network if this was unexpected.";
-      appendLog(settled ? "warning" : "error", `${settled ? "Remote session ended" : "Authentication failed"}: ${closeReason}`);
+      const closeLabel = settled
+        ? "Remote session ended"
+        : socketOpened
+          ? "Authentication failed"
+          : "Receiver unreachable";
+      appendLog(settled ? "warning" : "error", `${closeLabel}: ${closeReason}`);
       rejectPendingCommands(closeReason);
       if (!settled) reject(new Error(closeReason));
       if (event.code === 1008) {

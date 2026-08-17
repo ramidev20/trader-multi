@@ -1129,6 +1129,11 @@ async def remote_command_socket(websocket: WebSocket) -> None:
                         "level": "info",
                         "message": f"Receiver account {receiver_login} risk {receiver_risk:.2f}% selected for the remote order.",
                     })
+                    await websocket.send_json({
+                        "type": "log",
+                        "level": "info",
+                        "message": f"Receiver account {receiver_login} order delay is {receiver_delay} seconds.",
+                    })
                     if receiver_delay > 0:
                         append_log("adapter", f"[REMOTE] Waiting receiver order delay of {receiver_delay}s for {command_id}.")
                         await websocket.send_json({
@@ -1137,6 +1142,12 @@ async def remote_command_socket(websocket: WebSocket) -> None:
                             "message": f"Waiting receiver order delay of {receiver_delay} seconds.",
                         })
                         await asyncio.sleep(receiver_delay)
+                        append_log("adapter", f"[REMOTE] Receiver order delay completed for {command_id}.")
+                        await websocket.send_json({
+                            "type": "log",
+                            "level": "success",
+                            "message": f"Receiver delay completed after {receiver_delay} seconds. Submitting the order now.",
+                        })
                 result = _execute_remote_command(action_name, data)
                 response = {"type": "result", "id": command_id, "status": "success", "result": result}
                 append_log("adapter", f"[REMOTE] Executed {action_name} ({command_id}).")

@@ -23,23 +23,35 @@ import { cx, decimalInput, money } from "../utils/format";
 import { api } from "../services/api";
 import { isRemoteConnected, sendRemoteCommand } from "../services/remoteControl";
 
+const TRADE_FORM_STORAGE_KEY = "trader.trade.form";
+
+function loadTradeForm() {
+  try {
+    const saved = JSON.parse(globalThis.localStorage?.getItem(TRADE_FORM_STORAGE_KEY) || "{}");
+    return saved && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
 export function TradePage({ runtime, onRefreshRuntime }) {
-  const [side, setSide] = useState("BUY");
-  const [orderKind, setOrderKind] = useState("MARKET");
-  const [limitPrice, setLimitPrice] = useState("");
-  const [tp, setTp] = useState("150");
-  const [sl, setSl] = useState("600");
-  const [multiTp, setMultiTp] = useState(false);
-  const [slPrice, setSlPrice] = useState("");
-  const [tp1Ratio, setTp1Ratio] = useState("1.0");
-  const [tp2Ratio, setTp2Ratio] = useState("1.0");
-  const [tp3Ratio, setTp3Ratio] = useState("1.0");
-  const [tp2Enabled, setTp2Enabled] = useState(false);
-  const [tp3Enabled, setTp3Enabled] = useState(false);
-  const [tp1Percent, setTp1Percent] = useState("100");
-  const [tp2Percent, setTp2Percent] = useState("100");
-  const [autoCloseEnabled, setAutoCloseEnabled] = useState(false);
-  const [autoCloseAt, setAutoCloseAt] = useState(() => defaultAutoCloseValue());
+  const savedTradeForm = useMemo(loadTradeForm, []);
+  const [side, setSide] = useState(() => savedTradeForm.side ?? "BUY");
+  const [orderKind, setOrderKind] = useState(() => savedTradeForm.orderKind ?? "MARKET");
+  const [limitPrice, setLimitPrice] = useState(() => savedTradeForm.limitPrice ?? "");
+  const [tp, setTp] = useState(() => savedTradeForm.tp ?? "150");
+  const [sl, setSl] = useState(() => savedTradeForm.sl ?? "600");
+  const [multiTp, setMultiTp] = useState(() => Boolean(savedTradeForm.multiTp));
+  const [slPrice, setSlPrice] = useState(() => savedTradeForm.slPrice ?? "");
+  const [tp1Ratio, setTp1Ratio] = useState(() => savedTradeForm.tp1Ratio ?? "1.0");
+  const [tp2Ratio, setTp2Ratio] = useState(() => savedTradeForm.tp2Ratio ?? "1.0");
+  const [tp3Ratio, setTp3Ratio] = useState(() => savedTradeForm.tp3Ratio ?? "1.0");
+  const [tp2Enabled, setTp2Enabled] = useState(() => Boolean(savedTradeForm.tp2Enabled));
+  const [tp3Enabled, setTp3Enabled] = useState(() => Boolean(savedTradeForm.tp3Enabled));
+  const [tp1Percent, setTp1Percent] = useState(() => savedTradeForm.tp1Percent ?? "100");
+  const [tp2Percent, setTp2Percent] = useState(() => savedTradeForm.tp2Percent ?? "100");
+  const [autoCloseEnabled, setAutoCloseEnabled] = useState(() => Boolean(savedTradeForm.autoCloseEnabled));
+  const [autoCloseAt, setAutoCloseAt] = useState(() => savedTradeForm.autoCloseAt ?? defaultAutoCloseValue());
   const [errorText, setErrorText] = useState("");
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -47,7 +59,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [positions, setPositions] = useState([]);
   const [positionsErrors, setPositionsErrors] = useState([]);
   const [spread, setSpread] = useState(null);
-  const [positionsTab, setPositionsTab] = useState("live");
+  const [positionsTab, setPositionsTab] = useState(() => savedTradeForm.positionsTab ?? "live");
   const openOrders = useMemo(
     () => (runtime?.orders || []).filter((o) => o.status === "open"),
     [runtime],
@@ -67,6 +79,32 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     return total;
   }, [tp1Ratio, tp2Enabled, tp2Ratio, tp3Enabled, tp3Ratio]);
   const scheduledAutoCloseAt = runtime?.manual_trade?.auto_close_at || null;
+
+  useEffect(() => {
+    try {
+      globalThis.localStorage?.setItem(TRADE_FORM_STORAGE_KEY, JSON.stringify({
+        side,
+        orderKind,
+        limitPrice,
+        tp,
+        sl,
+        multiTp,
+        slPrice,
+        tp1Ratio,
+        tp2Ratio,
+        tp3Ratio,
+        tp2Enabled,
+        tp3Enabled,
+        tp1Percent,
+        tp2Percent,
+        autoCloseEnabled,
+        autoCloseAt,
+        positionsTab,
+      }));
+    } catch {
+      // Keep the trade form usable when browser storage is unavailable.
+    }
+  }, [side, orderKind, limitPrice, tp, sl, multiTp, slPrice, tp1Ratio, tp2Ratio, tp3Ratio, tp2Enabled, tp3Enabled, tp1Percent, tp2Percent, autoCloseEnabled, autoCloseAt, positionsTab]);
 
   useEffect(() => {
     if (!multiTp && tp3Enabled) setTp3Enabled(false);

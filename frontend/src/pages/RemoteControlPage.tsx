@@ -19,6 +19,17 @@ import { connectRemote, disconnectRemote, subscribeRemoteLogs, subscribeRemoteSt
 
 const defaultUrl = import.meta.env.VITE_REMOTE_COMMAND_URL || "";
 const REMOTE_ROLE_STORAGE_KEY = "trader.remoteControl.role";
+const REMOTE_TAB_STORAGE_KEY = "trader.remoteControl.tab";
+const REMOTE_CONTROLLER_SETTINGS_KEY = "trader.remoteControl.controllerSettings";
+
+function loadControllerSettings(): { url?: string; token?: string } {
+  try {
+    const saved = JSON.parse(globalThis.localStorage?.getItem(REMOTE_CONTROLLER_SETTINGS_KEY) || "{}");
+    return saved && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
 
 type RemoteRole = "receiver" | "controller";
 type RemoteTab = "settings" | "logs";
@@ -149,6 +160,7 @@ function RemoteTabs({
 }
 
 export default function RemoteControlPage() {
+  const savedControllerSettings = useMemo(loadControllerSettings, []);
   const [role, setRole] = useState<RemoteRole | null>(() => {
     try {
       const savedRole = globalThis.localStorage?.getItem(REMOTE_ROLE_STORAGE_KEY);
@@ -157,8 +169,8 @@ export default function RemoteControlPage() {
       return null;
     }
   });
-  const [url, setUrl] = useState(defaultUrl);
-  const [token, setToken] = useState("");
+  const [url, setUrl] = useState(() => String(savedControllerSettings.url || defaultUrl));
+  const [token, setToken] = useState(() => String(savedControllerSettings.token || ""));
   const [receiverEnabled, setReceiverEnabled] = useState(false);
   const [connection, setConnection] = useState({ state: "offline", message: "Not connected to a trading PC." });
   const [errorText, setErrorText] = useState("");
@@ -168,7 +180,13 @@ export default function RemoteControlPage() {
   const [tokenCopied, setTokenCopied] = useState(false);
   const [controllerLogs, setControllerLogs] = useState<RemoteLogEntry[]>([]);
   const [receiverLogs, setReceiverLogs] = useState<RemoteLogEntry[]>([]);
-  const [activeTab, setActiveTab] = useState<RemoteTab>("settings");
+  const [activeTab, setActiveTab] = useState<RemoteTab>(() => {
+    try {
+      return globalThis.localStorage?.getItem(REMOTE_TAB_STORAGE_KEY) === "logs" ? "logs" : "settings";
+    } catch {
+      return "settings";
+    }
+  });
   const online = connection.state === "online";
   const controllerStatusLabel = useMemo(
     () => (connection.state === "connecting" ? "Connecting" : online ? "Connected" : "Offline"),
@@ -189,6 +207,26 @@ export default function RemoteControlPage() {
       // Ignore storage failures so the page still works in restricted browsers.
     }
   }, [role]);
+
+  useEffect(() => {
+    try {
+      globalThis.localStorage?.setItem(REMOTE_TAB_STORAGE_KEY, activeTab);
+    } catch {
+      // Keep navigation working if storage is unavailable.
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (role !== "controller") return;
+    try {
+      globalThis.localStorage?.setItem(
+        REMOTE_CONTROLLER_SETTINGS_KEY,
+        JSON.stringify({ url, token }),
+      );
+    } catch {
+      // Keep fields editable if storage is unavailable.
+    }
+  }, [role, url, token]);
 
   useEffect(() => {
     if (role !== "receiver") return;
@@ -250,8 +288,8 @@ export default function RemoteControlPage() {
         if (cancelled) return;
         const remote = settings?.remote_control || {};
         const savedUrl = String(remote.receiver_url || "").trim();
-        if (savedUrl) setUrl(savedUrl);
-        setToken(String(remote.token || ""));
+        if (!savedControllerSettings.url && savedUrl) setUrl(savedUrl);
+        if (!savedControllerSettings.token) setToken(String(remote.token || ""));
         setReceiverEnabled(Boolean(remote.enabled));
       })
       .catch(() => {});
@@ -314,8 +352,18 @@ export default function RemoteControlPage() {
 
   async function connect() {
     setErrorText("");
+    const nextUrl = url.trim();
+    const nextToken = token.trim();
     try {
-      await connectRemote(url, token);
+      globalThis.localStorage?.setItem(
+        REMOTE_CONTROLLER_SETTINGS_KEY,
+        JSON.stringify({ url: nextUrl, token: nextToken }),
+      );
+    } catch {
+      // A restricted storage environment should not block the connection.
+    }
+    try {
+      await connectRemote(nextUrl, nextToken);
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : String(error));
     }

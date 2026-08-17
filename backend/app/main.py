@@ -68,6 +68,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "stop_on_first_close": True,
     },
     "theme_mode": "LIGHT",
+    "ui_zoom_percent": 100,
     "notification_settings": {
         "enabled": True,
         "show_warnings": True,
@@ -79,6 +80,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 class ThemeUpdate(BaseModel):
     theme_mode: str
+
+
+class ZoomUpdate(BaseModel):
+    ui_zoom_percent: int
 
 
 class SearchConfigUpdate(BaseModel):
@@ -173,6 +178,31 @@ def _execute_remote_command(action_name: str, data: dict[str, Any]) -> dict[str,
     raise ValueError(f"Unsupported remote action: {action_name}")
 
 
+def _receiver_open_settings(data: dict[str, Any]) -> tuple[dict[str, Any], float, int]:
+    """Force remote opens to use this receiver's account configuration."""
+    config = _load_config()
+    accounts = config.get("trading_accounts", [])
+    master_login = int(config.get("master_account_login", 0) or 0)
+    master = next(
+        (
+            account for account in accounts
+            if int(account.get("user", 0) or 0) == master_login
+        ),
+        None,
+    ) or next(
+        (account for account in accounts if str(account.get("role", "sub")).lower() == "master"),
+        None,
+    )
+    if not master:
+        raise RuntimeError("No receiver master account is configured.")
+    risk_percent = float(master.get("risk_percent", master.get("risk_multiplier", 1.0)) or 1.0)
+    delay_seconds = max(0, int(master.get("order_delay_sec", master.get("orderDelaySec", 0)) or 0))
+    receiver_data = dict(data)
+    receiver_data["risk_percent"] = risk_percent
+    receiver_data["lot"] = None
+    return receiver_data, risk_percent, delay_seconds
+
+
 class LotCalculationPayload(BaseModel):
     side: str
     risk_percent: float | None = None
@@ -257,6 +287,7 @@ def _load_config() -> dict[str, Any]:
         "show_success": bool(config["notification_settings"].get("show_success", True)),
         "show_info": bool(config["notification_settings"].get("show_info", False)),
     }
+    config["ui_zoom_percent"] = min(150, max(70, int(config.get("ui_zoom_percent", 100) or 100)))
     for unused_key in (
         "time",
         "order_delay",
@@ -615,6 +646,16 @@ def set_search_config(payload: SearchConfigUpdate) -> dict[str, str]:
     _save_config(config)
     _refresh_bootstrap_cache()
     return {"status": "ok"}
+
+
+@app.patch("/settings/zoom")
+def set_ui_zoom(payload: ZoomUpdate) -> dict[str, str | int]:
+    zoom = min(150, max(70, int(payload.ui_zoom_percent)))
+    config = _load_config()
+    config["ui_zoom_percent"] = zoom
+    _save_config(config)
+    _refresh_bootstrap_cache()
+    return {"status": "ok", "ui_zoom_percent": zoom}
 
 
 @app.patch("/settings/notifications")
@@ -1049,6 +1090,9 @@ async def remote_command_socket(websocket: WebSocket) -> None:
     try:
         while True:
             raw_message = await websocket.receive_json()
+            if isinstance(raw_message, dict) and raw_message.get("type") == "ping":
+                await websocket.send_json({"type": "pong", "server_time": datetime.now().isoformat()})
+                continue
             command_id = str(raw_message.get("id", "")).strip()
             action_name = str(raw_message.get("action", "")).strip().lower()
             data = raw_message.get("data", {})
@@ -1070,6 +1114,22 @@ async def remote_command_socket(websocket: WebSocket) -> None:
                 continue
 
             try:
+                if action_name == "open":
+                    data, receiver_risk, receiver_delay = _receiver_open_settings(data)
+                    append_log("adapter", f"[REMOTE] Using receiver risk {receiver_risk:.2f}% for {command_id}.")
+                    await websocket.send_json({
+                        "type": "log",
+                        "level": "info",
+                        "message": f"Receiver risk {receiver_risk:.2f}% selected for the remote order.",
+                    })
+                    if receiver_delay > 0:
+                        append_log("adapter", f"[REMOTE] Waiting receiver order delay of {receiver_delay}s for {command_id}.")
+                        await websocket.send_json({
+                            "type": "log",
+                            "level": "info",
+                            "message": f"Waiting receiver order delay of {receiver_delay} seconds.",
+                        })
+                        await asyncio.sleep(receiver_delay)
                 result = _execute_remote_command(action_name, data)
                 response = {"type": "result", "id": command_id, "status": "success", "result": result}
                 append_log("adapter", f"[REMOTE] Executed {action_name} ({command_id}).")

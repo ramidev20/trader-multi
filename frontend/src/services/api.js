@@ -30,6 +30,7 @@ export const api = {
   runtime: () => request("/runtime"),
   settings: () => request("/settings"),
   saveTheme: (theme_mode) => request("/settings/theme", { method: "PATCH", body: JSON.stringify({ theme_mode }) }),
+  saveZoom: (ui_zoom_percent) => request("/settings/zoom", { method: "PATCH", body: JSON.stringify({ ui_zoom_percent }) }),
   saveSearchConfig: (search_config) => request("/settings/search", { method: "PATCH", body: JSON.stringify({ search_config }) }),
   saveNotificationSettings: (payload) => request("/settings/notifications", { method: "PATCH", body: JSON.stringify(payload) }),
   saveRemoteControlSettings: (payload) => request("/settings/remote-control", { method: "PATCH", body: JSON.stringify(payload) }),

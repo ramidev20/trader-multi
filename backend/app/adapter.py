@@ -57,12 +57,17 @@ def _copy_to_connected_sub_adapters(master_request: dict[str, Any]) -> str | Non
     active_targets = 0
     for account, risk_percent in targets:
         login = _safe_int(account.get("user"))
+        delay_seconds = max(
+            0.0,
+            float(account.get("order_delay_sec", account.get("orderDelaySec", 0)) or 0),
+        )
         result = submit_adapter_command(
             login,
             "copy_open",
             {
                 "master_request": master_request,
                 "risk_percent": float(risk_percent),
+                "order_delay_sec": delay_seconds,
                 "origin": "manual",
             },
             timeout_sec=15.0,
@@ -81,6 +86,9 @@ def _execute_copy_open(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(master_request, dict):
         return {"status": "error", "message": "Invalid master trade for copy command."}
     try:
+        delay_seconds = max(0.0, float(payload.get("order_delay_sec", 0) or 0))
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
         request = _build_copy_request(
             master_request,
             float(payload.get("risk_percent", 1.0) or 1.0),

@@ -999,6 +999,8 @@ export function SettingsPlaceholder({
   onNotificationSettingsChange,
   themeMode = "LIGHT",
   onThemeModeChange,
+  uiZoomPercent = 100,
+  onUiZoomPercentChange,
 }) {
   const settingsTabs = ["accounts", "search", "notifications", "appearance"];
   const normalizeSettingsTab = (tab) => settingsTabs.includes(tab) ? tab : "accounts";
@@ -1036,6 +1038,16 @@ export function SettingsPlaceholder({
       await api.saveTheme(nextThemeMode);
       onThemeModeChange?.(nextThemeMode);
       setSettingsMessage(`${nextThemeMode === "DARK" ? "Dark" : "Light"} appearance saved.`);
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+  async function saveUiZoom(nextZoom) {
+    const zoom = Math.min(150, Math.max(70, Number(nextZoom || 100)));
+    onUiZoomPercentChange?.(zoom);
+    try {
+      await api.saveZoom(zoom);
+      setSettingsMessage(`App zoom saved at ${zoom}%.`);
     } catch (error) {
       setSettingsMessage(error instanceof Error ? error.message : String(error));
     }
@@ -1091,6 +1103,17 @@ export function SettingsPlaceholder({
             <p className="mt-1 text-sm text-slate-500">The selected appearance is applied immediately and saved for the next launch.</p>
             <div className="mt-6 grid max-w-xl gap-3 sm:grid-cols-2">
               {[['LIGHT', 'Light', 'Clean, high-contrast workspace for daytime trading.'], ['DARK', 'Dark', 'Reduced glare for low-light trading sessions.']].map(([mode, label, help]) => <button key={mode} type="button" onClick={() => saveThemeMode(mode)} className={cx("rounded-2xl border p-4 text-left transition", themeMode === mode ? "border-blue-500 bg-blue-50" : "border-slate-200 bg-white hover:border-slate-300")}><span className="block text-sm font-black text-slate-950">{label}</span><span className="mt-1 block text-xs leading-5 text-slate-500">{help}</span></button>)}
+            </div>
+            <div className="mt-7 max-w-xl rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <span className="block text-sm font-black text-slate-950">App zoom</span>
+                  <span className="mt-1 block text-xs leading-5 text-slate-500">Scale the entire interface like browser zoom.</span>
+                </div>
+                <output className="min-w-14 rounded-lg bg-white px-3 py-1.5 text-center text-sm font-black text-blue-600">{uiZoomPercent}%</output>
+              </div>
+              <input aria-label="App zoom" className="mt-4 w-full accent-blue-600" type="range" min="70" max="150" step="5" value={uiZoomPercent} onChange={(event) => onUiZoomPercentChange?.(Number(event.target.value))} onPointerUp={(event) => saveUiZoom(event.currentTarget.value)} onKeyUp={(event) => saveUiZoom(event.currentTarget.value)} />
+              <div className="mt-2 flex justify-between text-[11px] font-bold text-slate-500"><span>70%</span><button type="button" className="text-blue-600 hover:text-blue-700" onClick={() => saveUiZoom(100)}>Reset to 100%</button><span>150%</span></div>
             </div>
           </> : null}
           {settingsMessage ? <p className="mt-5 text-sm font-semibold text-emerald-700">{settingsMessage}</p> : null}

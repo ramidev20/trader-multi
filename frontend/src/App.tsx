@@ -35,6 +35,7 @@ export default function App() {
   const [notifications, setNotifications] = useState([]);
   const [notificationSettings, setNotificationSettings] = useState(defaultNotificationSettings);
   const [themeMode, setThemeMode] = useState("LIGHT");
+  const [uiZoomPercent, setUiZoomPercent] = useState(100);
   const dismissedNotificationIds = useRef(new Set());
   const [tradeHistory, setTradeHistory] = useState({ history: [], summaries: [] });
   const [loadingBootstrap, setLoadingBootstrap] = useState(true);
@@ -104,6 +105,7 @@ export default function App() {
       const nextNotificationSettings = { ...defaultNotificationSettings, ...(data.settings?.notification_settings || {}) };
       setNotificationSettings(nextNotificationSettings);
       setThemeMode(String(data.settings?.theme_mode || "LIGHT").toUpperCase());
+      setUiZoomPercent(Math.min(150, Math.max(70, Number(data.settings?.ui_zoom_percent || 100))));
       setAccountList((current) => {
         const previousByLogin = new Map(current.map((account) => [String(account.login), account]));
         return (Array.isArray(data.accounts) ? data.accounts : []).map((account) => {
@@ -163,6 +165,13 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
   }, [themeMode]);
+
+  useEffect(() => {
+    document.documentElement.style.zoom = `${uiZoomPercent}%`;
+    return () => {
+      document.documentElement.style.zoom = "";
+    };
+  }, [uiZoomPercent]);
 
   function clearNotifications() {
     notifications.filter((item) => item.category !== "system").forEach((item) => dismissedNotificationIds.current.add(item.id));
@@ -393,7 +402,7 @@ export default function App() {
             {activePage === "history" && (masterConnected ? <TradeHistoryPage runtime={runtime} historyRows={tradeHistory.history} /> : <MasterConnectionRequiredPage />)}
             {activePage === "risk" && (masterConnected ? <RiskManagementPage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
             {activePage === "remote" && <RemoteControlPage />}
-            {activePage === "settings" && <SettingsPlaceholder initialTab={settingsTabRequest} accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} notificationSettings={notificationSettings} onNotificationSettingsChange={setNotificationSettings} themeMode={themeMode} onThemeModeChange={setThemeMode} />}
+            {activePage === "settings" && <SettingsPlaceholder initialTab={settingsTabRequest} accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} notificationSettings={notificationSettings} onNotificationSettingsChange={setNotificationSettings} themeMode={themeMode} onThemeModeChange={setThemeMode} uiZoomPercent={uiZoomPercent} onUiZoomPercentChange={setUiZoomPercent} />}
             {activePage === "profile" && <ProfilePage accountsData={accountList} runtime={runtime} historyRows={tradeHistory.history} summaries={tradeHistory.summaries} />}
             {activePage === "notifications" && <NotificationsPage notifications={notifications} />}
           </motion.div>

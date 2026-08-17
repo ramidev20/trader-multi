@@ -199,9 +199,9 @@ export default function RemoteControlPage() {
         const runtime = await api.runtime();
         if (cancelled) return;
         const adapterLines = Array.isArray(runtime?.logs?.adapter) ? runtime.logs.adapter : [];
-        const nextLogs = adapterLines
-          .filter((line) => typeof line === "string" && line.includes("[REMOTE]"))
-          .slice(-40)
+        const nextLogs: RemoteLogEntry[] = adapterLines
+          .filter((line) => typeof line === "string")
+          .slice(-80)
           .map((line, index) => {
             const match = line.match(/^\[(.*?)\]\s+(.*)$/);
             const at = match?.[1] || "--:--:--";
@@ -213,16 +213,30 @@ export default function RemoteControlPage() {
               level: inferServerLevel(message),
             } satisfies RemoteLogEntry;
           });
+        const connections = Number(runtime?.remote_control?.connections || 0);
+        nextLogs.push({
+          id: `receiver-status-${connections}`,
+          at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          message: `Receiver log stream active. Controller connections: ${connections}.`,
+          level: connections > 0 ? "success" : "info",
+        });
         setReceiverLogs(nextLogs);
       } catch {
-        if (!cancelled) {
-          setReceiverLogs([]);
-        }
+        if (cancelled) return;
+        setReceiverLogs((current) => {
+          if (current.some((entry) => entry.id === "receiver-log-fetch-error")) return current;
+          return [...current, {
+            id: "receiver-log-fetch-error",
+            at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+            message: "Receiver logs could not be refreshed. Existing entries are being kept.",
+            level: "warning",
+          }];
+        });
       }
     }
 
     loadReceiverLogs();
-    const timer = window.setInterval(loadReceiverLogs, 3000);
+    const timer = window.setInterval(loadReceiverLogs, 2000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

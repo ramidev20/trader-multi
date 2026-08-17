@@ -178,7 +178,7 @@ def _execute_remote_command(action_name: str, data: dict[str, Any]) -> dict[str,
     raise ValueError(f"Unsupported remote action: {action_name}")
 
 
-def _receiver_open_settings(data: dict[str, Any]) -> tuple[dict[str, Any], float, int]:
+def _receiver_open_settings(data: dict[str, Any]) -> tuple[dict[str, Any], int, float, int]:
     """Force remote opens to use this receiver's account configuration."""
     config = _load_config()
     accounts = config.get("trading_accounts", [])
@@ -195,12 +195,13 @@ def _receiver_open_settings(data: dict[str, Any]) -> tuple[dict[str, Any], float
     )
     if not master:
         raise RuntimeError("No receiver master account is configured.")
+    receiver_login = int(master.get("user", 0) or 0)
     risk_percent = float(master.get("risk_percent", master.get("risk_multiplier", 1.0)) or 1.0)
     delay_seconds = max(0, int(master.get("order_delay_sec", master.get("orderDelaySec", 0)) or 0))
     receiver_data = dict(data)
     receiver_data["risk_percent"] = risk_percent
     receiver_data["lot"] = None
-    return receiver_data, risk_percent, delay_seconds
+    return receiver_data, receiver_login, risk_percent, delay_seconds
 
 
 class LotCalculationPayload(BaseModel):
@@ -680,6 +681,12 @@ def set_remote_control_settings(payload: RemoteControlSettingsUpdate) -> dict[st
     }
     _save_config(config)
     _refresh_bootstrap_cache()
+    append_log(
+        "adapter",
+        "[REMOTE] Receiver setup saved and enabled."
+        if payload.enabled
+        else "[REMOTE] Receiver setup saved and disabled.",
+    )
     return {"status": "ok"}
 
 
@@ -1115,12 +1122,12 @@ async def remote_command_socket(websocket: WebSocket) -> None:
 
             try:
                 if action_name == "open":
-                    data, receiver_risk, receiver_delay = _receiver_open_settings(data)
-                    append_log("adapter", f"[REMOTE] Using receiver risk {receiver_risk:.2f}% for {command_id}.")
+                    data, receiver_login, receiver_risk, receiver_delay = _receiver_open_settings(data)
+                    append_log("adapter", f"[REMOTE] Using receiver account {receiver_login} risk {receiver_risk:.2f}% for {command_id}.")
                     await websocket.send_json({
                         "type": "log",
                         "level": "info",
-                        "message": f"Receiver risk {receiver_risk:.2f}% selected for the remote order.",
+                        "message": f"Receiver account {receiver_login} risk {receiver_risk:.2f}% selected for the remote order.",
                     })
                     if receiver_delay > 0:
                         append_log("adapter", f"[REMOTE] Waiting receiver order delay of {receiver_delay}s for {command_id}.")

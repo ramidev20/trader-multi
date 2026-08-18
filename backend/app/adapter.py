@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +117,86 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "message": "Invalid adapter command payload."}
     if action == "copy_open":
         return _execute_copy_open(payload)
+    if action == "chart":
+        try:
+            symbol = str(payload.get("symbol", "XAUUSD") or "XAUUSD").strip().upper()
+            timeframe_name = str(payload.get("timeframe", "M1") or "M1").strip().upper()
+            timeframe = {
+                "M1": mt5.TIMEFRAME_M1,
+                "M3": mt5.TIMEFRAME_M3,
+                "M5": mt5.TIMEFRAME_M5,
+                "M15": mt5.TIMEFRAME_M15,
+            }.get(timeframe_name, mt5.TIMEFRAME_M1)
+            count = max(20, min(400, int(payload.get("count", 180) or 180)))
+
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                return {"status": "error", "message": f"Symbol {symbol} is unavailable in the connected MT5 terminal."}
+            if not bool(getattr(symbol_info, "visible", False)) and not mt5.symbol_select(symbol, True):
+                return {"status": "error", "message": f"Could not select {symbol} in Market Watch."}
+
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+            if rates is None or len(rates) == 0:
+                return {"status": "error", "message": f"MT5 returned no {timeframe_name} candles for {symbol}: {mt5.last_error()}"}
+
+            tick = mt5.symbol_info_tick(symbol)
+            chart_orders = []
+            for position in mt5.positions_get(symbol=symbol) or []:
+                position_type = int(getattr(position, "type", -1))
+                chart_orders.append(
+                    {
+                        "ticket": int(getattr(position, "ticket", 0) or 0),
+                        "symbol": symbol,
+                        "side": "BUY" if position_type == mt5.POSITION_TYPE_BUY else "SELL",
+                        "order_kind": "MARKET",
+                        "lot": float(getattr(position, "volume", 0.0) or 0.0),
+                        "price": float(getattr(position, "price_open", 0.0) or 0.0),
+                        "sl": float(getattr(position, "sl", 0.0) or 0.0),
+                        "tp": float(getattr(position, "tp", 0.0) or 0.0),
+                        "opened_at": int(getattr(position, "time", 0) or 0),
+                        "status": "open",
+                    }
+                )
+            for order in mt5.orders_get(symbol=symbol) or []:
+                order_type = int(getattr(order, "type", -1))
+                if order_type not in {mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT}:
+                    continue
+                chart_orders.append(
+                    {
+                        "ticket": int(getattr(order, "ticket", 0) or 0),
+                        "symbol": symbol,
+                        "side": "BUY" if order_type == mt5.ORDER_TYPE_BUY_LIMIT else "SELL",
+                        "order_kind": "LIMIT",
+                        "lot": float(getattr(order, "volume_current", getattr(order, "volume_initial", 0.0)) or 0.0),
+                        "price": float(getattr(order, "price_open", 0.0) or 0.0),
+                        "sl": float(getattr(order, "sl", 0.0) or 0.0),
+                        "tp": float(getattr(order, "tp", 0.0) or 0.0),
+                        "opened_at": int(getattr(order, "time_setup", 0) or 0),
+                        "status": "open",
+                    }
+                )
+            return {
+                "status": "ok",
+                "source": "live",
+                "symbol": symbol,
+                "timeframe": timeframe_name,
+                "candles": [
+                    {
+                        "time": int(row["time"]),
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                    }
+                    for row in rates
+                ],
+                "orders": chart_orders,
+                "bid": float(getattr(tick, "bid", 0.0) or 0.0) if tick is not None else None,
+                "ask": float(getattr(tick, "ask", 0.0) or 0.0) if tick is not None else None,
+                "server_time": int(getattr(tick, "time", 0) or 0) if tick is not None else None,
+            }
+        except Exception as ex:
+            return {"status": "error", "message": str(ex)}
     if action == "snapshot":
         try:
             info = mt5.account_info()
@@ -138,6 +219,30 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                         "opened_at": int(getattr(position, "time", 0) or 0),
                     }
                 )
+            orders = []
+            for order in mt5.orders_get() or []:
+                order_type = int(getattr(order, "type", -1) or -1)
+                if order_type not in {
+                    mt5.ORDER_TYPE_BUY_LIMIT,
+                    mt5.ORDER_TYPE_SELL_LIMIT,
+                }:
+                    continue
+                side = "BUY" if order_type == mt5.ORDER_TYPE_BUY_LIMIT else "SELL"
+                orders.append(
+                    {
+                        "ticket": int(getattr(order, "ticket", 0) or 0),
+                        "symbol": str(getattr(order, "symbol", "XAUUSD") or "XAUUSD"),
+                        "side": side,
+                        "order_kind": "LIMIT",
+                        "lot": float(getattr(order, "volume_current", getattr(order, "volume_initial", 0.0)) or 0.0),
+                        "price": float(getattr(order, "price_open", 0.0) or 0.0),
+                        "sl": float(getattr(order, "sl", 0.0) or 0.0),
+                        "tp": float(getattr(order, "tp", 0.0) or 0.0),
+                        "comment": str(getattr(order, "comment", "") or ""),
+                        "opened_at": int(getattr(order, "time_setup", 0) or 0),
+                        "status": "open",
+                    }
+                )
             tick = mt5.symbol_info_tick("XAUUSD")
             spread = (
                 abs(float(getattr(tick, "ask", 0.0)) - float(getattr(tick, "bid", 0.0)))
@@ -154,6 +259,7 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                     "algo_enabled": bool(getattr(terminal, "trade_allowed", True)) and not bool(getattr(terminal, "tradeapi_disabled", False)) if terminal is not None else None,
                 },
                 "positions": positions,
+                "orders": orders,
                 "spread": spread,
             }
         except Exception as ex:
@@ -188,6 +294,11 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
             tp3_enabled=bool(payload.get("tp3_enabled")),
             tp1_percent=float(payload.get("tp1_percent", 100.0)),
             tp2_percent=float(payload.get("tp2_percent", 100.0)),
+            auto_close_at=(
+                datetime.fromisoformat(str(payload["auto_close_at"]))
+                if payload.get("auto_close_at")
+                else None
+            ),
             copy_to_sub_accounts=False,
             after_master_order=copy_to_sub_adapters,
         )
@@ -305,7 +416,11 @@ def main() -> None:
                         "updated_at": int(time.time()),
                     },
                 )
-            time.sleep(2.0)
+            # Keep account status on a two-second cadence while serving chart and
+            # trade commands promptly from the adapter-owned MT5 session.
+            for _ in range(20):
+                time.sleep(0.1)
+                process_pending_commands(args.login)
     except KeyboardInterrupt:
         pass
     finally:

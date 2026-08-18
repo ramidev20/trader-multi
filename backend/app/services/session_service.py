@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 from pathlib import Path
 import subprocess
@@ -14,8 +15,9 @@ from .path_utils import resolve_terminal_path, sanitize_terminal_path
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 # Connection status is runtime state, not application source/log history.
-STATUS_DIR = ROOT_DIR / ".runtime" / "mt5_sessions"
-COMMAND_DIR = ROOT_DIR / ".runtime" / "mt5_commands"
+RUNTIME_DIR = Path(tempfile.gettempdir()) / "trader-multi-runtime"
+STATUS_DIR = RUNTIME_DIR / "mt5_sessions"
+COMMAND_DIR = RUNTIME_DIR / "mt5_commands"
 WORKER_MODULE = "backend.app.adapter"
 
 _adapter_processes: dict[int, subprocess.Popen] = {}

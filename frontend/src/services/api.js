@@ -42,6 +42,15 @@ export const api = {
   sessions: () => request("/accounts/sessions"),
   accountSnapshots: () => request("/accounts/snapshots"),
   livePositions: () => request("/positions/live"),
+  liveOrders: () => request("/orders/live"),
+  chartData: (params = {}) => {
+    const query = new URLSearchParams();
+    if (params.symbol) query.set("symbol", params.symbol);
+    if (params.timeframe) query.set("timeframe", params.timeframe);
+    if (params.count) query.set("count", String(params.count));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return request(`/chart/data${suffix}`);
+  },
   tradeHistory: () => request("/trade-history"),
   calculateLot: (payload) => request("/positions/calculate-lot", { method: "POST", body: JSON.stringify(payload) }),
 

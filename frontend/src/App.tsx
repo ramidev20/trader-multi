@@ -5,6 +5,7 @@ import Sidebar from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
 import { AppButton, Dialog, Field, SelectBox } from "./components/ui/Primitives";
 import DashboardPage from "./pages/DashboardPage";
+import ChartPage from "./pages/ChartPage";
 import SearchPage from "./pages/SearchPage";
 import { NotificationsPage, ProfilePage, RiskManagementPage, SettingsPlaceholder, TradePage } from "./pages/Placeholders";
 import TradeHistoryPage from "./pages/TradeHistoryPage";
@@ -298,6 +299,7 @@ export default function App() {
         server: formState.server,
         terminal_path: formState.path,
         role: shouldBeMain ? "master" : "sub",
+        color: formState.color,
         risk_percent: Number(formState.risk || 1),
         order_delay_sec: Number(formState.orderDelaySec || 0),
       });
@@ -370,6 +372,8 @@ export default function App() {
   const pageTitle =
     activePage === "search"
       ? "Strategy Search"
+      : activePage === "chart"
+        ? "Live Chart"
       : activePage === "trade"
         ? "Trade"
         : activePage === "history"
@@ -397,6 +401,7 @@ export default function App() {
             {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock MT5 data unless a live backend session is available.</div> : null}
             {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}
             {activePage === "dashboard" && <DashboardPage totals={totals} accountsData={accountList} onAdd={openAddDialog} onEdit={openEditDialog} onDelete={openDeleteDialog} onConnect={connectAccountAndSync} onRefresh={refreshDashboard} />}
+            {activePage === "chart" && (masterConnected ? <ChartPage /> : <MasterConnectionRequiredPage />)}
             {activePage === "search" && (masterConnected ? <SearchPage runtime={runtime} searchLogs={searchLogs} onRefreshRuntime={refreshBootstrap} timeRange={searchTimeRange} onTimeRangeChange={setSearchTimeRange} /> : <MasterConnectionRequiredPage />)}
             {activePage === "trade" && (masterConnected ? <TradePage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
             {activePage === "history" && (masterConnected ? <TradeHistoryPage runtime={runtime} historyRows={tradeHistory.history} /> : <MasterConnectionRequiredPage />)}
@@ -416,28 +421,28 @@ export default function App() {
           <Field label="Server" value={formState.server} onChange={(e) => setFormState((s) => ({ ...s, server: e.target.value }))} />
           <Field label="Password" value={formState.password} onChange={(e) => setFormState((s) => ({ ...s, password: e.target.value }))} />
           <Field label="Terminal Path" value={formState.path} onChange={(e) => setFormState((s) => ({ ...s, path: e.target.value }))} />
+          <label className="block">
+            <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Avatar Color</span>
+            <select
+              value={formState.color}
+              onChange={(e) => setFormState((s) => ({ ...s, color: e.target.value }))}
+              className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+            >
+              {avatarColorOptions.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            <div className="mt-2 flex items-center gap-2 text-xs font-semibold text-slate-600">
+              <span className="h-3 w-3 rounded-full" style={{ backgroundColor: (avatarColorOptions.find((c) => c.value === formState.color) || avatarColorOptions[0]).swatch }} />
+              {(avatarColorOptions.find((c) => c.value === formState.color) || avatarColorOptions[0]).name}
+            </div>
+          </label>
           {dialogMode === "edit" && (
             <>
               <Field label="Risk %" value={String(formState.risk)} type="number" onChange={(e) => setFormState((s) => ({ ...s, risk: e.target.value }))} />
               <Field label="Position Delay (seconds)" value={String(formState.orderDelaySec)} type="number" min={0} max={10} onChange={(e) => setFormState((s) => ({ ...s, orderDelaySec: Math.min(10, Math.max(0, Number(e.target.value || 0))) }))} />
-              <label className="block">
-                <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Avatar Color</span>
-                <select
-                  value={formState.color}
-                  onChange={(e) => setFormState((s) => ({ ...s, color: e.target.value }))}
-                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                >
-                  {avatarColorOptions.map((c) => (
-                    <option key={c.value} value={c.value}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-                <div className="mt-2 flex items-center gap-2 text-xs font-semibold text-slate-600">
-                  <span className="h-3 w-3 rounded-full" style={{ backgroundColor: (avatarColorOptions.find((c) => c.value === formState.color) || avatarColorOptions[0]).swatch }} />
-                  {(avatarColorOptions.find((c) => c.value === formState.color) || avatarColorOptions[0]).name}
-                </div>
-              </label>
               <label className="flex items-center justify-between rounded-[8px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700">
                 <span>Switch this account to main account</span>
                 <button
@@ -465,12 +470,25 @@ export default function App() {
 function buildNotifications(data, preferences = defaultNotificationSettings) {
   const runtime = data?.runtime || {};
   const notifications = [];
+  const priorityForLevel = (level) => {
+    if (level === "error") return 0;
+    if (level === "warning") return 1;
+    if (level === "success") return 2;
+    return 3;
+  };
+  const priorityForTitle = (title) => {
+    if (title === "Account disconnected" || title === "Algorithmic trading disabled") return 0;
+    if (title === "Trade execution") return 1;
+    if (title === "Account connection" || title === "Risk management") return 1;
+    if (title === "Strategy status") return 2;
+    return 3;
+  };
   const logs = [
     ...(runtime.logs?.search || []).map((message) => ({ source: "search", message })),
     ...(runtime.logs?.risk || []).map((message) => ({ source: "risk", message })),
     ...(runtime.logs?.adapter || []).map((message) => ({ source: "adapter", message })),
   ];
-  logs.slice(-40).forEach(({ source, message }, index) => {
+  logs.slice(-60).forEach(({ source, message }, index) => {
     const text = String(message || "");
     const normalizedMessage = text.replace(/^\[[^\]]+\]\s*/, "").replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, "").trim();
     const id = `${source}-${normalizedMessage}`;
@@ -478,20 +496,28 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
     const lower = normalizedMessage.toLowerCase();
     const level = text.includes("[ERROR]") || lower.includes("failed") || lower.includes("blocked") ? "error" : text.includes("[WARNING]") || lower.includes("disabled") || lower.includes("disconnected") ? "warning" : text.includes("[SUCCESS]") ? "success" : "info";
     const title = lower.includes("algo") || lower.includes("algorithmic") ? "MT5 Algo Trading" : source === "risk" || lower.includes("risk") ? "Risk management" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
-    notifications.push({ id, title, message: normalizedMessage, level, category: title === "System update" ? "system" : "other" });
+    notifications.push({
+      id,
+      title,
+      message: normalizedMessage,
+      level,
+      category: title === "System update" ? "system" : "other",
+      priority: Math.min(priorityForLevel(level), priorityForTitle(title)),
+      seq: index,
+    });
   });
   (data?.accounts || []).filter((account) => account.status === "Disconnected").forEach((account) => {
-    notifications.push({ id: `disconnected-${account.login}`, title: "Account disconnected", message: `${account.name} is not connected.`, level: "warning" });
+    notifications.push({ id: `disconnected-${account.login}`, title: "Account disconnected", message: `${account.name} is not connected.`, level: "warning", category: "other", priority: 0, seq: notifications.length + 1 });
   });
   (data?.accounts || []).filter((account) => account.algoEnabled === false).forEach((account) => {
-    notifications.push({ id: `algo-disabled-${account.login}`, title: "Algorithmic trading disabled", message: `${account.name} has Algo Trading disabled in MT5.`, level: "warning" });
+    notifications.push({ id: `algo-disabled-${account.login}`, title: "Algorithmic trading disabled", message: `${account.name} has Algo Trading disabled in MT5.`, level: "warning", category: "other", priority: 0, seq: notifications.length + 1 });
   });
   if (!preferences.enabled) return [];
   return notifications.filter((item) => (
     item.level === "error" || (item.level === "warning" && preferences.show_warnings) ||
     (item.level === "success" && preferences.show_success) ||
     (item.level === "info" && preferences.show_info)
-  )).slice(-30).reverse();
+  )).sort((a, b) => (a.priority - b.priority) || (b.seq - a.seq)).slice(0, 30);
 }
 
 function MasterConnectionRequiredPage() {

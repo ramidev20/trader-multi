@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  Activity,
   Copy,
   Home,
   Search,
@@ -24,6 +25,7 @@ export default function Sidebar({
 }: SidebarProps) {
   const items = [
     { key: "dashboard", label: "Dashboard", icon: Home },
+    { key: "chart", label: "Chart", icon: Activity },
     { key: "search", label: "Search", icon: Search },
     { key: "trade", label: "Trade", icon: Terminal },
     { key: "history", label: "Trade History", icon: Copy },

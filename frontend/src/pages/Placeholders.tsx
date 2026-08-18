@@ -58,20 +58,31 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [refreshing, setRefreshing] = useState(false);
   const [positions, setPositions] = useState([]);
   const [positionsErrors, setPositionsErrors] = useState([]);
+  const [limitOrders, setLimitOrders] = useState([]);
+  const [limitOrdersErrors, setLimitOrdersErrors] = useState([]);
   const [spread, setSpread] = useState(null);
-  const [positionsTab, setPositionsTab] = useState(() => savedTradeForm.positionsTab ?? "live");
+  const [positionsTab, setPositionsTab] = useState(() => savedTradeForm.tradeTab ?? savedTradeForm.positionsTab ?? "live");
   const openOrders = useMemo(
     () => (runtime?.orders || []).filter((o) => o.status === "open"),
     [runtime],
   );
   const latestOrder = openOrders[openOrders.length - 1] || null;
-  const manualPositionLogs = useMemo(
-    () =>
-      (runtime?.logs?.search || []).filter((line) =>
-        /manual|multi.?tp|position/i.test(String(line)),
-      ),
-    [runtime],
-  );
+  const tradeFeedLogs = useMemo(() => {
+    const tradeLogPattern = /manual|order|position|limit|close|auto close|tp\d?|take profit|stop loss|trade/i;
+    const runtimeLogs = (runtime?.logs?.search || []).filter((line) => tradeLogPattern.test(String(line)));
+    const openOrderLogs = openOrders.filter((order) => String(order.order_kind || "").toUpperCase() !== "LIMIT").map((order) => {
+      const kind = String(order.order_kind || "MARKET").toUpperCase();
+      const sideLabel = String(order.side || "-").toUpperCase();
+      const entry = Number(order.entry ?? order.price ?? 0) || 0;
+      return `[INFO] ${kind} ${sideLabel} ${order.symbol || "XAUUSD"} @ ${entry.toFixed(2)} lot=${Number(order.lot || 0).toFixed(2)} status=${order.status || "open"}`;
+    });
+    const pendingOrderLogs = limitOrders.map((order) => {
+      const sideLabel = String(order.side || "-").toUpperCase();
+      const entry = Number(order.price ?? order.entry ?? 0) || 0;
+      return `[INFO] LIMIT ${sideLabel} ${order.symbol || "XAUUSD"} @ ${entry.toFixed(2)} lot=${Number(order.lot || 0).toFixed(2)} ticket=${order.ticket || "-"}`;
+    });
+    return [...runtimeLogs, ...openOrderLogs, ...pendingOrderLogs].slice(-120).reverse();
+  }, [runtime, openOrders, limitOrders]);
   const totalRatio = useMemo(() => {
     let total = Number(tp1Ratio || 0);
     if (tp2Enabled) total += Number(tp2Ratio || 0);
@@ -79,6 +90,12 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     return total;
   }, [tp1Ratio, tp2Enabled, tp2Ratio, tp3Enabled, tp3Ratio]);
   const scheduledAutoCloseAt = runtime?.manual_trade?.auto_close_at || null;
+  const displayedLimitOrders = limitOrders.length
+    ? limitOrders
+    : (runtime?.orders || []).filter((order) =>
+        String(order?.status || "").toLowerCase() === "open" &&
+        String(order?.order_kind || "").toUpperCase() === "LIMIT",
+      );
 
   useEffect(() => {
     try {
@@ -100,10 +117,48 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         autoCloseEnabled,
         autoCloseAt,
         positionsTab,
+        tradeTab: positionsTab,
       }));
     } catch {
       // Keep the trade form usable when browser storage is unavailable.
     }
+  }, [side, orderKind, limitPrice, tp, sl, multiTp, slPrice, tp1Ratio, tp2Ratio, tp3Ratio, tp2Enabled, tp3Enabled, tp1Percent, tp2Percent, autoCloseEnabled, autoCloseAt, positionsTab]);
+
+  useEffect(() => {
+    const persistTradeForm = () => {
+      try {
+        globalThis.localStorage?.setItem(TRADE_FORM_STORAGE_KEY, JSON.stringify({
+          side,
+          orderKind,
+          limitPrice,
+          tp,
+          sl,
+          multiTp,
+          slPrice,
+          tp1Ratio,
+          tp2Ratio,
+          tp3Ratio,
+          tp2Enabled,
+          tp3Enabled,
+          tp1Percent,
+          tp2Percent,
+          autoCloseEnabled,
+          autoCloseAt,
+          positionsTab,
+          tradeTab: positionsTab,
+        }));
+      } catch {
+        // Ignore storage failures during shutdown or private browsing.
+      }
+    };
+
+    window.addEventListener("beforeunload", persistTradeForm);
+    window.addEventListener("pagehide", persistTradeForm);
+    return () => {
+      persistTradeForm();
+      window.removeEventListener("beforeunload", persistTradeForm);
+      window.removeEventListener("pagehide", persistTradeForm);
+    };
   }, [side, orderKind, limitPrice, tp, sl, multiTp, slPrice, tp1Ratio, tp2Ratio, tp3Ratio, tp2Enabled, tp3Enabled, tp1Percent, tp2Percent, autoCloseEnabled, autoCloseAt, positionsTab]);
 
   useEffect(() => {
@@ -190,6 +245,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
 
   function SideButton({ value, label, activeClassName, idleClassName }) {
     const isActive = side === value;
+    const busy = submitting && isActive;
+    const actionLabel = orderKind === "LIMIT" ? "Pending limit order" : "Market execution";
     return (
       <button
         type="button"
@@ -199,11 +256,14 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           openPosition(value);
         }}
         className={cx(
-          "flex h-[50px] w-full items-center justify-center rounded-2xl border px-4 text-sm font-bold transition",
+          "flex min-h-[64px] w-full flex-col items-center justify-center rounded-2xl border px-4 py-2 text-sm font-bold transition",
           isActive ? activeClassName : idleClassName,
         )}
       >
-        {label}
+        <span className="text-[15px] leading-none">{busy ? `OPENING ${label}...` : `OPEN ${label}`}</span>
+        <span className={cx("mt-1 text-[11px] font-semibold tracking-wide", isActive ? "text-white/85" : "text-slate-600")}>
+          {actionLabel}
+        </span>
       </button>
     );
   }
@@ -220,8 +280,22 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     }
   }
 
+  async function loadLimitOrders(options = {}) {
+    const { silent = false } = options;
+    try {
+      const data = await api.liveOrders();
+      setLimitOrders(Array.isArray(data?.orders) ? data.orders : []);
+      setLimitOrdersErrors(Array.isArray(data?.errors) ? data.errors : []);
+    } catch (error) {
+      if (!silent) {
+        setErrorText(String(error?.message || error));
+      }
+    }
+  }
+
   useEffect(() => {
     loadPositions();
+    loadLimitOrders();
   }, []);
 
   async function refreshTradeData() {
@@ -230,6 +304,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     try {
       await onRefreshRuntime?.({ silent: true });
       await loadPositions({ silent: true });
+      await loadLimitOrders({ silent: true });
     } finally {
       setRefreshing(false);
     }
@@ -367,6 +442,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             <div className="flex items-center gap-1">
               {[
                 ["live", "Live Positions"],
+                ["orders", "Limit Orders"],
                 ["log", "Log"],
               ].map(([key, label]) => (
                 <button
@@ -401,6 +477,12 @@ export function TradePage({ runtime, onRefreshRuntime }) {
               </AppButton>
             </div>
           </div>
+
+          {positionsTab === "orders" && limitOrdersErrors.length ? (
+            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+              {limitOrdersErrors.join(" • ")}
+            </div>
+          ) : null}
 
           {positionsTab === "live" ? (
             <TableFrame className="mt-4 min-h-[360px]">
@@ -474,11 +556,80 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                 </tbody>
               </table>
             </TableFrame>
+          ) : positionsTab === "orders" ? (
+            <TableFrame className="mt-4 min-h-[360px]">
+              <table className="h-full w-full min-w-[760px] text-left">
+                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                  <tr>
+                    <th className="py-3 pl-4 pr-3 font-bold">Account</th>
+                    <th className="px-3 py-3 font-bold">Ticket</th>
+                    <th className="px-3 py-3 font-bold">Side</th>
+                    <th className="px-3 py-3 font-bold">Price</th>
+                    <th className="px-3 py-3 font-bold">Lot</th>
+                    <th className="px-3 py-3 font-bold">Time</th>
+                    <th className="py-3 pl-3 pr-4 font-bold">Comment</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 bg-white">
+                  {(displayedLimitOrders.length
+                    ? displayedLimitOrders
+                    : [
+                        {
+                          ticket: "empty",
+                          account_name: "-",
+                          account_login: "-",
+                          side: "-",
+                          price: "-",
+                          lot: "-",
+                          opened_at: "-",
+                          comment: "No pending limit orders.",
+                        },
+                      ]
+                  ).map((row) => (
+                    <tr
+                      key={`${row.account_login}-${row.ticket}`}
+                      className="hover:bg-slate-50/70"
+                    >
+                      <td className="py-3 pl-4 pr-3 text-sm font-medium text-slate-800">
+                        {row.account_name} ({row.account_login})
+                      </td>
+                      <td className="px-3 py-3 text-sm text-slate-700">
+                        {row.ticket}
+                      </td>
+                      <td className="px-3 py-3 text-sm">
+                        <span
+                          className={cx(
+                            "rounded-full px-2 py-0.5 text-[10px] font-bold",
+                            row.side === "BUY"
+                              ? "bg-emerald-100 text-emerald-700"
+                              : "bg-rose-100 text-rose-700",
+                          )}
+                        >
+                          {row.side}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-sm text-slate-700">
+                        {row.price ?? row.open_price ?? "-"}
+                      </td>
+                      <td className="px-3 py-3 text-sm text-slate-700">
+                        {row.lot}
+                      </td>
+                      <td className="px-3 py-3 text-sm text-slate-700">
+                        {fmtDateTime(row.opened_at)}
+                      </td>
+                      <td className="py-3 pl-3 pr-4 text-sm text-slate-700">
+                        {row.comment || "-"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableFrame>
           ) : (
             <LogList
               className="mt-4 min-h-[360px]"
-              logs={manualPositionLogs}
-              emptyMessage="[INFO] No manual-position watch logs yet."
+              logs={tradeFeedLogs}
+              emptyMessage="[INFO] No trade activity logs yet."
             />
           )}
         </Card>

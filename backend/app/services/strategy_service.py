@@ -547,6 +547,29 @@ def _close_mt5_position(position, close_volume: float | None = None, comment: st
         return False, last_detail if "last_detail" in locals() else "close failed"
 
 
+def _close_mt5_pending_order(order, comment: str = "close all positions") -> tuple[bool, str]:
+    ticket = int(getattr(order, "ticket", 0) or 0)
+    symbol = str(getattr(order, "symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT)
+    if ticket <= 0:
+        return False, "invalid order ticket"
+
+    with MT5_LOCK:
+        request = {
+            "action": getattr(mt5, "TRADE_ACTION_REMOVE", 4),
+            "order": ticket,
+            "symbol": symbol,
+            "comment": comment,
+        }
+        result = mt5.order_send(request)
+        if result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+            return True, f"done:{getattr(result, 'comment', '') or 'ok'}"
+        if result is not None:
+            detail = f"retcode={getattr(result, 'retcode', None)} comment={getattr(result, 'comment', '') or ''}".strip()
+        else:
+            detail = f"no result last_error={mt5.last_error()}"
+        return False, detail
+
+
 _manual_tp_sessions: list[dict] = []
 
 
@@ -572,6 +595,29 @@ def _manual_tp_position(session: dict):
     return position
 
 
+def _manual_tp_pending_order(session: dict):
+    if not mt5_available():
+        return None
+    orders = mt5.orders_get(symbol=session["symbol"]) or []
+    ticket = int(session.get("ticket") or 0)
+    expected_type = mt5.ORDER_TYPE_BUY_LIMIT if session["side"] == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
+    if ticket:
+        for order in orders:
+            if int(getattr(order, "ticket", 0) or 0) == ticket:
+                return order
+    candidates = [
+        order
+        for order in orders
+        if int(getattr(order, "type", -1)) == expected_type
+        and abs(float(getattr(order, "price_open", 0.0) or 0.0) - float(session["entry"])) <= 1.0
+    ]
+    if not candidates:
+        return None
+    order = max(candidates, key=lambda item: int(getattr(item, "time_setup", 0) or 0))
+    session["ticket"] = int(getattr(order, "ticket", 0) or 0) or None
+    return order
+
+
 def _monitor_manual_multi_tp() -> None:
     if not _manual_tp_sessions:
         stop_task(MANUAL_TP_TASK_NAME)
@@ -580,7 +626,7 @@ def _monitor_manual_multi_tp() -> None:
     for session in list(_manual_tp_sessions):
         targets = session.get("targets", [])
         target_index = int(session.get("next_target", 0) or 0)
-        if target_index >= max(0, len(targets) - 1):
+        if target_index >= len(targets):
             _manual_tp_sessions.remove(session)
             continue
 
@@ -588,6 +634,9 @@ def _monitor_manual_multi_tp() -> None:
         if mt5_available():
             position = _manual_tp_position(session)
             if position is None:
+                pending_order = _manual_tp_pending_order(session)
+                if pending_order is not None:
+                    continue
                 _manual_tp_sessions.remove(session)
                 continue
             tick = mt5.symbol_info_tick(session["symbol"])
@@ -968,6 +1017,7 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
     accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
     master = _resolve_master_account(cfg)
     require_ticket_match = mt5_available() and bool(accounts)
+    pending_closed_tickets: set[int] = set()
     if mt5_available() and accounts:
         for account in accounts:
             login = _safe_int(account.get("user"))
@@ -980,8 +1030,9 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
                 continue
             try:
                 positions = mt5.positions_get() if symbol is None else mt5.positions_get(symbol=symbol)
+                pending_orders = mt5.orders_get() if symbol is None else mt5.orders_get(symbol=symbol)
                 if not positions:
-                    continue
+                    positions = []
                 for pos in positions:
                     try:
                         position_side = "buy" if int(getattr(pos, "type", -1)) == mt5.ORDER_TYPE_BUY else "sell"
@@ -1002,6 +1053,28 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
                         message = f"{login}: close error {ex}"
                         errors.append(message)
                         append_log("search", f"[ERROR] {message}")
+                if pending_orders:
+                    for order in pending_orders:
+                        try:
+                            order_type = int(getattr(order, "type", -1))
+                            order_side = "buy" if order_type in {getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2), getattr(mt5, "ORDER_TYPE_BUY_STOP", 4)} else "sell"
+                            if side == "buy" and order_side != "buy":
+                                continue
+                            if side == "sell" and order_side != "sell":
+                                continue
+                            attempted += 1
+                            closed_ok, close_detail = _close_mt5_pending_order(order)
+                            if closed_ok:
+                                pending_closed_tickets.add(int(getattr(order, "ticket", 0) or 0))
+                            else:
+                                symbol_name = str(getattr(order, "symbol", symbol or SYMBOL_DEFAULT) or SYMBOL_DEFAULT)
+                                message = f"Cancel failed ticket={getattr(order, 'ticket', '-')} symbol={symbol_name} {close_detail}"
+                                errors.append(message)
+                                append_log("search", f"[ERROR] {message}")
+                        except Exception as ex:
+                            message = f"{login}: cancel error {ex}"
+                            errors.append(message)
+                            append_log("search", f"[ERROR] {message}")
             finally:
                 pass
         if master:
@@ -1022,6 +1095,7 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
                 closed_tickets.add(int(order.get("ticket", 0) or 0))
             except Exception:
                 continue
+        pending_closed_tickets = set(closed_tickets)
     orders = get("orders", [])
     for order in orders:
         if order.get("status") != "open":
@@ -1034,7 +1108,7 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
             ticket = int(order.get("ticket", 0) or 0)
         except Exception:
             ticket = 0
-        if require_ticket_match and ticket not in closed_tickets:
+        if require_ticket_match and ticket not in closed_tickets and ticket not in pending_closed_tickets:
             continue
         order["status"] = "closed"
         order["closed_at"] = datetime.now().isoformat()

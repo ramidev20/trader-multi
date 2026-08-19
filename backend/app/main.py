@@ -228,20 +228,6 @@ class RiskStartPayload(BaseModel):
     orders_limit: int = 10
 
 
-class TradingViewWebhookPayload(BaseModel):
-    symbol: str | None = "XAUUSD"
-    source: str | None = "OANDA"
-    price: float | None = None
-    close: float | None = None
-    last: float | None = None
-    bid: float | None = None
-    ask: float | None = None
-    time: str | None = None
-    timestamp: str | None = None
-    message: str | None = None
-    token: str | None = None
-
-
 app = FastAPI(title="MT5 Trader API", version="0.3.0")
 
 
@@ -268,82 +254,6 @@ def _runtime_logger(message: str, level: str) -> None:
 
 
 set_runtime_logger(_runtime_logger)
-
-
-def _extract_tradingview_price(payload: dict[str, Any]) -> float | None:
-    for key in ("price", "close", "last", "bid", "ask"):
-        value = payload.get(key)
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value.strip())
-            except ValueError:
-                continue
-    return None
-
-
-def _load_precise_spread_state() -> dict[str, Any]:
-    state = state_get("precise_spread", {})
-    return state if isinstance(state, dict) else {}
-
-
-def _fetch_master_quote(symbol: str = SYMBOL_DEFAULT) -> tuple[float | None, float | None, str | None]:
-    if is_dev_mode():
-        tick = _tick_for(symbol)
-        bid = float(getattr(tick, "bid", 0.0) or 0.0) if tick is not None else None
-        ask = float(getattr(tick, "ask", 0.0) or 0.0) if tick is not None else None
-        return bid, ask, None
-
-    config = _load_config()
-    ready, detail, master_login = master_adapter_ready(config)
-    if not ready or not master_login:
-        return None, None, detail
-
-    result = submit_adapter_command(
-        int(master_login),
-        "chart",
-        {"symbol": symbol, "timeframe": "M1", "count": 20},
-        timeout_sec=5.0,
-    )
-    if result.get("status") != "ok":
-        return None, None, str(result.get("message", "Failed to read MT5 quote."))
-
-    bid = result.get("bid")
-    ask = result.get("ask")
-    bid_value = float(bid) if isinstance(bid, (int, float)) else None
-    ask_value = float(ask) if isinstance(ask, (int, float)) else None
-    return bid_value, ask_value, None
-
-
-def _refresh_precise_spread_quote() -> dict[str, Any]:
-    current = _load_precise_spread_state()
-    symbol = str(current.get("symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT).strip().upper()
-    webhook_price = current.get("webhook_price")
-
-    bid, ask, quote_error = _fetch_master_quote(symbol)
-    mt5_mid = ((bid + ask) / 2.0) if isinstance(bid, float) and isinstance(ask, float) else None
-    mt5_spread = (ask - bid) if isinstance(bid, float) and isinstance(ask, float) else None
-    tv_price = float(webhook_price) if isinstance(webhook_price, (int, float)) else None
-    buy_delta = (ask - tv_price) if isinstance(ask, float) and isinstance(tv_price, float) else None
-    sell_delta = (tv_price - bid) if isinstance(bid, float) and isinstance(tv_price, float) else None
-    mid_gap = (mt5_mid - tv_price) if isinstance(mt5_mid, float) and isinstance(tv_price, float) else None
-
-    next_state = {
-        **current,
-        "symbol": symbol,
-        "mt5_bid": bid,
-        "mt5_ask": ask,
-        "mt5_mid": mt5_mid,
-        "mt5_spread": mt5_spread,
-        "buy_delta": buy_delta,
-        "sell_delta": sell_delta,
-        "mid_gap": mid_gap,
-        "updated_at": datetime.now().isoformat(),
-        "error": quote_error,
-    }
-    state_set("precise_spread", next_state)
-    return next_state
 
 
 def _load_config() -> dict[str, Any]:
@@ -1054,42 +964,6 @@ def account_snapshots() -> dict[str, Any]:
 @app.get("/runtime")
 def runtime() -> dict[str, Any]:
     return snapshot()
-
-
-@app.get("/precise-spread")
-def precise_spread() -> dict[str, Any]:
-    return {"status": "ok", "data": _refresh_precise_spread_quote()}
-
-
-@app.post("/webhooks/tradingview/price")
-def tradingview_price_webhook(payload: TradingViewWebhookPayload) -> dict[str, Any]:
-    configured_token = str(os.environ.get("TRADINGVIEW_WEBHOOK_TOKEN", "")).strip()
-    if configured_token and str(payload.token or "").strip() != configured_token:
-        raise HTTPException(status_code=401, detail="Invalid TradingView webhook token.")
-
-    payload_data = payload.model_dump(exclude_none=True)
-    symbol = str(payload_data.get("symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT).strip().upper()
-    webhook_price = _extract_tradingview_price(payload_data)
-    if webhook_price is None:
-        raise HTTPException(status_code=400, detail="TradingView webhook payload must include a numeric price, close, last, bid, or ask.")
-
-    current = _load_precise_spread_state()
-    next_state = {
-        **current,
-        "symbol": symbol,
-        "source": str(payload_data.get("source", current.get("source", "OANDA")) or "OANDA").strip().upper(),
-        "webhook_price": float(webhook_price),
-        "webhook_received_at": payload_data.get("timestamp") or payload_data.get("time") or datetime.now().isoformat(),
-        "raw_payload": payload_data,
-        "error": None,
-    }
-    state_set("precise_spread", next_state)
-    refreshed = _refresh_precise_spread_quote()
-    append_log(
-        "adapter",
-        f"[WEBHOOK] {symbol} {refreshed.get('source', 'OANDA')}={float(webhook_price):.2f} received for precise spread.",
-    )
-    return {"status": "ok", "data": refreshed}
 
 
 @app.get("/positions/live")

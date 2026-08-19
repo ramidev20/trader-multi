@@ -378,15 +378,10 @@ def main() -> None:
             info = mt5.account_info()
             actual_login = int(getattr(info, "login", 0) or 0) if info is not None else 0
             if info is None or actual_login != int(args.login):
-                reconnected, reconnect_detail = initialize_session(args.login, args.password, args.server, terminal_path)
-                if reconnected:
-                    info = mt5.account_info()
-                    actual_login = int(getattr(info, "login", 0) or 0) if info is not None else 0
-            if info is None or actual_login != int(args.login):
                 write_status(
                     status_file,
                     {
-                        "state": "warning",
+                        "state": "disconnected",
                         "pid": os.getpid(),
                         "login": args.login,
                         "server": args.server,
@@ -396,11 +391,12 @@ def main() -> None:
                         "error": (
                             f"Active MT5 login is {actual_login}, expected {args.login}"
                             if actual_login
-                            else "No account info available"
+                            else "MT5 terminal closed or account session lost"
                         ),
                         "updated_at": int(time.time()),
                     },
                 )
+                break
             else:
                 write_status(
                     status_file,

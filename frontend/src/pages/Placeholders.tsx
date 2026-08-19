@@ -41,6 +41,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [limitPrice, setLimitPrice] = useState(() => savedTradeForm.limitPrice ?? "");
   const [tp, setTp] = useState(() => savedTradeForm.tp ?? "150");
   const [sl, setSl] = useState(() => savedTradeForm.sl ?? "600");
+  const [spreadPips, setSpreadPips] = useState(() => savedTradeForm.spreadPips ?? "0");
   const [multiTp, setMultiTp] = useState(() => Boolean(savedTradeForm.multiTp));
   const [slPrice, setSlPrice] = useState(() => savedTradeForm.slPrice ?? "");
   const [tp1Ratio, setTp1Ratio] = useState(() => savedTradeForm.tp1Ratio ?? "1.0");
@@ -105,6 +106,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         limitPrice,
         tp,
         sl,
+        spreadPips,
         multiTp,
         slPrice,
         tp1Ratio,
@@ -122,7 +124,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     } catch {
       // Keep the trade form usable when browser storage is unavailable.
     }
-  }, [side, orderKind, limitPrice, tp, sl, multiTp, slPrice, tp1Ratio, tp2Ratio, tp3Ratio, tp2Enabled, tp3Enabled, tp1Percent, tp2Percent, autoCloseEnabled, autoCloseAt, positionsTab]);
+  }, [side, orderKind, limitPrice, tp, sl, spreadPips, multiTp, slPrice, tp1Ratio, tp2Ratio, tp3Ratio, tp2Enabled, tp3Enabled, tp1Percent, tp2Percent, autoCloseEnabled, autoCloseAt, positionsTab]);
 
   useEffect(() => {
     const persistTradeForm = () => {
@@ -133,6 +135,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           limitPrice,
           tp,
           sl,
+          spreadPips,
           multiTp,
           slPrice,
           tp1Ratio,
@@ -159,7 +162,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       window.removeEventListener("beforeunload", persistTradeForm);
       window.removeEventListener("pagehide", persistTradeForm);
     };
-  }, [side, orderKind, limitPrice, tp, sl, multiTp, slPrice, tp1Ratio, tp2Ratio, tp3Ratio, tp2Enabled, tp3Enabled, tp1Percent, tp2Percent, autoCloseEnabled, autoCloseAt, positionsTab]);
+  }, [side, orderKind, limitPrice, tp, sl, spreadPips, multiTp, slPrice, tp1Ratio, tp2Ratio, tp3Ratio, tp2Enabled, tp3Enabled, tp1Percent, tp2Percent, autoCloseEnabled, autoCloseAt, positionsTab]);
 
   useEffect(() => {
     if (!multiTp && tp3Enabled) setTp3Enabled(false);
@@ -331,6 +334,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         limit_price: orderKind === "LIMIT" ? Number(limitPrice || 0) : null,
         tp: Number(tp || 0),
         sl: Number(sl || 0),
+        spread_pips: Number(spreadPips || 0),
         tp_in_pips: true,
         sl_in_pips: true,
         advanced: multiTp,
@@ -357,6 +361,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       }
       await onRefreshRuntime?.();
       await loadPositions({ silent: true });
+      await loadLimitOrders({ silent: true });
       setErrorText("");
     } catch (error) {
       setErrorText(String(error?.message || error));
@@ -378,6 +383,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       }
       await onRefreshRuntime?.();
       await loadPositions({ silent: true });
+      await loadLimitOrders({ silent: true });
       const summary = response?.summary || {};
       if (Number(summary.closed || 0) > 0) {
         setErrorText("");
@@ -676,7 +682,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                 idleClassName="border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
               />
             </div>
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid gap-3 md:grid-cols-3">
               <Field
                 label="Take Profit (Pips)"
                 value={tp}
@@ -688,6 +694,11 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                 value={sl}
                 onChange={(e) => setSl(e.target.value)}
                 disabled={multiTp}
+              />
+              <Field
+                label="Spread (Pips)"
+                value={spreadPips}
+                onChange={(e) => setSpreadPips(decimalInput(e.target.value))}
               />
             </div>
             <div className="space-y-3 rounded-[8px] border border-slate-200 bg-slate-50 p-3">
@@ -743,6 +754,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                   disabled
                 />
               </div>
+              <p className="text-xs font-medium text-slate-500">
+                Spread pips are added to the final stop loss distance for both pip-based and price-based SL.
+              </p>
               <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3 items-end">
                 <Field
                   label="TP1 Ratio"

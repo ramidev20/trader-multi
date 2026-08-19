@@ -742,6 +742,7 @@ def open_manual_position(
     risk_percent: float | None = None,
     advanced: bool = False,
     sl_price: float | None = None,
+    spread_pips: float = 0.0,
     ratio: float = 3.0,
     tp1_ratio: float = 1.0,
     tp2_ratio: float = 1.0,
@@ -784,6 +785,7 @@ def open_manual_position(
     order_kind_upper = str(order_kind or "MARKET").upper()
     is_buy = order_type_upper == "BUY"
     market_entry_price = float(tick.ask) if is_buy else float(tick.bid)
+    spread_distance = max(0.0, float(spread_pips or 0.0)) / 10.0
     if order_kind_upper not in {"MARKET", "LIMIT"}:
         raise RuntimeError("Order type must be MARKET or LIMIT.")
     if order_kind_upper == "LIMIT":
@@ -808,18 +810,18 @@ def open_manual_position(
     if advanced:
         if sl_price is None:
             raise RuntimeError("Multi-TP orders require a Stop Loss Price.")
-        stop_loss = float(sl_price)
+        stop_loss = float(sl_price) - spread_distance if is_buy else float(sl_price) + spread_distance
         if (is_buy and stop_loss >= entry_price) or ((not is_buy) and stop_loss <= entry_price):
             raise RuntimeError("Stop Loss Price must be below BUY price or above SELL price.")
         risk_distance = abs(entry_price - stop_loss)
     elif sl is None:
-        stop_loss = entry_price - 1.0 if is_buy else entry_price + 1.0
+        stop_loss = entry_price - (1.0 + spread_distance) if is_buy else entry_price + (1.0 + spread_distance)
         risk_distance = abs(entry_price - stop_loss)
     elif sl_in_pips:
-        risk_distance = float(sl) / 10.0
+        risk_distance = (float(sl) + max(0.0, float(spread_pips or 0.0))) / 10.0
         stop_loss = entry_price - risk_distance if is_buy else entry_price + risk_distance
     else:
-        stop_loss = float(sl)
+        stop_loss = float(sl) - spread_distance if is_buy else float(sl) + spread_distance
         risk_distance = abs(entry_price - stop_loss)
 
     if risk_distance <= 0:
@@ -913,6 +915,7 @@ def open_manual_position(
                 "entry": round(float(entry_price), 2),
                 "tp": round(float(take_profit), 2),
                 "sl": round(float(stop_loss), 2),
+                "spread_pips": round(float(spread_pips or 0.0), 2),
                 "tp_targets": [
                     {"price": round(float(target), 2), "withdraw_percent": float(percent)}
                     for target, percent in take_profit_specs

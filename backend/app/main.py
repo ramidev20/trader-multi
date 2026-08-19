@@ -142,6 +142,7 @@ class OpenPositionPayload(BaseModel):
     risk_percent: float | None = None
     advanced: bool = False
     sl_price: float | None = None
+    spread_pips: float = 0.0
     ratio: float = 3.0
     tp1_ratio: float = 1.0
     tp2_ratio: float = 1.0
@@ -697,12 +698,15 @@ def _fetch_all_live_orders() -> tuple[list[dict[str, Any]], list[str]]:
         for order in result.get("orders", []) or []:
             if not isinstance(order, dict):
                 continue
-            order_type = int(order.get("type", -1) or -1)
             limit_types = {
                 int(getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2)),
                 int(getattr(mt5, "ORDER_TYPE_SELL_LIMIT", 3)),
             }
-            if order_type not in limit_types:
+            order_kind = str(order.get("order_kind", "") or "").upper()
+            order_type_raw = order.get("type")
+            order_type = _safe_int(order_type_raw) if str(order_type_raw).strip() not in {"", "None"} else -1
+            is_limit_order = order_type in limit_types or order_kind == "LIMIT"
+            if not is_limit_order:
                 continue
             orders.append(
                 {
@@ -1193,6 +1197,7 @@ def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
             risk_percent=payload.risk_percent,
             advanced=bool(payload.advanced),
             sl_price=payload.sl_price,
+            spread_pips=float(payload.spread_pips or 0.0),
             ratio=float(payload.ratio),
             tp1_ratio=float(payload.tp1_ratio),
             tp2_ratio=float(payload.tp2_ratio),

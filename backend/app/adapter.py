@@ -286,6 +286,7 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
             risk_percent=payload.get("risk_percent"),
             advanced=bool(payload.get("advanced")),
             sl_price=payload.get("sl_price"),
+            spread_pips=float(payload.get("spread_pips", 0.0) or 0.0),
             ratio=float(payload.get("ratio", 3.0)),
             tp1_ratio=float(payload.get("tp1_ratio", 1.0)),
             tp2_ratio=float(payload.get("tp2_ratio", 1.0)),

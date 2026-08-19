@@ -62,6 +62,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [limitOrders, setLimitOrders] = useState([]);
   const [limitOrdersErrors, setLimitOrdersErrors] = useState([]);
   const [spread, setSpread] = useState(null);
+  const [preciseSpread, setPreciseSpread] = useState(null);
   const [positionsTab, setPositionsTab] = useState(() => savedTradeForm.tradeTab ?? savedTradeForm.positionsTab ?? "live");
   const openOrders = useMemo(
     () => (runtime?.orders || []).filter((o) => o.status === "open"),
@@ -296,9 +297,22 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     }
   }
 
+  async function loadPreciseSpread(options = {}) {
+    const { silent = false } = options;
+    try {
+      const data = await api.preciseSpread();
+      setPreciseSpread(data?.data ?? null);
+    } catch (error) {
+      if (!silent) {
+        setErrorText(String(error?.message || error));
+      }
+    }
+  }
+
   useEffect(() => {
     loadPositions();
     loadLimitOrders();
+    loadPreciseSpread({ silent: true });
   }, []);
 
   async function refreshTradeData() {
@@ -308,9 +322,22 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       await onRefreshRuntime?.({ silent: true });
       await loadPositions({ silent: true });
       await loadLimitOrders({ silent: true });
+      await loadPreciseSpread({ silent: true });
     } finally {
       setRefreshing(false);
     }
+  }
+
+  function fmtPrice(value, digits = 2) {
+    return typeof value === "number" && Number.isFinite(value)
+      ? value.toFixed(digits)
+      : "-";
+  }
+
+  function fmtSigned(value, digits = 2) {
+    return typeof value === "number" && Number.isFinite(value)
+      ? `${value > 0 ? "+" : ""}${value.toFixed(digits)}`
+      : "-";
   }
 
   function fmtDateTime(value) {
@@ -362,6 +389,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       await onRefreshRuntime?.();
       await loadPositions({ silent: true });
       await loadLimitOrders({ silent: true });
+      await loadPreciseSpread({ silent: true });
       setErrorText("");
     } catch (error) {
       setErrorText(String(error?.message || error));
@@ -384,6 +412,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       await onRefreshRuntime?.();
       await loadPositions({ silent: true });
       await loadLimitOrders({ silent: true });
+      await loadPreciseSpread({ silent: true });
       const summary = response?.summary || {};
       if (Number(summary.closed || 0) > 0) {
         setErrorText("");
@@ -640,12 +669,76 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           )}
         </Card>
 
-        <Card>
-          <h3 className="text-lg font-black text-slate-950">Manual Trade</h3>
-          <p className="mt-1 text-sm text-slate-500">
-            Open a master position and auto-clone to enabled sub accounts.
-          </p>
-          <div className="mt-4 space-y-3">
+        <div className="space-y-6">
+          <Card>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-black text-slate-950">Precise Spread</h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  Compares TradingView OANDA webhook price with the current MT5 quote.
+                </p>
+              </div>
+              <div className="rounded-2xl bg-amber-50 p-2.5 text-amber-700">
+                <Gauge className="h-5 w-5" />
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 grid-cols-2">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">OANDA Price</p>
+                <p className="mt-2 text-lg font-black text-slate-950">{fmtPrice(preciseSpread?.webhook_price)}</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  {preciseSpread?.source || "OANDA"} webhook
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">MT5 Spread</p>
+                <p className="mt-2 text-lg font-black text-slate-950">{fmtPrice(preciseSpread?.mt5_spread)}</p>
+                <p className="mt-1 text-xs text-slate-500">Bid/ask distance</p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-emerald-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-emerald-700">Buy Delta</p>
+                <p className="mt-2 text-lg font-black text-emerald-900">{fmtSigned(preciseSpread?.buy_delta)}</p>
+                <p className="mt-1 text-xs text-emerald-700">MT5 ask minus OANDA</p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-rose-50 p-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-rose-700">Sell Delta</p>
+                <p className="mt-2 text-lg font-black text-rose-900">{fmtSigned(preciseSpread?.sell_delta)}</p>
+                <p className="mt-1 text-xs text-rose-700">OANDA minus MT5 bid</p>
+              </div>
+            </div>
+            <div className="mt-3 grid gap-3 grid-cols-3 text-sm">
+              <div>
+                <p className="font-bold text-slate-500">MT5 Bid</p>
+                <p className="mt-1 font-semibold text-slate-900">{fmtPrice(preciseSpread?.mt5_bid)}</p>
+              </div>
+              <div>
+                <p className="font-bold text-slate-500">MT5 Ask</p>
+                <p className="mt-1 font-semibold text-slate-900">{fmtPrice(preciseSpread?.mt5_ask)}</p>
+              </div>
+              <div>
+                <p className="font-bold text-slate-500">Mid Gap</p>
+                <p className="mt-1 font-semibold text-slate-900">{fmtSigned(preciseSpread?.mid_gap)}</p>
+              </div>
+            </div>
+            <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600">
+              Webhook URL: <span className="font-bold">POST /webhooks/tradingview/price</span> with JSON like <code className="font-bold text-slate-700">{'{"symbol":"XAUUSD","source":"OANDA","price":"{{close}}"}'}</code>.
+            </div>
+            <div className="mt-2 text-xs text-slate-500">
+              Last webhook: {fmtDateTime(preciseSpread?.webhook_received_at)} | Last refresh: {fmtDateTime(preciseSpread?.updated_at)}
+            </div>
+            {preciseSpread?.error ? (
+              <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+                {preciseSpread.error}
+              </div>
+            ) : null}
+          </Card>
+
+          <Card>
+            <h3 className="text-lg font-black text-slate-950">Manual Trade</h3>
+            <p className="mt-1 text-sm text-slate-500">
+              Open a master position and auto-clone to enabled sub accounts.
+            </p>
+            <div className="mt-4 space-y-3">
             <div className="grid gap-3 md:grid-cols-2">
               <SelectBox
                 label="Order Type"
@@ -819,8 +912,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                 />
               </div>
             </div>
-          </div>
-        </Card>
+            </div>
+          </Card>
+        </div>
       </div>
 
       <Dialog

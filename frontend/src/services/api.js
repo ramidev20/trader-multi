@@ -28,6 +28,7 @@ export const api = {
   bootstrap: () => request("/bootstrap"),
   dashboard: () => request("/dashboard"),
   runtime: () => request("/runtime"),
+  preciseSpread: () => request("/precise-spread"),
   settings: () => request("/settings"),
   saveTheme: (theme_mode) => request("/settings/theme", { method: "PATCH", body: JSON.stringify({ theme_mode }) }),
   saveZoom: (ui_zoom_percent) => request("/settings/zoom", { method: "PATCH", body: JSON.stringify({ ui_zoom_percent }) }),
@@ -60,6 +61,7 @@ export const api = {
   removeLiquidityLevel: (id) => request(`/liquidity-levels/${id}`, { method: "DELETE" }),
   openPosition: (payload) => request("/positions/open", { method: "POST", body: JSON.stringify(payload) }),
   closePositions: () => request("/positions/close", { method: "POST" }),
+  tradingViewWebhook: (payload) => request("/webhooks/tradingview/price", { method: "POST", body: JSON.stringify(payload) }),
 
   startRiskMonitor: (payload) => request("/risk/start", { method: "POST", body: JSON.stringify(payload) }),
   stopRiskMonitor: () => request("/risk/stop", { method: "POST" }),

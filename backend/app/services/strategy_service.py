@@ -785,7 +785,8 @@ def open_manual_position(
     order_kind_upper = str(order_kind or "MARKET").upper()
     is_buy = order_type_upper == "BUY"
     market_entry_price = float(tick.ask) if is_buy else float(tick.bid)
-    spread_distance = max(0.0, float(spread_pips or 0.0)) / 10.0
+    spread_pips_value = max(0.0, float(spread_pips or 0.0))
+    spread_price_offset = spread_pips_value / 10.0
     if order_kind_upper not in {"MARKET", "LIMIT"}:
         raise RuntimeError("Order type must be MARKET or LIMIT.")
     if order_kind_upper == "LIMIT":
@@ -810,18 +811,18 @@ def open_manual_position(
     if advanced:
         if sl_price is None:
             raise RuntimeError("Multi-TP orders require a Stop Loss Price.")
-        stop_loss = float(sl_price) - spread_distance if is_buy else float(sl_price) + spread_distance
+        stop_loss = float(sl_price) - spread_price_offset if is_buy else float(sl_price) + spread_price_offset
         if (is_buy and stop_loss >= entry_price) or ((not is_buy) and stop_loss <= entry_price):
             raise RuntimeError("Stop Loss Price must be below BUY price or above SELL price.")
         risk_distance = abs(entry_price - stop_loss)
     elif sl is None:
-        stop_loss = entry_price - (1.0 + spread_distance) if is_buy else entry_price + (1.0 + spread_distance)
+        stop_loss = entry_price - (1.0 + spread_price_offset) if is_buy else entry_price + (1.0 + spread_price_offset)
         risk_distance = abs(entry_price - stop_loss)
     elif sl_in_pips:
-        risk_distance = (float(sl) + max(0.0, float(spread_pips or 0.0))) / 10.0
+        risk_distance = (float(sl) + spread_pips_value) / 10.0
         stop_loss = entry_price - risk_distance if is_buy else entry_price + risk_distance
     else:
-        stop_loss = float(sl) - spread_distance if is_buy else float(sl) + spread_distance
+        stop_loss = float(sl) - spread_price_offset if is_buy else float(sl) + spread_price_offset
         risk_distance = abs(entry_price - stop_loss)
 
     if risk_distance <= 0:

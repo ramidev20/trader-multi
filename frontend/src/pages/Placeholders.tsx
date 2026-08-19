@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   Bell,
   CheckCircle2,
-  Gauge,
   Play,
   RefreshCcw,
   Server,
@@ -19,6 +18,7 @@ import { AppButton, Card, Dialog, Field, SelectBox } from "../components/ui/Prim
 import { TableFrame } from "../components/ui/TableFrame";
 import { LogList } from "../components/ui/LogList";
 import { MetricCard } from "./shared/MetricCard";
+import ChartPage from "./ChartPage";
 import { cx, decimalInput, money } from "../utils/format";
 import { api } from "../services/api";
 import { isRemoteConnected, sendRemoteCommand } from "../services/remoteControl";
@@ -33,7 +33,6 @@ function loadTradeForm() {
     return {};
   }
 }
-
 export function TradePage({ runtime, onRefreshRuntime }) {
   const savedTradeForm = useMemo(loadTradeForm, []);
   const [side, setSide] = useState(() => savedTradeForm.side ?? "BUY");
@@ -61,8 +60,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [positionsErrors, setPositionsErrors] = useState([]);
   const [limitOrders, setLimitOrders] = useState([]);
   const [limitOrdersErrors, setLimitOrdersErrors] = useState([]);
-  const [spread, setSpread] = useState(null);
-  const [positionsTab, setPositionsTab] = useState(() => savedTradeForm.tradeTab ?? savedTradeForm.positionsTab ?? "live");
+  const [positionsTab, setPositionsTab] = useState(() => savedTradeForm.tradeTab ?? savedTradeForm.positionsTab ?? "chart");
   const openOrders = useMemo(
     () => (runtime?.orders || []).filter((o) => o.status === "open"),
     [runtime],
@@ -277,7 +275,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       const data = await api.livePositions();
       setPositions(Array.isArray(data?.positions) ? data.positions : []);
       setPositionsErrors(Array.isArray(data?.errors) ? data.errors : []);
-      setSpread(data?.spread ?? null);
     } catch (error) {
       setErrorText(String(error?.message || error));
     }
@@ -311,12 +308,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     } finally {
       setRefreshing(false);
     }
-  }
-
-  function fmtPrice(value, digits = 2) {
-    return typeof value === "number" && Number.isFinite(value)
-      ? value.toFixed(digits)
-      : "-";
   }
 
   function fmtDateTime(value) {
@@ -412,47 +403,12 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           {errorText}
         </div>
       ) : null}
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <SummaryCard
-          label="Open Orders"
-          value={String(openOrders.length)}
-          hint="Runtime positions"
-          icon={Server}
-          tone="blue"
-        />
-        <SummaryCard
-          label="Strategy"
-          value={runtime?.strategy?.running ? "Running" : "Idle"}
-          hint="Search engine state"
-          icon={Activity}
-          tone={runtime?.strategy?.running ? "green" : "slate"}
-        />
-        <SummaryCard
-          label="Spread"
-          value={spread == null ? "-" : Number(spread).toFixed(2)}
-          hint="Current spread estimate"
-          icon={Gauge}
-          tone="amber"
-        />
-        <SummaryCard
-          label="Last Side"
-          value={latestOrder ? String(latestOrder.side || "-") : "-"}
-          hint="Most recent open order"
-          icon={Terminal}
-          tone={
-            latestOrder?.side === "BUY"
-              ? "green"
-              : latestOrder?.side === "SELL"
-                ? "red"
-                : "slate"
-          }
-        />
-      </section>
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.65fr)_360px]">
-        <Card className="flex min-h-[calc(100vh-180px)] flex-col">
+        <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-1">
               {[
+                ["chart", "Chart"],
                 ["live", "Live Positions"],
                 ["orders", "Limit Orders"],
                 ["log", "Log"],
@@ -496,156 +452,161 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             </div>
           ) : null}
 
-          {positionsTab === "live" ? (
-            <TableFrame className="mt-4 min-h-[360px]">
-              <table className="h-full w-full min-w-[700px] text-left">
-                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                  <tr>
-                    <th className="py-3 pl-4 pr-3 font-bold">Account</th>
-                    <th className="px-3 py-3 font-bold">Tag</th>
-                    <th className="px-3 py-3 font-bold">Ticket</th>
-                    <th className="px-3 py-3 font-bold">Lot</th>
-                    <th className="px-3 py-3 font-bold">Open</th>
-                    <th className="py-3 pl-3 pr-4 font-bold">P/L</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 bg-white">
-                  {(positions.length
-                    ? positions
-                    : [
-                        {
-                          ticket: "empty",
-                          account_name: "-",
-                          account_login: "-",
-                          tag: "-",
-                          side: "-",
-                          lot: "-",
-                          open_price: "-",
-                          profit: "No open positions.",
-                        },
-                      ]
-                  ).map((row) => (
-                    <tr
-                      key={`${row.account_login}-${row.ticket}`}
-                      className="hover:bg-slate-50/70"
-                    >
-                      <td className="py-3 pl-4 pr-3 text-sm font-medium text-slate-800">
-                        {row.account_name} ({row.account_login})
-                      </td>
-                      <td className="px-3 py-3 text-sm">
-                        <span
-                          className={cx(
-                            "rounded-full px-2 py-0.5 text-[10px] font-bold",
-                            row.tag === "Main"
-                              ? "bg-blue-100 text-blue-700"
-                              : "bg-emerald-100 text-emerald-700",
-                          )}
-                        >
-                          {row.tag}
-                        </span>
-                      </td>
-                      <td className="px-3 py-3 text-sm text-slate-700">
-                        {row.ticket}
-                      </td>
-                      <td className="px-3 py-3 text-sm text-slate-700">
-                        {row.lot}
-                      </td>
-                      <td className="px-3 py-3 text-sm text-slate-700">
-                        {row.open_price}
-                      </td>
-                      <td
-                        className={cx(
-                          "px-3 py-3 text-sm font-bold",
-                          Number(row.profit) >= 0
-                            ? "text-emerald-600"
-                            : "text-rose-600",
-                        )}
-                      >
-                        {row.profit}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </TableFrame>
-          ) : positionsTab === "orders" ? (
-            <TableFrame className="mt-4 min-h-[360px]">
-              <table className="h-full w-full min-w-[760px] text-left">
-                <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                  <tr>
-                    <th className="py-3 pl-4 pr-3 font-bold">Account</th>
-                    <th className="px-3 py-3 font-bold">Ticket</th>
-                    <th className="px-3 py-3 font-bold">Side</th>
-                    <th className="px-3 py-3 font-bold">Price</th>
-                    <th className="px-3 py-3 font-bold">Lot</th>
-                    <th className="px-3 py-3 font-bold">Time</th>
-                    <th className="py-3 pl-3 pr-4 font-bold">Comment</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 bg-white">
-                  {(displayedLimitOrders.length
-                    ? displayedLimitOrders
-                    : [
-                        {
-                          ticket: "empty",
-                          account_name: "-",
-                          account_login: "-",
-                          side: "-",
-                          price: "-",
-                          lot: "-",
-                          opened_at: "-",
-                          comment: "No pending limit orders.",
-                        },
-                      ]
-                  ).map((row) => (
-                    <tr
-                      key={`${row.account_login}-${row.ticket}`}
-                      className="hover:bg-slate-50/70"
-                    >
-                      <td className="py-3 pl-4 pr-3 text-sm font-medium text-slate-800">
-                        {row.account_name} ({row.account_login})
-                      </td>
-                      <td className="px-3 py-3 text-sm text-slate-700">
-                        {row.ticket}
-                      </td>
-                      <td className="px-3 py-3 text-sm">
-                        <span
-                          className={cx(
-                            "rounded-full px-2 py-0.5 text-[10px] font-bold",
-                            row.side === "BUY"
-                              ? "bg-emerald-100 text-emerald-700"
-                              : "bg-rose-100 text-rose-700",
-                          )}
-                        >
-                          {row.side}
-                        </span>
-                      </td>
-                      <td className="px-3 py-3 text-sm text-slate-700">
-                        {row.price ?? row.open_price ?? "-"}
-                      </td>
-                      <td className="px-3 py-3 text-sm text-slate-700">
-                        {row.lot}
-                      </td>
-                      <td className="px-3 py-3 text-sm text-slate-700">
-                        {fmtDateTime(row.opened_at)}
-                      </td>
-                      <td className="py-3 pl-3 pr-4 text-sm text-slate-700">
-                        {row.comment || "-"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </TableFrame>
+          {positionsTab === "chart" ? (
+            <ChartPage />
           ) : (
-            <LogList
-              className="mt-4 min-h-[360px]"
-              logs={tradeFeedLogs}
-              emptyMessage="[INFO] No trade activity logs yet."
-            />
+            <Card className="flex min-h-[calc(100vh-180px)] flex-col">
+              {positionsTab === "live" ? (
+                <TableFrame className="mt-4 min-h-[360px]">
+                  <table className="h-full w-full min-w-[700px] text-left">
+                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="py-3 pl-4 pr-3 font-bold">Account</th>
+                        <th className="px-3 py-3 font-bold">Tag</th>
+                        <th className="px-3 py-3 font-bold">Ticket</th>
+                        <th className="px-3 py-3 font-bold">Lot</th>
+                        <th className="px-3 py-3 font-bold">Open</th>
+                        <th className="py-3 pl-3 pr-4 font-bold">P/L</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {(positions.length
+                        ? positions
+                        : [
+                            {
+                              ticket: "empty",
+                              account_name: "-",
+                              account_login: "-",
+                              tag: "-",
+                              side: "-",
+                              lot: "-",
+                              open_price: "-",
+                              profit: "No open positions.",
+                            },
+                          ]
+                      ).map((row) => (
+                        <tr
+                          key={`${row.account_login}-${row.ticket}`}
+                          className="hover:bg-slate-50/70"
+                        >
+                          <td className="py-3 pl-4 pr-3 text-sm font-medium text-slate-800">
+                            {row.account_name} ({row.account_login})
+                          </td>
+                          <td className="px-3 py-3 text-sm">
+                            <span
+                              className={cx(
+                                "rounded-full px-2 py-0.5 text-[10px] font-bold",
+                                row.tag === "Main"
+                                  ? "bg-blue-100 text-blue-700"
+                                  : "bg-emerald-100 text-emerald-700",
+                              )}
+                            >
+                              {row.tag}
+                            </span>
+                          </td>
+                          <td className="px-3 py-3 text-sm text-slate-700">
+                            {row.ticket}
+                          </td>
+                          <td className="px-3 py-3 text-sm text-slate-700">
+                            {row.lot}
+                          </td>
+                          <td className="px-3 py-3 text-sm text-slate-700">
+                            {row.open_price}
+                          </td>
+                          <td
+                            className={cx(
+                              "px-3 py-3 text-sm font-bold",
+                              Number(row.profit) >= 0
+                                ? "text-emerald-600"
+                                : "text-rose-600",
+                            )}
+                          >
+                            {row.profit}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </TableFrame>
+              ) : positionsTab === "orders" ? (
+                <TableFrame className="mt-4 min-h-[360px]">
+                  <table className="h-full w-full min-w-[760px] text-left">
+                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="py-3 pl-4 pr-3 font-bold">Account</th>
+                        <th className="px-3 py-3 font-bold">Ticket</th>
+                        <th className="px-3 py-3 font-bold">Side</th>
+                        <th className="px-3 py-3 font-bold">Price</th>
+                        <th className="px-3 py-3 font-bold">Lot</th>
+                        <th className="px-3 py-3 font-bold">Time</th>
+                        <th className="py-3 pl-3 pr-4 font-bold">Comment</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {(displayedLimitOrders.length
+                        ? displayedLimitOrders
+                        : [
+                            {
+                              ticket: "empty",
+                              account_name: "-",
+                              account_login: "-",
+                              side: "-",
+                              price: "-",
+                              lot: "-",
+                              opened_at: "-",
+                              comment: "No pending limit orders.",
+                            },
+                          ]
+                      ).map((row) => (
+                        <tr
+                          key={`${row.account_login}-${row.ticket}`}
+                          className="hover:bg-slate-50/70"
+                        >
+                          <td className="py-3 pl-4 pr-3 text-sm font-medium text-slate-800">
+                            {row.account_name} ({row.account_login})
+                          </td>
+                          <td className="px-3 py-3 text-sm text-slate-700">
+                            {row.ticket}
+                          </td>
+                          <td className="px-3 py-3 text-sm">
+                            <span
+                              className={cx(
+                                "rounded-full px-2 py-0.5 text-[10px] font-bold",
+                                row.side === "BUY"
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : "bg-rose-100 text-rose-700",
+                              )}
+                            >
+                              {row.side}
+                            </span>
+                          </td>
+                          <td className="px-3 py-3 text-sm text-slate-700">
+                            {row.price ?? row.open_price ?? "-"}
+                          </td>
+                          <td className="px-3 py-3 text-sm text-slate-700">
+                            {row.lot}
+                          </td>
+                          <td className="px-3 py-3 text-sm text-slate-700">
+                            {fmtDateTime(row.opened_at)}
+                          </td>
+                          <td className="py-3 pl-3 pr-4 text-sm text-slate-700">
+                            {row.comment || "-"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </TableFrame>
+              ) : (
+                <LogList
+                  className="mt-4 min-h-[360px]"
+                  logs={tradeFeedLogs}
+                  emptyMessage="[INFO] No trade activity logs yet."
+                />
+              )}
+            </Card>
           )}
-        </Card>
-
+        </div>
         <div className="space-y-6">
           <Card>
             <h3 className="text-lg font-black text-slate-950">Manual Trade</h3>

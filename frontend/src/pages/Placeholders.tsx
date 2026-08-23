@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  Activity,
   AlertTriangle,
   Bell,
   CheckCircle2,
@@ -14,20 +13,31 @@ import {
   Wrench,
   Info,
 } from "lucide-react";
-import { AppButton, Card, Dialog, Field, SelectBox } from "../components/ui/Primitives";
+import {
+  AppButton,
+  Card,
+  Dialog,
+  Field,
+  SelectBox,
+} from "../components/ui/Primitives";
 import { TableFrame } from "../components/ui/TableFrame";
 import { LogList } from "../components/ui/LogList";
 import { MetricCard } from "./shared/MetricCard";
 import ChartPage from "./ChartPage";
 import { cx, decimalInput, money } from "../utils/format";
 import { api } from "../services/api";
-import { isRemoteConnected, sendRemoteCommand } from "../services/remoteControl";
+import {
+  isRemoteConnected,
+  sendRemoteCommand,
+} from "../services/remoteControl";
 
 const TRADE_FORM_STORAGE_KEY = "trader.trade.form";
 
 function loadTradeForm() {
   try {
-    const saved = JSON.parse(globalThis.localStorage?.getItem(TRADE_FORM_STORAGE_KEY) || "{}");
+    const saved = JSON.parse(
+      globalThis.localStorage?.getItem(TRADE_FORM_STORAGE_KEY) || "{}",
+    );
     return saved && typeof saved === "object" ? saved : {};
   } catch {
     return {};
@@ -36,22 +46,46 @@ function loadTradeForm() {
 export function TradePage({ runtime, onRefreshRuntime }) {
   const savedTradeForm = useMemo(loadTradeForm, []);
   const [side, setSide] = useState(() => savedTradeForm.side ?? "BUY");
-  const [orderKind, setOrderKind] = useState(() => savedTradeForm.orderKind ?? "MARKET");
-  const [limitPrice, setLimitPrice] = useState(() => savedTradeForm.limitPrice ?? "");
+  const [orderKind, setOrderKind] = useState(
+    () => savedTradeForm.orderKind ?? "MARKET",
+  );
+  const [limitPrice, setLimitPrice] = useState(
+    () => savedTradeForm.limitPrice ?? "",
+  );
   const [tp, setTp] = useState(() => savedTradeForm.tp ?? "150");
   const [sl, setSl] = useState(() => savedTradeForm.sl ?? "600");
-  const [spreadPips, setSpreadPips] = useState(() => savedTradeForm.spreadPips ?? "0");
+  const [spreadPips, setSpreadPips] = useState(
+    () => savedTradeForm.spreadPips ?? "0",
+  );
   const [multiTp, setMultiTp] = useState(() => Boolean(savedTradeForm.multiTp));
   const [slPrice, setSlPrice] = useState(() => savedTradeForm.slPrice ?? "");
-  const [tp1Ratio, setTp1Ratio] = useState(() => savedTradeForm.tp1Ratio ?? "1.0");
-  const [tp2Ratio, setTp2Ratio] = useState(() => savedTradeForm.tp2Ratio ?? "1.0");
-  const [tp3Ratio, setTp3Ratio] = useState(() => savedTradeForm.tp3Ratio ?? "1.0");
-  const [tp2Enabled, setTp2Enabled] = useState(() => Boolean(savedTradeForm.tp2Enabled));
-  const [tp3Enabled, setTp3Enabled] = useState(() => Boolean(savedTradeForm.tp3Enabled));
-  const [tp1Percent, setTp1Percent] = useState(() => savedTradeForm.tp1Percent ?? "100");
-  const [tp2Percent, setTp2Percent] = useState(() => savedTradeForm.tp2Percent ?? "100");
-  const [autoCloseEnabled, setAutoCloseEnabled] = useState(() => Boolean(savedTradeForm.autoCloseEnabled));
-  const [autoCloseAt, setAutoCloseAt] = useState(() => savedTradeForm.autoCloseAt ?? defaultAutoCloseValue());
+  const [tp1Ratio, setTp1Ratio] = useState(
+    () => savedTradeForm.tp1Ratio ?? "1.0",
+  );
+  const [tp2Ratio, setTp2Ratio] = useState(
+    () => savedTradeForm.tp2Ratio ?? "1.0",
+  );
+  const [tp3Ratio, setTp3Ratio] = useState(
+    () => savedTradeForm.tp3Ratio ?? "1.0",
+  );
+  const [tp2Enabled, setTp2Enabled] = useState(() =>
+    Boolean(savedTradeForm.tp2Enabled),
+  );
+  const [tp3Enabled, setTp3Enabled] = useState(() =>
+    Boolean(savedTradeForm.tp3Enabled),
+  );
+  const [tp1Percent, setTp1Percent] = useState(
+    () => savedTradeForm.tp1Percent ?? "100",
+  );
+  const [tp2Percent, setTp2Percent] = useState(
+    () => savedTradeForm.tp2Percent ?? "100",
+  );
+  const [autoCloseEnabled, setAutoCloseEnabled] = useState(() =>
+    Boolean(savedTradeForm.autoCloseEnabled),
+  );
+  const [autoCloseAt, setAutoCloseAt] = useState(
+    () => savedTradeForm.autoCloseAt ?? defaultAutoCloseValue(),
+  );
   const [errorText, setErrorText] = useState("");
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -60,27 +94,37 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [positionsErrors, setPositionsErrors] = useState([]);
   const [limitOrders, setLimitOrders] = useState([]);
   const [limitOrdersErrors, setLimitOrdersErrors] = useState([]);
-  const [positionsTab, setPositionsTab] = useState(() => savedTradeForm.tradeTab ?? savedTradeForm.positionsTab ?? "chart");
+  const [positionsTab, setPositionsTab] = useState(
+    () => savedTradeForm.tradeTab ?? savedTradeForm.positionsTab ?? "chart",
+  );
   const openOrders = useMemo(
     () => (runtime?.orders || []).filter((o) => o.status === "open"),
     [runtime],
   );
-  const latestOrder = openOrders[openOrders.length - 1] || null;
   const tradeFeedLogs = useMemo(() => {
-    const tradeLogPattern = /manual|order|position|limit|close|auto close|tp\d?|take profit|stop loss|trade/i;
-    const runtimeLogs = (runtime?.logs?.search || []).filter((line) => tradeLogPattern.test(String(line)));
-    const openOrderLogs = openOrders.filter((order) => String(order.order_kind || "").toUpperCase() !== "LIMIT").map((order) => {
-      const kind = String(order.order_kind || "MARKET").toUpperCase();
-      const sideLabel = String(order.side || "-").toUpperCase();
-      const entry = Number(order.entry ?? order.price ?? 0) || 0;
-      return `[INFO] ${kind} ${sideLabel} ${order.symbol || "XAUUSD"} @ ${entry.toFixed(2)} lot=${Number(order.lot || 0).toFixed(2)} status=${order.status || "open"}`;
-    });
+    const tradeLogPattern =
+      /manual|order|position|limit|close|auto close|tp\d?|take profit|stop loss|trade/i;
+    const runtimeLogs = (runtime?.logs?.search || []).filter((line) =>
+      tradeLogPattern.test(String(line)),
+    );
+    const openOrderLogs = openOrders
+      .filter(
+        (order) => String(order.order_kind || "").toUpperCase() !== "LIMIT",
+      )
+      .map((order) => {
+        const kind = String(order.order_kind || "MARKET").toUpperCase();
+        const sideLabel = String(order.side || "-").toUpperCase();
+        const entry = Number(order.entry ?? order.price ?? 0) || 0;
+        return `[INFO] ${kind} ${sideLabel} ${order.symbol || "XAUUSD"} @ ${entry.toFixed(2)} lot=${Number(order.lot || 0).toFixed(2)} status=${order.status || "open"}`;
+      });
     const pendingOrderLogs = limitOrders.map((order) => {
       const sideLabel = String(order.side || "-").toUpperCase();
       const entry = Number(order.price ?? order.entry ?? 0) || 0;
       return `[INFO] LIMIT ${sideLabel} ${order.symbol || "XAUUSD"} @ ${entry.toFixed(2)} lot=${Number(order.lot || 0).toFixed(2)} ticket=${order.ticket || "-"}`;
     });
-    return [...runtimeLogs, ...openOrderLogs, ...pendingOrderLogs].slice(-120).reverse();
+    return [...runtimeLogs, ...openOrderLogs, ...pendingOrderLogs]
+      .slice(-120)
+      .reverse();
   }, [runtime, openOrders, limitOrders]);
   const totalRatio = useMemo(() => {
     let total = Number(tp1Ratio || 0);
@@ -91,43 +135,17 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const scheduledAutoCloseAt = runtime?.manual_trade?.auto_close_at || null;
   const displayedLimitOrders = limitOrders.length
     ? limitOrders
-    : (runtime?.orders || []).filter((order) =>
-        String(order?.status || "").toLowerCase() === "open" &&
-        String(order?.order_kind || "").toUpperCase() === "LIMIT",
+    : (runtime?.orders || []).filter(
+        (order) =>
+          String(order?.status || "").toLowerCase() === "open" &&
+          String(order?.order_kind || "").toUpperCase() === "LIMIT",
       );
 
   useEffect(() => {
     try {
-      globalThis.localStorage?.setItem(TRADE_FORM_STORAGE_KEY, JSON.stringify({
-        side,
-        orderKind,
-        limitPrice,
-        tp,
-        sl,
-        spreadPips,
-        multiTp,
-        slPrice,
-        tp1Ratio,
-        tp2Ratio,
-        tp3Ratio,
-        tp2Enabled,
-        tp3Enabled,
-        tp1Percent,
-        tp2Percent,
-        autoCloseEnabled,
-        autoCloseAt,
-        positionsTab,
-        tradeTab: positionsTab,
-      }));
-    } catch {
-      // Keep the trade form usable when browser storage is unavailable.
-    }
-  }, [side, orderKind, limitPrice, tp, sl, spreadPips, multiTp, slPrice, tp1Ratio, tp2Ratio, tp3Ratio, tp2Enabled, tp3Enabled, tp1Percent, tp2Percent, autoCloseEnabled, autoCloseAt, positionsTab]);
-
-  useEffect(() => {
-    const persistTradeForm = () => {
-      try {
-        globalThis.localStorage?.setItem(TRADE_FORM_STORAGE_KEY, JSON.stringify({
+      globalThis.localStorage?.setItem(
+        TRADE_FORM_STORAGE_KEY,
+        JSON.stringify({
           side,
           orderKind,
           limitPrice,
@@ -147,7 +165,59 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           autoCloseAt,
           positionsTab,
           tradeTab: positionsTab,
-        }));
+        }),
+      );
+    } catch {
+      // Keep the trade form usable when browser storage is unavailable.
+    }
+  }, [
+    side,
+    orderKind,
+    limitPrice,
+    tp,
+    sl,
+    spreadPips,
+    multiTp,
+    slPrice,
+    tp1Ratio,
+    tp2Ratio,
+    tp3Ratio,
+    tp2Enabled,
+    tp3Enabled,
+    tp1Percent,
+    tp2Percent,
+    autoCloseEnabled,
+    autoCloseAt,
+    positionsTab,
+  ]);
+
+  useEffect(() => {
+    const persistTradeForm = () => {
+      try {
+        globalThis.localStorage?.setItem(
+          TRADE_FORM_STORAGE_KEY,
+          JSON.stringify({
+            side,
+            orderKind,
+            limitPrice,
+            tp,
+            sl,
+            spreadPips,
+            multiTp,
+            slPrice,
+            tp1Ratio,
+            tp2Ratio,
+            tp3Ratio,
+            tp2Enabled,
+            tp3Enabled,
+            tp1Percent,
+            tp2Percent,
+            autoCloseEnabled,
+            autoCloseAt,
+            positionsTab,
+            tradeTab: positionsTab,
+          }),
+        );
       } catch {
         // Ignore storage failures during shutdown or private browsing.
       }
@@ -160,10 +230,30 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       window.removeEventListener("beforeunload", persistTradeForm);
       window.removeEventListener("pagehide", persistTradeForm);
     };
-  }, [side, orderKind, limitPrice, tp, sl, spreadPips, multiTp, slPrice, tp1Ratio, tp2Ratio, tp3Ratio, tp2Enabled, tp3Enabled, tp1Percent, tp2Percent, autoCloseEnabled, autoCloseAt, positionsTab]);
+  }, [
+    side,
+    orderKind,
+    limitPrice,
+    tp,
+    sl,
+    spreadPips,
+    multiTp,
+    slPrice,
+    tp1Ratio,
+    tp2Ratio,
+    tp3Ratio,
+    tp2Enabled,
+    tp3Enabled,
+    tp1Percent,
+    tp2Percent,
+    autoCloseEnabled,
+    autoCloseAt,
+    positionsTab,
+  ]);
 
   useEffect(() => {
     if (!multiTp && tp3Enabled) setTp3Enabled(false);
+    if (!tp2Enabled && tp3Enabled) setTp3Enabled(false);
     if (multiTp && tp2Enabled && !tp3Enabled && tp1Percent === "100")
       setTp1Percent("50");
     if (multiTp && tp3Enabled && tp2Percent === "100") setTp2Percent("50");
@@ -176,31 +266,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     setAutoCloseEnabled(true);
     setAutoCloseAt(toDateTimeLocalValue(dt));
   }, [scheduledAutoCloseAt]);
-
-  function SummaryCard({ label, value, hint, icon: Icon, tone = "slate" }) {
-    const toneStyle = {
-      slate: "bg-slate-100 text-slate-600",
-      green: "bg-emerald-50 text-emerald-700",
-      blue: "bg-blue-50 text-blue-700",
-      red: "bg-rose-50 text-rose-700",
-      amber: "bg-amber-50 text-amber-700",
-    };
-
-    return (
-      <Card className="p-4">
-        <div className="flex items-center justify-between">
-          <p className="text-sm font-bold text-slate-500">{label}</p>
-          <div className={cx("rounded-2xl p-2.5", toneStyle[tone])}>
-            <Icon className="h-6 w-6" />
-          </div>
-        </div>
-        <p className="mt-4 text-2xl font-black tracking-tight text-slate-950">
-          {value}
-        </p>
-        {hint ? <p className="mt-1 text-xs text-slate-500">{hint}</p> : null}
-      </Card>
-    );
-  }
 
   function SwitchKnob({ checked }) {
     return (
@@ -217,6 +282,35 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           )}
         />
       </span>
+    );
+  }
+
+  function MiniToggle({ checked, onChange, disabled = false }) {
+    return (
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={(e) => {
+          e.preventDefault();
+          onChange(!checked);
+        }}
+        className="shrink-0 disabled:pointer-events-none disabled:opacity-40"
+        aria-pressed={checked}
+      >
+        <span
+          className={cx(
+            "relative inline-flex h-4 w-8 items-center rounded-full transition",
+            checked ? "bg-blue-600" : "bg-slate-300",
+          )}
+        >
+          <span
+            className={cx(
+              "h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200",
+              checked ? "translate-x-4" : "translate-x-0.5",
+            )}
+          />
+        </span>
+      </button>
     );
   }
 
@@ -247,7 +341,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   function SideButton({ value, label, activeClassName, idleClassName }) {
     const isActive = side === value;
     const busy = submitting && isActive;
-    const actionLabel = orderKind === "LIMIT" ? "Pending limit order" : "Market execution";
+    const actionLabel =
+      orderKind === "LIMIT" ? "Pending limit order" : "Market execution";
     return (
       <button
         type="button"
@@ -261,8 +356,15 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           isActive ? activeClassName : idleClassName,
         )}
       >
-        <span className="text-[15px] leading-none">{busy ? `OPENING ${label}...` : `OPEN ${label}`}</span>
-        <span className={cx("mt-1 text-[11px] font-semibold tracking-wide", isActive ? "text-white/85" : "text-slate-600")}>
+        <span className="text-[15px] leading-none">
+          {busy ? `OPENING ${label}...` : `OPEN ${label}`}
+        </span>
+        <span
+          className={cx(
+            "mt-1 text-[11px] font-semibold tracking-wide",
+            isActive ? "text-white/85" : "text-slate-600",
+          )}
+        >
           {actionLabel}
         </span>
       </button>
@@ -323,6 +425,12 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       setErrorText("Choose an end time for auto close.");
       return;
     }
+    if (multiTp && Number(slPrice || 0) <= 0) {
+      setErrorText(
+        "Enter a Stop Loss Price for Advanced Risk / Multi-TP orders.",
+      );
+      return;
+    }
     setSubmitting(true);
     try {
       const orderPayload = {
@@ -344,16 +452,20 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         tp3_enabled: tp3Enabled,
         tp1_percent: Number(tp1Percent || 0),
         tp2_percent: Number(tp2Percent || 0),
-        auto_close_at: autoCloseEnabled ? new Date(autoCloseAt).toISOString() : null,
+        auto_close_at: autoCloseEnabled
+          ? new Date(autoCloseAt).toISOString()
+          : null,
         symbol: "XAUUSD",
       };
       await api.openPosition(orderPayload);
       if (isRemoteConnected()) {
         const { risk_percent, riskPercent, ...receiverPayload } = orderPayload;
-        try {
-          await sendRemoteCommand("open", receiverPayload);
-        } catch (error) {
-          throw new Error(`Order opened locally, but PC B did not mirror it: ${error instanceof Error ? error.message : String(error)}`);
+        const { results } = await sendRemoteCommand("open", receiverPayload);
+        const failed = results.filter((result) => result.status === "error");
+        if (failed.length) {
+          throw new Error(
+            `Order opened locally, but ${failed.length} receiver(s) did not mirror it: ${failed.map((f) => `${f.label} (${f.message})`).join("; ")}`,
+          );
         }
       }
       await onRefreshRuntime?.();
@@ -372,10 +484,12 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       setCloseConfirmOpen(false);
       const response = await api.closePositions();
       if (isRemoteConnected()) {
-        try {
-          await sendRemoteCommand("close_all", {});
-        } catch (error) {
-          throw new Error(`Positions closed locally, but PC B did not receive the close request: ${error instanceof Error ? error.message : String(error)}`);
+        const { results } = await sendRemoteCommand("close_all", {});
+        const failed = results.filter((result) => result.status === "error");
+        if (failed.length) {
+          throw new Error(
+            `Positions closed locally, but ${failed.length} receiver(s) did not receive the close request: ${failed.map((f) => `${f.label} (${f.message})`).join("; ")}`,
+          );
         }
       }
       await onRefreshRuntime?.();
@@ -404,8 +518,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         </div>
       ) : null}
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.65fr)_360px]">
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex h-[calc(100vh-180px)] flex-col gap-4">
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-1">
               {[
                 ["chart", "Chart"],
@@ -439,354 +553,379 @@ export function TradePage({ runtime, onRefreshRuntime }) {
               >
                 Close All Positions
               </button>
-              <AppButton variant="soft" onClick={refreshTradeData} disabled={refreshing}>
-                <RefreshCcw className={cx("h-4 w-4", refreshing && "animate-spin")} />
+              <AppButton
+                variant="soft"
+                onClick={refreshTradeData}
+                disabled={refreshing}
+              >
+                <RefreshCcw
+                  className={cx("h-4 w-4", refreshing && "animate-spin")}
+                />
                 {refreshing ? "Refreshing..." : "Refresh"}
               </AppButton>
             </div>
           </div>
 
           {positionsTab === "orders" && limitOrdersErrors.length ? (
-            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+            <div className="shrink-0 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
               {limitOrdersErrors.join(" • ")}
             </div>
           ) : null}
 
-          {positionsTab === "chart" ? (
-            <ChartPage />
-          ) : (
-            <Card className="flex min-h-[calc(100vh-180px)] flex-col">
-              {positionsTab === "live" ? (
-                <TableFrame className="mt-4 min-h-[360px]">
-                  <table className="h-full w-full min-w-[700px] text-left">
-                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                      <tr>
-                        <th className="py-3 pl-4 pr-3 font-bold">Account</th>
-                        <th className="px-3 py-3 font-bold">Tag</th>
-                        <th className="px-3 py-3 font-bold">Ticket</th>
-                        <th className="px-3 py-3 font-bold">Lot</th>
-                        <th className="px-3 py-3 font-bold">Open</th>
-                        <th className="py-3 pl-3 pr-4 font-bold">P/L</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 bg-white">
-                      {(positions.length
-                        ? positions
-                        : [
-                            {
-                              ticket: "empty",
-                              account_name: "-",
-                              account_login: "-",
-                              tag: "-",
-                              side: "-",
-                              lot: "-",
-                              open_price: "-",
-                              profit: "No open positions.",
-                            },
-                          ]
-                      ).map((row) => (
-                        <tr
-                          key={`${row.account_login}-${row.ticket}`}
-                          className="hover:bg-slate-50/70"
-                        >
-                          <td className="py-3 pl-4 pr-3 text-sm font-medium text-slate-800">
-                            {row.account_name} ({row.account_login})
-                          </td>
-                          <td className="px-3 py-3 text-sm">
-                            <span
-                              className={cx(
-                                "rounded-full px-2 py-0.5 text-[10px] font-bold",
-                                row.tag === "Main"
-                                  ? "bg-blue-100 text-blue-700"
-                                  : "bg-emerald-100 text-emerald-700",
-                              )}
-                            >
-                              {row.tag}
-                            </span>
-                          </td>
-                          <td className="px-3 py-3 text-sm text-slate-700">
-                            {row.ticket}
-                          </td>
-                          <td className="px-3 py-3 text-sm text-slate-700">
-                            {row.lot}
-                          </td>
-                          <td className="px-3 py-3 text-sm text-slate-700">
-                            {row.open_price}
-                          </td>
-                          <td
-                            className={cx(
-                              "px-3 py-3 text-sm font-bold",
-                              Number(row.profit) >= 0
-                                ? "text-emerald-600"
-                                : "text-rose-600",
-                            )}
+          <div className="min-h-0 flex-1">
+            {positionsTab === "chart" ? (
+              <ChartPage />
+            ) : (
+              <Card className="flex h-full flex-col">
+                {positionsTab === "live" ? (
+                  <TableFrame className="mt-4 min-h-[360px]">
+                    <table className="h-full w-full min-w-[700px] text-left">
+                      <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                        <tr>
+                          <th className="py-3 pl-4 pr-3 font-bold">Account</th>
+                          <th className="px-3 py-3 font-bold">Tag</th>
+                          <th className="px-3 py-3 font-bold">Ticket</th>
+                          <th className="px-3 py-3 font-bold">Lot</th>
+                          <th className="px-3 py-3 font-bold">Open</th>
+                          <th className="py-3 pl-3 pr-4 font-bold">P/L</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white">
+                        {(positions.length
+                          ? positions
+                          : [
+                              {
+                                ticket: "empty",
+                                account_name: "-",
+                                account_login: "-",
+                                tag: "-",
+                                side: "-",
+                                lot: "-",
+                                open_price: "-",
+                                profit: "No open positions.",
+                              },
+                            ]
+                        ).map((row) => (
+                          <tr
+                            key={`${row.account_login}-${row.ticket}`}
+                            className="hover:bg-slate-50/70"
                           >
-                            {row.profit}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </TableFrame>
-              ) : positionsTab === "orders" ? (
-                <TableFrame className="mt-4 min-h-[360px]">
-                  <table className="h-full w-full min-w-[760px] text-left">
-                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
-                      <tr>
-                        <th className="py-3 pl-4 pr-3 font-bold">Account</th>
-                        <th className="px-3 py-3 font-bold">Ticket</th>
-                        <th className="px-3 py-3 font-bold">Side</th>
-                        <th className="px-3 py-3 font-bold">Price</th>
-                        <th className="px-3 py-3 font-bold">Lot</th>
-                        <th className="px-3 py-3 font-bold">Time</th>
-                        <th className="py-3 pl-3 pr-4 font-bold">Comment</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 bg-white">
-                      {(displayedLimitOrders.length
-                        ? displayedLimitOrders
-                        : [
-                            {
-                              ticket: "empty",
-                              account_name: "-",
-                              account_login: "-",
-                              side: "-",
-                              price: "-",
-                              lot: "-",
-                              opened_at: "-",
-                              comment: "No pending limit orders.",
-                            },
-                          ]
-                      ).map((row) => (
-                        <tr
-                          key={`${row.account_login}-${row.ticket}`}
-                          className="hover:bg-slate-50/70"
-                        >
-                          <td className="py-3 pl-4 pr-3 text-sm font-medium text-slate-800">
-                            {row.account_name} ({row.account_login})
-                          </td>
-                          <td className="px-3 py-3 text-sm text-slate-700">
-                            {row.ticket}
-                          </td>
-                          <td className="px-3 py-3 text-sm">
-                            <span
+                            <td className="py-3 pl-4 pr-3 text-sm font-medium text-slate-800">
+                              {row.account_name} ({row.account_login})
+                            </td>
+                            <td className="px-3 py-3 text-sm">
+                              <span
+                                className={cx(
+                                  "rounded-full px-2 py-0.5 text-[10px] font-bold",
+                                  row.tag === "Main"
+                                    ? "bg-blue-100 text-blue-700"
+                                    : "bg-emerald-100 text-emerald-700",
+                                )}
+                              >
+                                {row.tag}
+                              </span>
+                            </td>
+                            <td className="px-3 py-3 text-sm text-slate-700">
+                              {row.ticket}
+                            </td>
+                            <td className="px-3 py-3 text-sm text-slate-700">
+                              {row.lot}
+                            </td>
+                            <td className="px-3 py-3 text-sm text-slate-700">
+                              {row.open_price}
+                            </td>
+                            <td
                               className={cx(
-                                "rounded-full px-2 py-0.5 text-[10px] font-bold",
-                                row.side === "BUY"
-                                  ? "bg-emerald-100 text-emerald-700"
-                                  : "bg-rose-100 text-rose-700",
+                                "px-3 py-3 text-sm font-bold",
+                                Number(row.profit) >= 0
+                                  ? "text-emerald-600"
+                                  : "text-rose-600",
                               )}
                             >
-                              {row.side}
-                            </span>
-                          </td>
-                          <td className="px-3 py-3 text-sm text-slate-700">
-                            {row.price ?? row.open_price ?? "-"}
-                          </td>
-                          <td className="px-3 py-3 text-sm text-slate-700">
-                            {row.lot}
-                          </td>
-                          <td className="px-3 py-3 text-sm text-slate-700">
-                            {fmtDateTime(row.opened_at)}
-                          </td>
-                          <td className="py-3 pl-3 pr-4 text-sm text-slate-700">
-                            {row.comment || "-"}
-                          </td>
+                              {row.profit}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </TableFrame>
+                ) : positionsTab === "orders" ? (
+                  <TableFrame className="mt-4 min-h-[360px]">
+                    <table className="h-full w-full min-w-[760px] text-left">
+                      <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                        <tr>
+                          <th className="py-3 pl-4 pr-3 font-bold">Account</th>
+                          <th className="px-3 py-3 font-bold">Ticket</th>
+                          <th className="px-3 py-3 font-bold">Side</th>
+                          <th className="px-3 py-3 font-bold">Price</th>
+                          <th className="px-3 py-3 font-bold">Lot</th>
+                          <th className="px-3 py-3 font-bold">Time</th>
+                          <th className="py-3 pl-3 pr-4 font-bold">Comment</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </TableFrame>
-              ) : (
-                <LogList
-                  className="mt-4 min-h-[360px]"
-                  logs={tradeFeedLogs}
-                  emptyMessage="[INFO] No trade activity logs yet."
-                />
-              )}
-            </Card>
-          )}
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white">
+                        {(displayedLimitOrders.length
+                          ? displayedLimitOrders
+                          : [
+                              {
+                                ticket: "empty",
+                                account_name: "-",
+                                account_login: "-",
+                                side: "-",
+                                price: "-",
+                                lot: "-",
+                                opened_at: "-",
+                                comment: "No pending limit orders.",
+                              },
+                            ]
+                        ).map((row) => (
+                          <tr
+                            key={`${row.account_login}-${row.ticket}`}
+                            className="hover:bg-slate-50/70"
+                          >
+                            <td className="py-3 pl-4 pr-3 text-sm font-medium text-slate-800">
+                              {row.account_name} ({row.account_login})
+                            </td>
+                            <td className="px-3 py-3 text-sm text-slate-700">
+                              {row.ticket}
+                            </td>
+                            <td className="px-3 py-3 text-sm">
+                              <span
+                                className={cx(
+                                  "rounded-full px-2 py-0.5 text-[10px] font-bold",
+                                  row.side === "BUY"
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : "bg-rose-100 text-rose-700",
+                                )}
+                              >
+                                {row.side}
+                              </span>
+                            </td>
+                            <td className="px-3 py-3 text-sm text-slate-700">
+                              {row.price ?? row.open_price ?? "-"}
+                            </td>
+                            <td className="px-3 py-3 text-sm text-slate-700">
+                              {row.lot}
+                            </td>
+                            <td className="px-3 py-3 text-sm text-slate-700">
+                              {fmtDateTime(row.opened_at)}
+                            </td>
+                            <td className="py-3 pl-3 pr-4 text-sm text-slate-700">
+                              {row.comment || "-"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </TableFrame>
+                ) : (
+                  <LogList
+                    className="mt-4 min-h-[360px]"
+                    logs={tradeFeedLogs}
+                    emptyMessage="[INFO] No trade activity logs yet."
+                  />
+                )}
+              </Card>
+            )}
+          </div>
         </div>
-        <div className="space-y-6">
-          <Card>
-            <h3 className="text-lg font-black text-slate-950">Manual Trade</h3>
-            <p className="mt-1 text-sm text-slate-500">
-              Open a master position and auto-clone to enabled sub accounts.
-            </p>
-            <div className="mt-4 space-y-3">
-            <div className="grid gap-3 md:grid-cols-2">
-              <SelectBox
-                label="Order Type"
-                value={orderKind}
-                options={["MARKET", "LIMIT"]}
-                onChange={(e) => setOrderKind(e.target.value)}
-              />
-              <Field
-                label={orderKind === "LIMIT" ? "Limit Entry Price" : "Entry Mode"}
-                value={orderKind === "LIMIT" ? limitPrice : "Market execution"}
-                type={orderKind === "LIMIT" ? "number" : "text"}
-                min="0"
-                step="0.01"
-                inputMode="decimal"
-                onChange={
-                  orderKind === "LIMIT"
-                    ? (e) => setLimitPrice(decimalInput(e.target.value))
-                    : undefined
-                }
-                disabled={orderKind !== "LIMIT"}
-              />
-            </div>
-            <div className="grid gap-3 md:grid-cols-2">
-              <SideButton
-                value="BUY"
-                label="BUY"
-                activeClassName="border-emerald-600 bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
-                idleClassName="border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-              />
-              <SideButton
-                value="SELL"
-                label="SELL"
-                activeClassName="border-rose-600 bg-rose-600 text-white shadow-lg shadow-rose-600/20"
-                idleClassName="border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
-              />
-            </div>
-            <div className="grid gap-3 md:grid-cols-3">
-              <Field
-                label="Take Profit (Pips)"
-                value={tp}
-                onChange={(e) => setTp(e.target.value)}
-                disabled={multiTp}
-              />
-              <Field
-                label="Stop Loss (Pips)"
-                value={sl}
-                onChange={(e) => setSl(e.target.value)}
-                disabled={multiTp}
-              />
-              <Field
-                label="Spread (Pips)"
-                value={spreadPips}
-                onChange={(e) => setSpreadPips(decimalInput(e.target.value))}
-              />
-            </div>
-            <div className="space-y-3 rounded-[8px] border border-slate-200 bg-slate-50 p-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h4 className="font-black text-slate-950">Auto Close All Positions</h4>
-                  <p className="text-xs font-medium text-slate-500">
-                    Close all open positions automatically at the selected end time.
-                  </p>
-                </div>
-                <InlineSwitcher compact checked={autoCloseEnabled} onChange={setAutoCloseEnabled} />
-              </div>
-              <Field
-                label="End Time"
-                value={autoCloseAt}
-                type="datetime-local"
-                onChange={(e) => setAutoCloseAt(e.target.value)}
-                disabled={!autoCloseEnabled}
-              />
-              {scheduledAutoCloseAt ? (
-                <p className="text-xs font-semibold text-slate-600">
-                  Scheduled auto close: {fmtDateTime(scheduledAutoCloseAt)}
-                </p>
-              ) : null}
-            </div>
-            <div className={cx("space-y-3 border-t border-slate-200 pt-4")}>
-              <div className="flex items-center justify-between gap-3">
-                <h4 className="font-black text-slate-950">
-                  Advanced Risk / Multi-TP
-                </h4>
-                <InlineSwitcher
-                  compact
-                  checked={multiTp}
-                  onChange={setMultiTp}
-                />
-              </div>
+        <div className="flex h-[calc(100vh-180px)] flex-col">
+          <Card className="flex h-full flex-col">
+            <h3 className="shrink-0 text-lg font-black text-slate-950">
+              Manual Trade
+            </h3>
+            <div className="mt-4 flex-1 space-y-3 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
               <div className="grid gap-3 md:grid-cols-2">
+                <SelectBox
+                  label="Order Type"
+                  value={orderKind}
+                  options={["MARKET", "LIMIT"]}
+                  onChange={(e) => setOrderKind(e.target.value)}
+                />
                 <Field
-                  label="Stop Loss Price"
-                  value={slPrice}
-                  type="number"
+                  label={
+                    orderKind === "LIMIT" ? "Limit Entry Price" : "Entry Mode"
+                  }
+                  value={
+                    orderKind === "LIMIT" ? limitPrice : "Market execution"
+                  }
+                  type={orderKind === "LIMIT" ? "number" : "text"}
                   min="0"
                   step="0.01"
                   inputMode="decimal"
-                  onChange={(e) => setSlPrice(decimalInput(e.target.value))}
-                  disabled={!multiTp}
-                />
-                <Field
-                  label="Total Ratio"
-                  value={String(totalRatio || 0)}
-                  type="number"
-                  step="0.1"
-                  disabled
+                  onChange={
+                    orderKind === "LIMIT"
+                      ? (e) => setLimitPrice(decimalInput(e.target.value))
+                      : undefined
+                  }
+                  disabled={orderKind !== "LIMIT"}
                 />
               </div>
-              <p className="text-xs font-medium text-slate-500">
-                Spread pips are added to the final stop loss distance for both pip-based and price-based SL.
-              </p>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3 items-end">
-                <Field
-                  label="TP1 Ratio"
-                  value={tp1Ratio}
-                  type="number"
-                  min="0.1"
-                  step="0.1"
-                  onChange={(e) => setTp1Ratio(decimalInput(e.target.value))}
-                  disabled={!multiTp}
+              <div className="grid gap-3 md:grid-cols-2">
+                <SideButton
+                  value="BUY"
+                  label="BUY"
+                  activeClassName="border-emerald-600 bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
+                  idleClassName="border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                 />
-                <InlineSwitcher
-                  label="Enable TP2"
-                  checked={tp2Enabled}
-                  onChange={setTp2Enabled}
-                  disabled={!multiTp}
-                />
-                <Field
-                  label="TP1 %"
-                  value={tp1Percent}
-                  type="number"
-                  min="1"
-                  max="100"
-                  onChange={(e) => setTp1Percent(e.target.value)}
-                  disabled={!multiTp || !tp2Enabled}
+                <SideButton
+                  value="SELL"
+                  label="SELL"
+                  activeClassName="border-rose-600 bg-rose-600 text-white shadow-lg shadow-rose-600/20"
+                  idleClassName="border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
                 />
               </div>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3 items-end">
+              <div className="grid gap-3 md:grid-cols-3">
                 <Field
-                  label="TP2 Ratio"
-                  value={tp2Ratio}
-                  type="number"
-                  min="0.1"
-                  step="0.1"
-                  onChange={(e) => setTp2Ratio(decimalInput(e.target.value))}
-                  disabled={!multiTp || !tp2Enabled}
-                />
-                <InlineSwitcher
-                  label="Enable TP3"
-                  checked={tp3Enabled}
-                  onChange={setTp3Enabled}
-                  disabled={!multiTp || !tp2Enabled}
+                  label="TP (Pips)"
+                  value={tp}
+                  onChange={(e) => setTp(e.target.value)}
+                  disabled={multiTp}
                 />
                 <Field
-                  label="TP2 %"
-                  value={tp2Percent}
-                  type="number"
-                  min="1"
-                  max="100"
-                  onChange={(e) => setTp2Percent(e.target.value)}
-                  disabled={!multiTp || !tp3Enabled}
+                  label="SL (Pips)"
+                  value={sl}
+                  onChange={(e) => setSl(e.target.value)}
+                  disabled={multiTp}
                 />
                 <Field
-                  label="TP3 Ratio"
-                  value={tp3Ratio}
-                  type="number"
-                  min="0.1"
-                  step="0.1"
-                  onChange={(e) => setTp3Ratio(decimalInput(e.target.value))}
-                  disabled={!multiTp || !tp3Enabled}
+                  label="Spread"
+                  value={spreadPips}
+                  onChange={(e) => setSpreadPips(decimalInput(e.target.value))}
                 />
               </div>
-            </div>
+              <div className="space-y-3 rounded-[8px] border border-slate-200 bg-slate-50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <h4 className="font-black text-slate-950">
+                    Auto Close All Positions
+                  </h4>
+                  <InlineSwitcher
+                    compact
+                    checked={autoCloseEnabled}
+                    onChange={setAutoCloseEnabled}
+                  />
+                </div>
+                {autoCloseEnabled ? (
+                  <>
+                    <Field
+                      label="End Time"
+                      value={autoCloseAt}
+                      type="datetime-local"
+                      onChange={(e) => setAutoCloseAt(e.target.value)}
+                    />
+                    {scheduledAutoCloseAt ? (
+                      <p className="text-xs font-semibold text-slate-600">
+                        Scheduled auto close:{" "}
+                        {fmtDateTime(scheduledAutoCloseAt)}
+                      </p>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
+              <div className="space-y-3 rounded-[8px] border border-slate-200 bg-slate-50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <h4 className="font-black text-slate-950">
+                    Advanced Risk / Multi-TP
+                  </h4>
+                  <InlineSwitcher
+                    compact
+                    checked={multiTp}
+                    onChange={setMultiTp}
+                  />
+                </div>
+                {multiTp ? (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <Field
+                        label="Stop Loss Price"
+                        value={slPrice}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        inputMode="decimal"
+                        onChange={(e) =>
+                          setSlPrice(decimalInput(e.target.value))
+                        }
+                      />
+                      <div>
+                        <span className="block text-xs font-black uppercase tracking-wide text-slate-500">
+                          Total Ratio
+                        </span>
+                        <div className="mt-1.5 flex h-[46px] items-center rounded-xl border border-slate-200 bg-slate-100 px-4 text-sm font-black text-slate-700">
+                          {totalRatio.toFixed(1)}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field
+                        label="TP1 Ratio"
+                        value={tp1Ratio}
+                        type="number"
+                        min="0.1"
+                        step="0.1"
+                        onChange={(e) =>
+                          setTp1Ratio(decimalInput(e.target.value))
+                        }
+                      />
+                      <Field
+                        label="TP1 %"
+                        value={tp1Percent}
+                        type="number"
+                        min="1"
+                        max="100"
+                        onChange={(e) => setTp1Percent(e.target.value)}
+                        disabled={!tp2Enabled}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field
+                        label="TP2 Ratio"
+                        labelExtra={
+                          <MiniToggle
+                            checked={tp2Enabled}
+                            onChange={setTp2Enabled}
+                          />
+                        }
+                        value={tp2Ratio}
+                        type="number"
+                        min="0.1"
+                        step="0.1"
+                        onChange={(e) =>
+                          setTp2Ratio(decimalInput(e.target.value))
+                        }
+                        disabled={!tp2Enabled}
+                      />
+                      <Field
+                        label="TP2 %"
+                        value={tp2Percent}
+                        type="number"
+                        min="1"
+                        max="100"
+                        onChange={(e) => setTp2Percent(e.target.value)}
+                        disabled={!tp2Enabled || !tp3Enabled}
+                      />
+                    </div>
+                    <Field
+                      label="TP3 Ratio"
+                      labelExtra={
+                        <MiniToggle
+                          checked={tp3Enabled}
+                          onChange={setTp3Enabled}
+                          disabled={!tp2Enabled}
+                        />
+                      }
+                      value={tp3Ratio}
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      onChange={(e) =>
+                        setTp3Ratio(decimalInput(e.target.value))
+                      }
+                      disabled={!tp3Enabled}
+                    />
+                  </>
+                ) : null}
+              </div>
             </div>
           </Card>
         </div>
@@ -867,9 +1006,6 @@ export function RiskManagementPage({ runtime, onRefreshRuntime }) {
   return (
     <Card>
       <h3 className="text-lg font-black text-slate-950">Risk Management</h3>
-      <p className="mt-1 text-sm text-slate-500">
-        Monitor equity and enforce risk/profit boundaries.
-      </p>
       {errorText ? (
         <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
           {errorText}
@@ -933,9 +1069,6 @@ export function ProfilePage({
     <div className="grid gap-5">
       <Card>
         <h3 className="text-xl font-black text-slate-950">Account Profiles</h3>
-        <p className="mt-1 text-sm font-medium text-slate-500">
-          Detailed balance and performance overview for every trading account.
-        </p>
       </Card>
       <div className="grid gap-5 xl:grid-cols-2">
         {accountsData.length ? (
@@ -1074,9 +1207,6 @@ export function NotificationsPage({ notifications = [] }) {
           <h3 className="flex items-center gap-2 text-xl font-black text-slate-950">
             <Bell className="h-5 w-5 text-blue-600" /> Notifications
           </h3>
-          <p className="mt-1 text-sm font-medium text-slate-500">
-            System updates are preserved here for auditing and awareness.
-          </p>
         </div>
         <div className="flex gap-2">
           {["all", "system", "other"].map((value) => (
@@ -1167,7 +1297,12 @@ export function SettingsPlaceholder({
   accountsData = [],
   onEdit,
   onDelete,
-  notificationSettings = { enabled: true, show_warnings: true, show_success: true, show_info: false },
+  notificationSettings = {
+    enabled: true,
+    show_warnings: true,
+    show_success: true,
+    show_info: false,
+  },
   onNotificationSettingsChange,
   themeMode = "LIGHT",
   onThemeModeChange,
@@ -1175,23 +1310,54 @@ export function SettingsPlaceholder({
   onUiZoomPercentChange,
 }) {
   const settingsTabs = ["accounts", "search", "notifications", "appearance"];
-  const normalizeSettingsTab = (tab) => settingsTabs.includes(tab) ? tab : "accounts";
-  const [settingsTab, setSettingsTab] = useState(normalizeSettingsTab(initialTab));
-  const [searchSettings, setSearchSettings] = useState({ timeframe: "M1", pips: 25, max_pips: 70, max_positions: 3, orders_limit: 10, tp: 150, sl: 500, enable_buy: true, enable_sell: true, enable_liquidity: true, enable_pullback: false, pullback_pips: 20, stop_on_first_close: true });
+  const normalizeSettingsTab = (tab) =>
+    settingsTabs.includes(tab) ? tab : "accounts";
+  const [settingsTab, setSettingsTab] = useState(
+    normalizeSettingsTab(initialTab),
+  );
+  const [searchSettings, setSearchSettings] = useState({
+    timeframe: "M1",
+    pips: 25,
+    max_pips: 70,
+    max_positions: 3,
+    orders_limit: 10,
+    tp: 150,
+    sl: 500,
+    enable_buy: true,
+    enable_sell: true,
+    enable_liquidity: true,
+    enable_pullback: false,
+    pullback_pips: 20,
+    stop_on_first_close: true,
+  });
   const [settingsMessage, setSettingsMessage] = useState("");
-  useEffect(() => setSettingsTab(normalizeSettingsTab(initialTab)), [initialTab]);
+  useEffect(
+    () => setSettingsTab(normalizeSettingsTab(initialTab)),
+    [initialTab],
+  );
   useEffect(() => {
-    api.settings().then((settings) => {
-      if (settings?.search_config) setSearchSettings((current) => ({ ...current, ...settings.search_config }));
-    }).catch(() => {});
+    api
+      .settings()
+      .then((settings) => {
+        if (settings?.search_config)
+          setSearchSettings((current) => ({
+            ...current,
+            ...settings.search_config,
+          }));
+      })
+      .catch(() => {});
   }, []);
 
   async function saveSearchSettings() {
     try {
       await api.saveSearchConfig(searchSettings);
-      setSettingsMessage("Search defaults saved. New searches will use these values.");
+      setSettingsMessage(
+        "Search defaults saved. New searches will use these values.",
+      );
     } catch (error) {
-      setSettingsMessage(error instanceof Error ? error.message : String(error));
+      setSettingsMessage(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
@@ -1201,7 +1367,9 @@ export function SettingsPlaceholder({
       onNotificationSettingsChange?.(nextSettings);
       setSettingsMessage("Notification preferences saved.");
     } catch (error) {
-      setSettingsMessage(error instanceof Error ? error.message : String(error));
+      setSettingsMessage(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
@@ -1209,9 +1377,13 @@ export function SettingsPlaceholder({
     try {
       await api.saveTheme(nextThemeMode);
       onThemeModeChange?.(nextThemeMode);
-      setSettingsMessage(`${nextThemeMode === "DARK" ? "Dark" : "Light"} appearance saved.`);
+      setSettingsMessage(
+        `${nextThemeMode === "DARK" ? "Dark" : "Light"} appearance saved.`,
+      );
     } catch (error) {
-      setSettingsMessage(error instanceof Error ? error.message : String(error));
+      setSettingsMessage(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
   async function saveUiZoom(nextZoom) {
@@ -1221,7 +1393,9 @@ export function SettingsPlaceholder({
       await api.saveZoom(zoom);
       setSettingsMessage(`App zoom saved at ${zoom}%.`);
     } catch (error) {
-      setSettingsMessage(error instanceof Error ? error.message : String(error));
+      setSettingsMessage(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
   const tabNavigation = (
@@ -1249,46 +1423,229 @@ export function SettingsPlaceholder({
       <div className="space-y-6">
         {tabNavigation}
         <Card>
-          {settingsTab === "search" ? <>
-            <h3 className="text-lg font-black text-slate-950">Search Defaults</h3>
-            <p className="mt-1 text-sm text-slate-500">These values are used when you start or save a Search configuration.</p>
-            <div className="mt-6 grid gap-4 md:grid-cols-3">
-              <label className="text-sm font-bold text-slate-700">Timeframe<select value={searchSettings.timeframe} onChange={(event) => setSearchSettings({ ...searchSettings, timeframe: event.target.value })} className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-semibold"><option>M1</option><option>M3</option><option>M5</option><option>M15</option></select></label>
-              {[['pips', 'Minimum Pips'], ['max_pips', 'Maximum Pips'], ['max_positions', 'Maximum Positions'], ['orders_limit', 'Search Order Limit'], ['tp', 'Take Profit'], ['sl', 'Stop Loss'], ['pullback_pips', 'Pullback Pips']].map(([key, label]) => <label key={key} className="text-sm font-bold text-slate-700">{label}<input type="number" min="0" value={searchSettings[key] ?? ""} onChange={(event) => setSearchSettings({ ...searchSettings, [key]: Number(event.target.value) })} className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-semibold" /></label>)}
-            </div>
-            <div className="mt-5 flex flex-wrap gap-5 text-sm font-bold text-slate-700">
-              {[['enable_buy', 'Enable BUY'], ['enable_sell', 'Enable SELL'], ['enable_liquidity', 'Liquidity trigger'], ['enable_pullback', 'Enable pullback'], ['stop_on_first_close', 'Stop after first close']].map(([key, label]) => <label key={key} className="flex items-center gap-2"><input type="checkbox" checked={Boolean(searchSettings[key])} onChange={(event) => setSearchSettings({ ...searchSettings, [key]: event.target.checked })} />{label}</label>)}
-            </div>
-            <AppButton variant="blue" className="mt-6" onClick={saveSearchSettings}>Save Search Defaults</AppButton>
-          </> : null}
-
-          {settingsTab === "notifications" ? <>
-            <h3 className="text-lg font-black text-slate-950">Notification Preferences</h3>
-            <p className="mt-1 text-sm text-slate-500">Choose which backend events appear in the notification bell and notification page.</p>
-            <div className="mt-6 space-y-4">
-              {[['enabled', 'Enable notifications', 'Show notifications from account, search, remote, and risk events.'], ['show_warnings', 'Show warnings', 'Include account disconnects, blocked commands, and warning events.'], ['show_success', 'Show successful actions', 'Include successful orders, connections, and completed commands.'], ['show_info', 'Show informational updates', 'Include routine system information messages.']].map(([key, label, help]) => <label key={key} className="flex items-start justify-between gap-4 rounded-2xl border border-slate-200 p-4"><span><span className="block text-sm font-black text-slate-900">{label}</span><span className="mt-1 block text-xs leading-5 text-slate-500">{help}</span></span><input type="checkbox" checked={Boolean(notificationSettings[key])} onChange={(event) => saveNotificationSettings({ ...notificationSettings, [key]: event.target.checked })} className="mt-1 h-4 w-4" /></label>)}
-            </div>
-          </> : null}
-
-          {settingsTab === "appearance" ? <>
-            <h3 className="text-lg font-black text-slate-950">Appearance</h3>
-            <p className="mt-1 text-sm text-slate-500">The selected appearance is applied immediately and saved for the next launch.</p>
-            <div className="mt-6 grid max-w-xl gap-3 sm:grid-cols-2">
-              {[['LIGHT', 'Light', 'Clean, high-contrast workspace for daytime trading.'], ['DARK', 'Dark', 'Reduced glare for low-light trading sessions.']].map(([mode, label, help]) => <button key={mode} type="button" onClick={() => saveThemeMode(mode)} className={cx("rounded-2xl border p-4 text-left transition", themeMode === mode ? "border-blue-500 bg-blue-50" : "border-slate-200 bg-white hover:border-slate-300")}><span className="block text-sm font-black text-slate-950">{label}</span><span className="mt-1 block text-xs leading-5 text-slate-500">{help}</span></button>)}
-            </div>
-            <div className="mt-7 max-w-xl rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <span className="block text-sm font-black text-slate-950">App zoom</span>
-                  <span className="mt-1 block text-xs leading-5 text-slate-500">Scale the entire interface like browser zoom.</span>
-                </div>
-                <output className="min-w-14 rounded-lg bg-white px-3 py-1.5 text-center text-sm font-black text-blue-600">{uiZoomPercent}%</output>
+          {settingsTab === "search" ? (
+            <>
+              <h3 className="text-lg font-black text-slate-950">
+                Search Defaults
+              </h3>
+              <div className="mt-6 grid gap-4 md:grid-cols-3">
+                <label className="text-sm font-bold text-slate-700">
+                  Timeframe
+                  <select
+                    value={searchSettings.timeframe}
+                    onChange={(event) =>
+                      setSearchSettings({
+                        ...searchSettings,
+                        timeframe: event.target.value,
+                      })
+                    }
+                    className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-semibold"
+                  >
+                    <option>M1</option>
+                    <option>M3</option>
+                    <option>M5</option>
+                    <option>M15</option>
+                  </select>
+                </label>
+                {[
+                  ["pips", "Minimum Pips"],
+                  ["max_pips", "Maximum Pips"],
+                  ["max_positions", "Maximum Positions"],
+                  ["orders_limit", "Search Order Limit"],
+                  ["tp", "Take Profit"],
+                  ["sl", "Stop Loss"],
+                  ["pullback_pips", "Pullback Pips"],
+                ].map(([key, label]) => (
+                  <label key={key} className="text-sm font-bold text-slate-700">
+                    {label}
+                    <input
+                      type="number"
+                      min="0"
+                      value={searchSettings[key] ?? ""}
+                      onChange={(event) =>
+                        setSearchSettings({
+                          ...searchSettings,
+                          [key]: Number(event.target.value),
+                        })
+                      }
+                      className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-semibold"
+                    />
+                  </label>
+                ))}
               </div>
-              <input aria-label="App zoom" className="mt-4 w-full accent-blue-600" type="range" min="70" max="150" step="5" value={uiZoomPercent} onChange={(event) => onUiZoomPercentChange?.(Number(event.target.value))} onPointerUp={(event) => saveUiZoom(event.currentTarget.value)} onKeyUp={(event) => saveUiZoom(event.currentTarget.value)} />
-              <div className="mt-2 flex justify-between text-[11px] font-bold text-slate-500"><span>70%</span><button type="button" className="text-blue-600 hover:text-blue-700" onClick={() => saveUiZoom(100)}>Reset to 100%</button><span>150%</span></div>
-            </div>
-          </> : null}
-          {settingsMessage ? <p className="mt-5 text-sm font-semibold text-emerald-700">{settingsMessage}</p> : null}
+              <div className="mt-5 flex flex-wrap gap-5 text-sm font-bold text-slate-700">
+                {[
+                  ["enable_buy", "Enable BUY"],
+                  ["enable_sell", "Enable SELL"],
+                  ["enable_liquidity", "Liquidity trigger"],
+                  ["enable_pullback", "Enable pullback"],
+                  ["stop_on_first_close", "Stop after first close"],
+                ].map(([key, label]) => (
+                  <label key={key} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(searchSettings[key])}
+                      onChange={(event) =>
+                        setSearchSettings({
+                          ...searchSettings,
+                          [key]: event.target.checked,
+                        })
+                      }
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              <AppButton
+                variant="blue"
+                className="mt-6"
+                onClick={saveSearchSettings}
+              >
+                Save Search Defaults
+              </AppButton>
+            </>
+          ) : null}
+
+          {settingsTab === "notifications" ? (
+            <>
+              <h3 className="text-lg font-black text-slate-950">
+                Notification Preferences
+              </h3>
+              <div className="mt-6 space-y-4">
+                {[
+                  [
+                    "enabled",
+                    "Enable notifications",
+                    "Show notifications from account, search, remote, and risk events.",
+                  ],
+                  [
+                    "show_warnings",
+                    "Show warnings",
+                    "Include account disconnects, blocked commands, and warning events.",
+                  ],
+                  [
+                    "show_success",
+                    "Show successful actions",
+                    "Include successful orders, connections, and completed commands.",
+                  ],
+                  [
+                    "show_info",
+                    "Show informational updates",
+                    "Include routine system information messages.",
+                  ],
+                ].map(([key, label, help]) => (
+                  <label
+                    key={key}
+                    className="flex items-start justify-between gap-4 rounded-2xl border border-slate-200 p-4"
+                  >
+                    <span>
+                      <span className="block text-sm font-black text-slate-900">
+                        {label}
+                      </span>
+                      <span className="mt-1 block text-xs leading-5 text-slate-500">
+                        {help}
+                      </span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(notificationSettings[key])}
+                      onChange={(event) =>
+                        saveNotificationSettings({
+                          ...notificationSettings,
+                          [key]: event.target.checked,
+                        })
+                      }
+                      className="mt-1 h-4 w-4"
+                    />
+                  </label>
+                ))}
+              </div>
+            </>
+          ) : null}
+
+          {settingsTab === "appearance" ? (
+            <>
+              <h3 className="text-lg font-black text-slate-950">Appearance</h3>
+              <div className="mt-6 grid max-w-xl gap-3 sm:grid-cols-2">
+                {[
+                  [
+                    "LIGHT",
+                    "Light",
+                    "Clean, high-contrast workspace for daytime trading.",
+                  ],
+                  [
+                    "DARK",
+                    "Dark",
+                    "Reduced glare for low-light trading sessions.",
+                  ],
+                ].map(([mode, label, help]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => saveThemeMode(mode)}
+                    className={cx(
+                      "rounded-2xl border p-4 text-left transition",
+                      themeMode === mode
+                        ? "border-blue-500 bg-blue-50"
+                        : "border-slate-200 bg-white hover:border-slate-300",
+                    )}
+                  >
+                    <span className="block text-sm font-black text-slate-950">
+                      {label}
+                    </span>
+                    <span className="mt-1 block text-xs leading-5 text-slate-500">
+                      {help}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              <div className="mt-7 max-w-xl rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <span className="block text-sm font-black text-slate-950">
+                      App zoom
+                    </span>
+                    <span className="mt-1 block text-xs leading-5 text-slate-500">
+                      Scale the entire interface like browser zoom.
+                    </span>
+                  </div>
+                  <output className="min-w-14 rounded-lg bg-white px-3 py-1.5 text-center text-sm font-black text-blue-600">
+                    {uiZoomPercent}%
+                  </output>
+                </div>
+                <input
+                  aria-label="App zoom"
+                  className="mt-4 w-full accent-blue-600"
+                  type="range"
+                  min="70"
+                  max="150"
+                  step="5"
+                  value={uiZoomPercent}
+                  onChange={(event) =>
+                    onUiZoomPercentChange?.(Number(event.target.value))
+                  }
+                  onPointerUp={(event) => saveUiZoom(event.currentTarget.value)}
+                  onKeyUp={(event) => saveUiZoom(event.currentTarget.value)}
+                />
+                <div className="mt-2 flex justify-between text-[11px] font-bold text-slate-500">
+                  <span>70%</span>
+                  <button
+                    type="button"
+                    className="text-blue-600 hover:text-blue-700"
+                    onClick={() => saveUiZoom(100)}
+                  >
+                    Reset to 100%
+                  </button>
+                  <span>150%</span>
+                </div>
+              </div>
+            </>
+          ) : null}
+          {settingsMessage ? (
+            <p className="mt-5 text-sm font-semibold text-emerald-700">
+              {settingsMessage}
+            </p>
+          ) : null}
         </Card>
       </div>
     );

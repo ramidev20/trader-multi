@@ -1,6 +1,5 @@
 import React from "react";
 import {
-  Activity,
   Copy,
   Home,
   Search,
@@ -9,6 +8,7 @@ import {
   ShieldCheck,
   Terminal,
 } from "lucide-react";
+import { cx } from "../../utils/format";
 
 type SidebarProps = {
   activePage: string;
@@ -17,84 +17,48 @@ type SidebarProps = {
   totalCount: number;
 };
 
-export default function Sidebar({
-  activePage,
-  onChangePage,
-  connectedCount,
-  totalCount,
-}: SidebarProps) {
+export default function Sidebar({ activePage, onChangePage }: SidebarProps) {
   const items = [
     { key: "dashboard", label: "Dashboard", icon: Home },
-    { key: "chart", label: "Chart", icon: Activity },
     { key: "search", label: "Search", icon: Search },
     { key: "trade", label: "Trade", icon: Terminal },
     { key: "history", label: "Trade History", icon: Copy },
-    { key: "risk", label: "Risk Management", icon: ShieldCheck },
+    { key: "risk", label: "Risk Manager", icon: ShieldCheck },
     { key: "remote", label: "Remote Control", icon: Radio },
     { key: "settings", label: "Settings", icon: Settings },
   ];
 
   return (
-    <aside
-      className="app-sidebar sticky top-0 z-20 hidden h-screen self-start flex-col border-r border-slate-200 bg-white p-4 lg:flex"
-      style={styles.drawer}
-    >
-      <nav style={styles.navigation}>
-        {items.map(({ key, label, icon: Icon }) => (
-          <button
-            key={key}
-            onClick={() => onChangePage(key)}
-            style={{
-              ...styles.navButton,
-              ...(activePage === key
-                ? styles.navButtonActive
-                : styles.navButtonIdle),
-            }}
-            className="app-nav-button flex w-full items-center gap-3 text-sm font-bold transition"
-          >
-            <Icon className="h-5 w-5" />
-            <span>{label}</span>
-          </button>
-        ))}
+    <aside className="app-sidebar sticky top-0 z-20 hidden h-screen w-[212px] shrink-0 flex-col self-start border-r border-slate-200 bg-white p-3 lg:flex">
+      <div className="flex items-center gap-2.5 px-2 pb-2">
+        <span className="grid h-9 w-9 place-items-center rounded-xl bg-blue-600 text-sm font-black text-white">
+          MT
+        </span>
+        <span className="text-sm font-black tracking-tight text-slate-950">
+          MT5 Trader
+        </span>
+      </div>
+      <nav className="mt-6 grid gap-1">
+        {items.map(({ key, label, icon: Icon }) => {
+          const active = activePage === key;
+          return (
+            <button
+              key={key}
+              onClick={() => onChangePage(key)}
+              className={cx(
+                "app-nav-button flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-bold transition",
+                active
+                  ? "bg-blue-50 text-blue-700"
+                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-900",
+              )}
+              aria-current={active ? "page" : undefined}
+            >
+              <Icon className="h-5 w-5 shrink-0" />
+              <span>{label}</span>
+            </button>
+          );
+        })}
       </nav>
     </aside>
   );
 }
-
-const styles = {
-  drawer: { background: "#ffffff" } satisfies React.CSSProperties,
-  mutedSmall: {
-    margin: 0,
-    color: "#64748b",
-    fontSize: 12,
-    fontWeight: 500,
-  } satisfies React.CSSProperties,
-  navigation: {
-    display: "grid",
-    gap: 8,
-    marginTop: 32,
-  } satisfies React.CSSProperties,
-  navButton: {
-    display: "flex",
-    width: "100%",
-    alignItems: "center",
-    gap: 12,
-    border: 0,
-    borderRadius: 16,
-    background: "transparent",
-    padding: "12px 16px",
-    fontSize: 14,
-    fontWeight: 700,
-    textAlign: "left",
-    cursor: "pointer",
-    transition: "background .2s, color .2s",
-  } satisfies React.CSSProperties,
-  navButtonActive: {
-    background: "#f1f5f9",
-    color: "#334155",
-  } satisfies React.CSSProperties,
-  navButtonIdle: {
-    background: "transparent",
-    color: "#64748b",
-  } satisfies React.CSSProperties,
-};

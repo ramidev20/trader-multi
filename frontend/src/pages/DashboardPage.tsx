@@ -101,11 +101,8 @@ function MetricCard({
 
 function AccountHierarchy({ accountsData }) {
   return (
-    <Card>
-      <h3 className="text-lg font-black text-slate-950">Account Hierarchy</h3>
-      <p className="mb-4 text-sm text-slate-500">
-        Master account controls copy execution.
-      </p>
+    <Card className="min-h-[420px]">
+      <h3 className="mb-4 text-lg font-black text-slate-950">Account Hierarchy</h3>
 
       <div className="space-y-4">
         {accountsData.map((account) => (
@@ -468,16 +465,12 @@ export default function DashboardPage({
           </section>
 
           <section className="mt-6 grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_348px]">
-            <Card className="flex min-h-[360px] flex-col">
+            <Card className="flex min-h-[420px] flex-col">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
                   <h3 className="text-lg font-black text-slate-950">
                     Saved Trading Accounts
                   </h3>
-                  <p className="text-sm text-slate-500">
-                    Click an account row to connect that exact MT5 terminal
-                    path.
-                  </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <AppButton variant="soft">

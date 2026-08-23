@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
-  AlertTriangle,
   CalendarDays,
   Clock3,
   Play,
@@ -650,10 +649,6 @@ export default function SearchPage({
               <h3 className="text-lg font-black text-slate-950">
                 Search Configuration
               </h3>
-              <p className="mt-1 text-sm text-slate-500">
-                Main settings from your current search page, redesigned as clean
-                cards.
-              </p>
             </div>
             <div className="rounded-2xl bg-blue-50 p-2 text-blue-700">
               <Zap className="h-5 w-5" />
@@ -835,9 +830,6 @@ export default function SearchPage({
                 <h3 className="text-lg font-black text-slate-950">
                   Liquidity Levels
                 </h3>
-                <p className="mt-1 text-sm text-slate-500">
-                  Add pending BUY/SELL trigger prices.
-                </p>
               </div>
               <ShieldCheck className="h-5 w-5 text-emerald-600" />
             </div>
@@ -876,7 +868,7 @@ export default function SearchPage({
             >
               <Plus className="h-4 w-4" /> Add Liquidity Level
             </AppButton>
-            <div className="mt-5 space-y-3">
+            <div className="mt-5 max-h-[320px] space-y-3 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
               {leqList.map((level) => (
                 <div
                   key={level.id}
@@ -910,24 +902,6 @@ export default function SearchPage({
                   </div>
                 </div>
               ))}
-            </div>
-          </Card>
-          <Card>
-            <div className="flex items-start gap-3">
-              <div className="rounded-2xl bg-amber-50 p-2 text-amber-700">
-                <AlertTriangle className="h-5 w-5" />
-              </div>
-              <div>
-                <div>
-                  <h3 className="font-black text-slate-950">
-                    Execution Safety
-                  </h3>
-                  <p className="mt-1 text-sm text-slate-500">
-                    Before sending orders, validate terminal connection, symbol
-                    visibility, spread, max positions, and account risk.
-                  </p>
-                </div>
-              </div>
             </div>
           </Card>
         </div>

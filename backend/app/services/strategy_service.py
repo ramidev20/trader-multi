@@ -809,7 +809,7 @@ def open_manual_position(
         )
 
     if advanced:
-        if sl_price is None:
+        if sl_price is None or float(sl_price) <= 0:
             raise RuntimeError("Multi-TP orders require a Stop Loss Price.")
         stop_loss = float(sl_price) - spread_price_offset if is_buy else float(sl_price) + spread_price_offset
         if (is_buy and stop_loss >= entry_price) or ((not is_buy) and stop_loss <= entry_price):

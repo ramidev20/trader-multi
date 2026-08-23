@@ -1374,7 +1374,12 @@ async def remote_command_socket(websocket: WebSocket) -> None:
                             "level": "success",
                             "message": f"Receiver delay completed after {receiver_delay} seconds. Submitting the order now.",
                         })
-                result = _execute_remote_command(action_name, data)
+                # Run off the event loop: MT5 adapter round-trips block synchronously
+                # for several seconds and would otherwise freeze this coroutine,
+                # starving every other coroutine on the loop -- including the
+                # heartbeat pings that keep this very websocket from looking idle
+                # to network intermediaries (Tailscale, routers, etc).
+                result = await asyncio.to_thread(_execute_remote_command, action_name, data)
                 response = {"type": "result", "id": command_id, "status": "success", "result": result}
                 append_log("adapter", f"[REMOTE] Executed {action_name} ({command_id}).")
                 state_patch("remote_control", {
@@ -1398,7 +1403,8 @@ async def remote_command_socket(websocket: WebSocket) -> None:
             await websocket.send_json(response)
     except WebSocketDisconnect:
         append_log("adapter", "[REMOTE] Controller disconnected.")
-        pass
+    except Exception as exc:
+        append_log("adapter", f"[REMOTE] Controller connection ended unexpectedly: {exc}")
     finally:
         remaining_connections = max(0, int(state_get("remote_control.connections", 1) or 1) - 1)
         state_patch("remote_control", {"connections": remaining_connections})

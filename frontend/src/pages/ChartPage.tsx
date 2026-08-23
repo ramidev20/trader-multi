@@ -343,15 +343,15 @@ export default function ChartPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="flex h-full flex-col gap-4">
       {errorText ? (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
+        <div className="shrink-0 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
           {errorText}
         </div>
       ) : null}
 
-      <Card className="min-h-[680px]">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      <Card className="flex min-h-0 flex-1 flex-col">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
               <h3 className="text-lg font-black text-slate-950">
@@ -368,10 +368,6 @@ export default function ChartPage() {
                 {snapshot.source === "live" ? "LIVE MT5" : "SIMULATED"}
               </span>
             </div>
-            <p className="text-sm text-slate-500">
-              Candles update every two seconds. Activated positions show entry,
-              TP, and SL levels.
-            </p>
           </div>
           <div className="flex items-center gap-2">
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">
@@ -407,18 +403,20 @@ export default function ChartPage() {
             </AppButton>
           </div>
         </div>
-        <div
-          ref={containerRef}
-          className="mt-4 h-[580px] w-full rounded-3xl border border-slate-200 bg-slate-50"
-        />
-        {!snapshot.candles.length && !loading ? (
-          <div className="mt-[-580px] flex h-[580px] items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-white/60 backdrop-blur-[1px]">
-            <p className="text-sm font-semibold text-slate-500">
-              No candle data loaded yet.
-            </p>
-          </div>
-        ) : null}
-        <p className="mt-3 text-xs font-semibold text-slate-500">
+        <div className="relative mt-4 min-h-0 flex-1">
+          <div
+            ref={containerRef}
+            className="absolute inset-0 rounded-3xl border border-slate-200 bg-slate-50"
+          />
+          {!snapshot.candles.length && !loading ? (
+            <div className="absolute inset-0 flex items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-white/60 backdrop-blur-[1px]">
+              <p className="text-sm font-semibold text-slate-500">
+                No candle data loaded yet.
+              </p>
+            </div>
+          ) : null}
+        </div>
+        <p className="mt-3 shrink-0 text-xs font-semibold text-slate-500">
           {snapshot.updated_at
             ? `Updated ${new Date(snapshot.updated_at).toLocaleString()}`
             : "Waiting for chart data..."}

@@ -100,7 +100,6 @@ export default function TradeHistoryPage({ runtime, historyRows = [] }) {
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h3 className="text-lg font-black text-slate-950">Trade History</h3>
-          <p className="mt-1 text-sm text-slate-500">Executed MT5 deals with quick filters and sortable order.</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button

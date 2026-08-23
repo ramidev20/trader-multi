@@ -17,31 +17,6 @@ html[data-theme="DARK"] .app-main {
   color: #e2e8f0 !important;
 }
 
-html[data-theme="DARK"] .app-sidebar,
-html[data-theme="DARK"] .app-topbar,
-html[data-theme="DARK"] .app-popover,
-html[data-theme="DARK"] .app-dialog {
-  background: #111827 !important;
-  border-color: #334155 !important;
-  color: #e2e8f0 !important;
-}
-
-html[data-theme="DARK"] .app-nav-button {
-  color: #94a3b8 !important;
-}
-
-html[data-theme="DARK"] .app-nav-button:hover,
-html[data-theme="DARK"] .app-nav-button[style*="background"] {
-  background: #1e293b !important;
-  color: #f8fafc !important;
-}
-
-html[data-theme="DARK"] .app-field-control {
-  background: #0f172a !important;
-  border-color: #334155 !important;
-  color: #e2e8f0 !important;
-}
-
 html[data-theme="DARK"] input:not([type="checkbox"]):not([type="radio"]),
 html[data-theme="DARK"] select,
 html[data-theme="DARK"] textarea {
@@ -50,29 +25,6 @@ html[data-theme="DARK"] textarea {
   color: #e2e8f0 !important;
 }
 
-html[data-theme="DARK"] .app-icon-button,
-html[data-theme="DARK"] .app-account-button,
-html[data-theme="DARK"] .app-dialog-close,
-html[data-theme="DARK"] .app-button--soft {
-  background: #172033 !important;
-  border-color: #334155 !important;
-  color: #e2e8f0 !important;
-}
-
-html[data-theme="DARK"] .app-account-menu {
-  background: #111827 !important;
-  border-color: #334155 !important;
-  color: #e2e8f0 !important;
-}
-
-html[data-theme="DARK"] .app-menu-button {
-  color: #cbd5e1 !important;
-}
-
-html[data-theme="DARK"] .app-menu-button:hover,
-html[data-theme="DARK"] .app-icon-button:hover,
-html[data-theme="DARK"] .app-account-button:hover,
-html[data-theme="DARK"] .app-button--soft:hover,
 html[data-theme="DARK"] .hover\:bg-white:hover,
 html[data-theme="DARK"] .hover\:bg-slate-50:hover,
 html[data-theme="DARK"] .hover\:bg-slate-100:hover {
@@ -80,14 +32,109 @@ html[data-theme="DARK"] .hover\:bg-slate-100:hover {
   color: #f8fafc !important;
 }
 
+/* Tinted accent surfaces (badges, callouts, soft buttons) keep their hue but
+   move to a dark-safe fill so text stays readable instead of light-on-light. */
 html[data-theme="DARK"] .bg-blue-50,
-html[data-theme="DARK"] .bg-blue-50\/70 {
+html[data-theme="DARK"] .bg-blue-50\/70,
+html[data-theme="DARK"] .bg-blue-100 {
   background-color: #172554 !important;
 }
-
-html[data-theme="DARK"] .hover\:bg-blue-50:hover {
-  background-color: #1e3a8a !important;
+html[data-theme="DARK"] .bg-emerald-50,
+html[data-theme="DARK"] .bg-emerald-50\/70,
+html[data-theme="DARK"] .bg-emerald-100 {
+  background-color: #064e3b !important;
 }
+html[data-theme="DARK"] .bg-teal-50,
+html[data-theme="DARK"] .bg-teal-50\/70,
+html[data-theme="DARK"] .bg-teal-100 {
+  background-color: #134e4a !important;
+}
+html[data-theme="DARK"] .bg-rose-50,
+html[data-theme="DARK"] .bg-rose-50\/70,
+html[data-theme="DARK"] .bg-rose-100 {
+  background-color: #4c0519 !important;
+}
+html[data-theme="DARK"] .bg-amber-50,
+html[data-theme="DARK"] .bg-amber-50\/70,
+html[data-theme="DARK"] .bg-amber-100 {
+  background-color: #451a03 !important;
+}
+html[data-theme="DARK"] .bg-cyan-50,
+html[data-theme="DARK"] .bg-cyan-50\/70,
+html[data-theme="DARK"] .bg-cyan-100 {
+  background-color: #083344 !important;
+}
+html[data-theme="DARK"] .bg-violet-50,
+html[data-theme="DARK"] .bg-violet-50\/70,
+html[data-theme="DARK"] .bg-violet-100 {
+  background-color: #2e1065 !important;
+}
+
+html[data-theme="DARK"] .hover\:bg-blue-50:hover { background-color: #1e3a8a !important; }
+html[data-theme="DARK"] .hover\:bg-emerald-50:hover { background-color: #065f46 !important; }
+html[data-theme="DARK"] .hover\:bg-teal-50:hover { background-color: #115e59 !important; }
+html[data-theme="DARK"] .hover\:bg-rose-50:hover { background-color: #881337 !important; }
+html[data-theme="DARK"] .hover\:bg-amber-50:hover { background-color: #78350f !important; }
+html[data-theme="DARK"] .hover\:bg-cyan-50:hover { background-color: #164e63 !important; }
+html[data-theme="DARK"] .hover\:bg-violet-50:hover { background-color: #4c1d95 !important; }
+
+/* Accent text keeps enough contrast against the dark tinted surfaces above. */
+html[data-theme="DARK"] .text-blue-600,
+html[data-theme="DARK"] .text-blue-700,
+html[data-theme="DARK"] .text-blue-800,
+html[data-theme="DARK"] .text-blue-900 { color: #93c5fd !important; }
+html[data-theme="DARK"] .text-emerald-600,
+html[data-theme="DARK"] .text-emerald-700,
+html[data-theme="DARK"] .text-emerald-800,
+html[data-theme="DARK"] .text-emerald-900 { color: #6ee7b7 !important; }
+html[data-theme="DARK"] .text-teal-500,
+html[data-theme="DARK"] .text-teal-600,
+html[data-theme="DARK"] .text-teal-700,
+html[data-theme="DARK"] .text-teal-800,
+html[data-theme="DARK"] .text-teal-900 { color: #5eead4 !important; }
+html[data-theme="DARK"] .text-rose-600,
+html[data-theme="DARK"] .text-rose-700,
+html[data-theme="DARK"] .text-rose-800,
+html[data-theme="DARK"] .text-rose-900 { color: #fda4af !important; }
+html[data-theme="DARK"] .text-amber-600,
+html[data-theme="DARK"] .text-amber-700,
+html[data-theme="DARK"] .text-amber-800,
+html[data-theme="DARK"] .text-amber-900 { color: #fcd34d !important; }
+html[data-theme="DARK"] .text-cyan-600,
+html[data-theme="DARK"] .text-cyan-700,
+html[data-theme="DARK"] .text-cyan-800,
+html[data-theme="DARK"] .text-cyan-900 { color: #67e8f9 !important; }
+html[data-theme="DARK"] .text-violet-600,
+html[data-theme="DARK"] .text-violet-700,
+html[data-theme="DARK"] .text-violet-800,
+html[data-theme="DARK"] .text-violet-900 { color: #c4b5fd !important; }
+
+/* Soft/tinted borders drawn around the surfaces above. */
+html[data-theme="DARK"] .border-blue-100,
+html[data-theme="DARK"] .border-blue-200,
+html[data-theme="DARK"] .border-blue-400 { border-color: #1d4ed8 !important; }
+html[data-theme="DARK"] .border-emerald-100,
+html[data-theme="DARK"] .border-emerald-200,
+html[data-theme="DARK"] .border-emerald-400 { border-color: #059669 !important; }
+html[data-theme="DARK"] .border-teal-100,
+html[data-theme="DARK"] .border-teal-200,
+html[data-theme="DARK"] .border-teal-400,
+html[data-theme="DARK"] .border-teal-500 { border-color: #0d9488 !important; }
+html[data-theme="DARK"] .border-rose-100,
+html[data-theme="DARK"] .border-rose-200 { border-color: #be123c !important; }
+html[data-theme="DARK"] .border-amber-100,
+html[data-theme="DARK"] .border-amber-200,
+html[data-theme="DARK"] .border-amber-300 { border-color: #b45309 !important; }
+html[data-theme="DARK"] .border-cyan-100,
+html[data-theme="DARK"] .border-cyan-200,
+html[data-theme="DARK"] .border-cyan-400,
+html[data-theme="DARK"] .border-cyan-500 { border-color: #0e7490 !important; }
+html[data-theme="DARK"] .border-violet-100,
+html[data-theme="DARK"] .border-violet-200 { border-color: #6d28d9 !important; }
+
+/* Dashed empty-state panels and disabled surfaces. */
+html[data-theme="DARK"] .border-dashed.border-slate-300 { border-color: #334155 !important; }
+html[data-theme="DARK"] .bg-slate-950 { background-color: #f8fafc !important; color: #0b1220 !important; }
 
 html[data-theme="DARK"] option {
   background: #111827;
@@ -116,11 +163,6 @@ html[data-theme="DARK"] .text-slate-400 {
 html[data-theme="DARK"] .border-slate-100,
 html[data-theme="DARK"] .border-slate-200,
 html[data-theme="DARK"] .border-slate-300 {
-  border-color: #334155 !important;
-}
-
-html[data-theme="DARK"] .app-card {
-  background: #111827 !important;
   border-color: #334155 !important;
 }
 
@@ -178,5 +220,29 @@ html[data-theme="DARK"] .app-card {
   border-color: #93c5fd;
   color: #2563eb;
   outline: none;
+}
+
+.topo-line {
+  background-image: repeating-linear-gradient(90deg, #cbd5e1 0 6px, transparent 6px 12px);
+}
+html[data-theme="DARK"] .topo-line {
+  background-image: repeating-linear-gradient(90deg, #334155 0 6px, transparent 6px 12px);
+}
+
+@keyframes topo-travel {
+  0% { left: -4px; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { left: 100%; opacity: 0; }
+}
+.topo-dot {
+  position: absolute;
+  top: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 0 7px currentColor;
+  animation: topo-travel 2.2s linear infinite;
 }
 

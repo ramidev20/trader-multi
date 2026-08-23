@@ -7,7 +7,10 @@ type CardProps = React.PropsWithChildren<{
 
 export function Card({ children, className = "", style }: CardProps) {
   return (
-    <div className={`app-card ${className}`} style={{ ...styles.card, ...style }}>
+    <div
+      className={`app-card rounded-2xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-950/[0.03] ${className}`}
+      style={style}
+    >
       {children}
     </div>
   );
@@ -22,6 +25,14 @@ type AppButtonProps = React.PropsWithChildren<{
   type?: "button" | "submit" | "reset";
 }>;
 
+const buttonVariantClasses: Record<ButtonVariant, string> = {
+  dark: "bg-slate-950 text-white hover:bg-slate-800",
+  blue: "bg-blue-600 text-white hover:bg-blue-700",
+  green: "bg-emerald-600 text-white hover:bg-emerald-700",
+  red: "bg-rose-600 text-white hover:bg-rose-700",
+  soft: "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50",
+};
+
 export function AppButton({
   children,
   variant = "dark",
@@ -35,12 +46,7 @@ export function AppButton({
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className={`app-button app-button--${variant} ${className}`}
-      style={{
-        ...styles.button,
-        ...styles.buttonVariants[variant],
-        ...(disabled ? styles.buttonDisabled : {}),
-      }}
+      className={`app-button app-button--${variant} inline-flex items-center justify-center gap-2 rounded-xl border-0 px-4 py-2.5 text-sm font-bold transition duration-150 disabled:cursor-default disabled:opacity-60 ${buttonVariantClasses[variant]} ${className}`}
     >
       {children}
     </button>
@@ -57,20 +63,22 @@ type FieldProps = Omit<
   onChange?: React.ChangeEventHandler<HTMLInputElement>;
 };
 
+const fieldCaptionClass = "block text-xs font-black uppercase tracking-wide text-slate-500";
+const fieldInputClass =
+  "app-field-control mt-1.5 block w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition placeholder:font-medium placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60";
+
 export function Field({
   label,
   labelExtra,
   value,
   type = "text",
   onChange,
+  className = "",
   ...props
-}: FieldProps) {
+}: FieldProps & { className?: string }) {
   return (
-    <label style={styles.fieldLabel}>
-      <span
-        style={styles.fieldCaption}
-        className={labelExtra ? "flex items-center justify-between gap-2" : undefined}
-      >
+    <label className={`block ${className}`}>
+      <span className={labelExtra ? `${fieldCaptionClass} flex items-center justify-between gap-2` : fieldCaptionClass}>
         <span>{label}</span>
         {labelExtra}
       </span>
@@ -80,8 +88,7 @@ export function Field({
         defaultValue={onChange ? undefined : value}
         onChange={onChange}
         {...props}
-        className="app-field-control"
-        style={styles.fieldInput}
+        className={fieldInputClass}
       />
     </label>
   );
@@ -96,14 +103,13 @@ type SelectBoxProps = {
 
 export function SelectBox({ label, value, options, onChange }: SelectBoxProps) {
   return (
-    <label style={styles.fieldLabel}>
-      <span style={styles.fieldCaption}>{label}</span>
+    <label className="block">
+      <span className={fieldCaptionClass}>{label}</span>
       <select
         value={onChange ? value : undefined}
         defaultValue={onChange ? undefined : value}
         onChange={onChange}
-        className="app-field-control"
-        style={styles.fieldInput}
+        className={fieldInputClass}
       >
         {options.map((option) => (
           <option key={option}>{option}</option>
@@ -113,30 +119,18 @@ export function SelectBox({ label, value, options, onChange }: SelectBoxProps) {
   );
 }
 
-export function Toggle({ label, checked = true }) {
-  return (
-    <div style={styles.toggle}>
-      <span style={styles.toggleLabel}>{label}</span>
-      <span
-        style={{
-          ...styles.toggleTrack,
-          backgroundColor: checked ? "#2563eb" : "#cbd5e1",
-        }}
-      >
-        <span style={{ ...styles.toggleThumb, left: checked ? 24 : 4 }} />
-      </span>
-    </div>
-  );
-}
-
 export function Dialog({ open, title, children, onClose }) {
   if (!open) return null;
   return (
-    <div style={styles.dialogOverlay}>
-      <div className="app-dialog" style={styles.dialog}>
-        <div style={styles.dialogHeader}>
-          <h3 style={styles.dialogTitle}>{title}</h3>
-          <button className="app-dialog-close" onClick={onClose} style={styles.dialogClose}>
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/40 p-4 backdrop-blur-sm">
+      <div className="app-dialog mx-auto mt-12 w-full max-w-xl rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl shadow-slate-950/20">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="m-0 text-lg font-black text-slate-950">{title}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="app-dialog-close rounded-lg border border-slate-200 bg-white px-3 py-1 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+          >
             Close
           </button>
         </div>
@@ -145,132 +139,3 @@ export function Dialog({ open, title, children, onClose }) {
     </div>
   );
 }
-
-const styles = {
-  card: {
-    borderRadius: 16,
-    border: "1px solid #e2e8f0",
-    backgroundColor: "#ffffff",
-    padding: 20,
-    boxShadow: "0 1px 2px rgba(15, 23, 42, 0.05)",
-  } as React.CSSProperties,
-  button: {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    border: 0,
-    borderRadius: 10,
-    padding: "10px 16px",
-    fontSize: 14,
-    fontWeight: 700,
-    cursor: "pointer",
-    transition: "background-color 160ms ease, opacity 160ms ease",
-  } as React.CSSProperties,
-  buttonVariants: {
-    dark: { backgroundColor: "#020617", color: "#ffffff" },
-    blue: { backgroundColor: "#2563eb", color: "#ffffff" },
-    green: { backgroundColor: "#059669", color: "#ffffff" },
-    red: { backgroundColor: "#e11d48", color: "#ffffff" },
-    soft: {
-      border: "1px solid #e2e8f0",
-      backgroundColor: "#ffffff",
-      color: "#334155",
-    },
-  } as Record<ButtonVariant, React.CSSProperties>,
-  buttonDisabled: { cursor: "default", opacity: 0.6 } as React.CSSProperties,
-  fieldLabel: { display: "block" } as React.CSSProperties,
-  fieldCaption: {
-    display: "block",
-    color: "#64748b",
-    fontSize: 12,
-    fontWeight: 700,
-    letterSpacing: "0.04em",
-    textTransform: "uppercase",
-  } as React.CSSProperties,
-  fieldInput: {
-    boxSizing: "border-box",
-    display: "block",
-    width: "100%",
-    marginTop: 4,
-    border: "1px solid #e2e8f0",
-    borderRadius: 8,
-    backgroundColor: "#f8fafc",
-    padding: "12px 16px",
-    color: "#0f172a",
-    fontSize: 14,
-    fontWeight: 600,
-    outline: "none",
-  } as React.CSSProperties,
-  toggle: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    border: "1px solid #e2e8f0",
-    borderRadius: 12,
-    backgroundColor: "#f8fafc",
-    padding: "12px 16px",
-  } as React.CSSProperties,
-  toggleLabel: {
-    color: "#334155",
-    fontSize: 14,
-    fontWeight: 600,
-  } as React.CSSProperties,
-  toggleTrack: {
-    position: "relative",
-    display: "inline-flex",
-    width: 44,
-    height: 24,
-    borderRadius: 9999,
-    transition: "background-color 160ms ease",
-  } as React.CSSProperties,
-  toggleThumb: {
-    position: "absolute",
-    top: 4,
-    width: 16,
-    height: 16,
-    borderRadius: "50%",
-    backgroundColor: "#ffffff",
-    transition: "left 160ms ease",
-  } as React.CSSProperties,
-  dialogOverlay: {
-    position: "fixed",
-    inset: 0,
-    zIndex: 50,
-    backgroundColor: "rgba(15, 23, 42, 0.4)",
-    padding: 16,
-  } as React.CSSProperties,
-  dialog: {
-    boxSizing: "border-box",
-    width: "100%",
-    maxWidth: 672,
-    margin: "48px auto 0",
-    border: "1px solid #e2e8f0",
-    borderRadius: 14,
-    backgroundColor: "#ffffff",
-    padding: 20,
-    boxShadow: "0 20px 40px rgba(15, 23, 42, 0.2)",
-  } as React.CSSProperties,
-  dialogHeader: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 16,
-  } as React.CSSProperties,
-  dialogTitle: {
-    margin: 0,
-    color: "#020617",
-    fontSize: 18,
-    fontWeight: 900,
-  } as React.CSSProperties,
-  dialogClose: {
-    border: "1px solid #e2e8f0",
-    borderRadius: 8,
-    backgroundColor: "#ffffff",
-    padding: "4px 12px",
-    color: "#475569",
-    fontSize: 14,
-    fontWeight: 600,
-    cursor: "pointer",
-  } as React.CSSProperties,
-};

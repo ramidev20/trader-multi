@@ -5,7 +5,6 @@ import Sidebar from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
 import { AppButton, Dialog, Field, SelectBox } from "./components/ui/Primitives";
 import DashboardPage from "./pages/DashboardPage";
-import ChartPage from "./pages/ChartPage";
 import SearchPage from "./pages/SearchPage";
 import { NotificationsPage, ProfilePage, RiskManagementPage, SettingsPlaceholder, TradePage } from "./pages/Placeholders";
 import TradeHistoryPage from "./pages/TradeHistoryPage";
@@ -372,8 +371,6 @@ export default function App() {
   const pageTitle =
     activePage === "search"
       ? "Strategy Search"
-      : activePage === "chart"
-        ? "Live Chart"
       : activePage === "trade"
         ? "Trade"
         : activePage === "history"
@@ -391,7 +388,7 @@ export default function App() {
                 : "Trading Control Center";
 
   return (
-    <div className="app-shell lg:grid lg:grid-cols-[264px_minmax(0,1fr)]" style={styles.appShell}>
+    <div className="app-shell lg:grid lg:grid-cols-[212px_minmax(0,1fr)]" style={styles.appShell}>
       <Sidebar activePage={activePage} onChangePage={setActivePage} connectedCount={totals.connected} totalCount={accountList.length} />
       <main className="app-main min-w-0">
         <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
@@ -401,7 +398,6 @@ export default function App() {
             {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock MT5 data unless a live backend session is available.</div> : null}
             {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}
             {activePage === "dashboard" && <DashboardPage totals={totals} accountsData={accountList} onAdd={openAddDialog} onEdit={openEditDialog} onDelete={openDeleteDialog} onConnect={connectAccountAndSync} onRefresh={refreshDashboard} />}
-            {activePage === "chart" && (masterConnected ? <ChartPage /> : <MasterConnectionRequiredPage />)}
             {activePage === "search" && (masterConnected ? <SearchPage runtime={runtime} searchLogs={searchLogs} onRefreshRuntime={refreshBootstrap} timeRange={searchTimeRange} onTimeRangeChange={setSearchTimeRange} /> : <MasterConnectionRequiredPage />)}
             {activePage === "trade" && (masterConnected ? <TradePage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
             {activePage === "history" && (masterConnected ? <TradeHistoryPage runtime={runtime} historyRows={tradeHistory.history} /> : <MasterConnectionRequiredPage />)}

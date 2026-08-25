@@ -3,7 +3,6 @@ frontend/dist/
 __pycache__/
 *.pyc
 logs/
-.runtime/
 *.zip
 config.json
 .env

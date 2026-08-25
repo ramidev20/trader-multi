@@ -9,7 +9,6 @@ import sys
 import time
 from pathlib import Path
 from urllib.error import URLError
-from urllib.parse import urlparse
 from urllib.request import urlopen
 
 try:
@@ -73,27 +72,58 @@ def _http_ready(url: str) -> bool:
         return False
 
 
-def _receiver_health_url(receiver_url: str) -> str | None:
-    if not receiver_url:
-        return None
-    parsed = urlparse(receiver_url)
-    if not parsed.scheme or not parsed.netloc:
-        return None
-    scheme = "https" if parsed.scheme == "wss" else "http"
-    return f"{scheme}://{parsed.netloc}/health"
+def _find_listening_pids(port: int) -> list[int]:
+    """PIDs of processes with a LISTENING socket on `port` (Windows netstat)."""
+    try:
+        output = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True, timeout=5
+        ).stdout
+    except Exception:
+        return []
+    pids: set[int] = set()
+    needle = f":{port}"
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        local_address, state, pid_text = parts[1], parts[3], parts[-1]
+        if state.upper() != "LISTENING" or not local_address.endswith(needle):
+            continue
+        try:
+            pids.add(int(pid_text))
+        except ValueError:
+            continue
+    return sorted(pids)
+
+
+def _kill_process_tree(pid: int) -> None:
+    try:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+def stop_existing_backend() -> None:
+    """Force-kill any backend already bound to the API port before starting a fresh one.
+
+    Reusing an already-running backend meant code changes never took effect until
+    someone remembered to hard-kill it manually -- and MT5 adapter subprocesses
+    (spawned as children of the backend) kept running stale code indefinitely,
+    surviving even repeated `run.py` launches. `/T` kills the whole process tree,
+    so adapter children go down with the backend that spawned them.
+    """
+    pids = _find_listening_pids(8000)
+    for pid in pids:
+        _kill_process_tree(pid)
+    if not pids:
+        return
+    deadline = time.time() + 10
+    while time.time() < deadline and _http_ready(BACKEND_HEALTH_URL):
+        time.sleep(0.3)
 
 
 def start_backend_if_needed() -> subprocess.Popen[str] | None:
-    remote_control = _load_remote_control_settings()
-    if _http_ready(BACKEND_HEALTH_URL):
-        if remote_control["enabled"]:
-            receiver_health_url = _receiver_health_url(str(remote_control.get("receiver_url", "")))
-            if receiver_health_url and not _http_ready(receiver_health_url):
-                raise RuntimeError(
-                    "Remote control is enabled, but the running backend is only reachable on localhost. "
-                    "Stop the existing backend and restart it with host 0.0.0.0, or launch the app through run.py."
-                )
-        return None
+    stop_existing_backend()
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
     return subprocess.Popen(
@@ -106,6 +136,9 @@ def start_backend_if_needed() -> subprocess.Popen[str] | None:
             "0.0.0.0",
             "--port",
             "8000",
+            # Frequent UI polling (chart data, remote-control status, etc.) would
+            # otherwise print a request line to the console roughly every second.
+            "--no-access-log",
         ],
         cwd=ROOT_DIR,
         env=env,

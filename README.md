@@ -13,7 +13,7 @@ pip install -r requirements.txt
 Start the backend from the project root:
 
 ```powershell
-uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
 In a second terminal, install and start the frontend:

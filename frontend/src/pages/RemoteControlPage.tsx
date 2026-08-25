@@ -452,12 +452,6 @@ export default function RemoteControlPage() {
           });
         const connections = Number(runtime?.remote_control?.connections || 0);
         setReceiverConnections(connections);
-        nextLogs.push({
-          id: `receiver-status-${connections}`,
-          at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-          message: `Receiver log stream active. Controller connections: ${connections}.`,
-          level: connections > 0 ? "success" : "info",
-        });
         setReceiverLogs(nextLogs);
       } catch {
         if (cancelled) return;

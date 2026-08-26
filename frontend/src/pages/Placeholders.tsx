@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Bell,
@@ -89,6 +89,12 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [errorText, setErrorText] = useState("");
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // React state updates aren't synchronous: a very fast double-click can fire
+  // both handlers before a re-render disables the button or before `submitting`
+  // reflects true in the second call's closure, sending the order twice (locally
+  // and to every remote receiver). A ref is read/written immediately, so it
+  // closes that gap regardless of render timing.
+  const submittingRef = useRef(false);
   const [refreshing, setRefreshing] = useState(false);
   const [positions, setPositions] = useState([]);
   const [positionsErrors, setPositionsErrors] = useState([]);
@@ -420,7 +426,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   }
 
   async function openPosition(orderSide) {
-    if (submitting) return;
+    if (submittingRef.current) return;
     if (autoCloseEnabled && !autoCloseAt) {
       setErrorText("Choose an end time for auto close.");
       return;
@@ -431,6 +437,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       );
       return;
     }
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const orderPayload = {
@@ -475,6 +482,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     } catch (error) {
       setErrorText(String(error?.message || error));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }

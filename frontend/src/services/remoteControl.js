@@ -14,6 +14,7 @@ const receivers = new Map();
 for (const saved of loadReceivers()) {
   receivers.set(saved.id, makeReceiverRecord(saved));
 }
+dedupeReceiversByUrl();
 
 function loadReceivers() {
   try {
@@ -119,8 +120,48 @@ export function subscribeRemoteLogs(listener) {
   return () => logListeners.delete(listener);
 }
 
+function normalizeUrl(url) {
+  return String(url || "").trim().toLowerCase();
+}
+
+/** One-time cleanup for entries saved before duplicate-URL prevention existed:
+ * collapse any receivers that already share a URL down to one, so a stale
+ * duplicate can't keep silently doubling every broadcast command. */
+function dedupeReceiversByUrl() {
+  const seenByUrl = new Map();
+  const toRemove = [];
+  for (const record of receivers.values()) {
+    const key = normalizeUrl(record.url);
+    if (!key) continue;
+    const keeper = seenByUrl.get(key);
+    if (!keeper) {
+      seenByUrl.set(key, record);
+      continue;
+    }
+    if (record.enabled) keeper.enabled = true;
+    toRemove.push(record.id);
+  }
+  if (!toRemove.length) return;
+  for (const id of toRemove) receivers.delete(id);
+  persistReceivers();
+}
+
+/** A second saved entry pointing at the same receiver URL means every command
+ * gets broadcast to that one physical PC twice -- e.g. two "open" commands,
+ * two real orders. Reuse the existing entry for that URL instead of adding
+ * a duplicate. */
+function findReceiverIdByUrl(url, excludingId) {
+  const target = normalizeUrl(url);
+  if (!target) return null;
+  for (const record of receivers.values()) {
+    if (record.id !== excludingId && normalizeUrl(record.url) === target) return record.id;
+  }
+  return null;
+}
+
 export function saveReceiver({ id, label, url, token, enabled = true }) {
-  const receiverId = id || globalThis.crypto?.randomUUID?.() || `receiver-${Date.now()}`;
+  const duplicateId = findReceiverIdByUrl(url, id);
+  const receiverId = id || duplicateId || globalThis.crypto?.randomUUID?.() || `receiver-${Date.now()}`;
   const existing = receivers.get(receiverId);
   const record = existing || makeReceiverRecord({ id: receiverId });
   record.label = label?.trim() || record.label || "Receiver";

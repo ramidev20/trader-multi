@@ -44,6 +44,12 @@ FRONTEND_INDEX = FRONTEND_DIST / "index.html"
 SYMBOL_DEFAULT = "XAUUSD"
 REMOTE_COMMAND_CACHE_LIMIT = 500
 _remote_command_cache: dict[str, dict[str, Any]] = {}
+# Marks a command id as currently executing, closing the gap between "not yet
+# cached" and "finished caching" -- without this, a duplicate delivery of the
+# same command id that arrives while the first is still mid-flight (e.g. still
+# awaiting the MT5 round-trip in asyncio.to_thread) would find nothing in the
+# cache and run a second time, opening a second real order.
+_remote_command_inflight: dict[str, asyncio.Event] = {}
 _remote_command_lock = RLock()
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -1341,9 +1347,33 @@ async def remote_command_socket(websocket: WebSocket) -> None:
 
             with _remote_command_lock:
                 cached_result = _remote_command_cache.get(command_id)
+                inflight_event = None if cached_result else _remote_command_inflight.get(command_id)
+                if cached_result is None and inflight_event is None:
+                    inflight_event = asyncio.Event()
+                    _remote_command_inflight[command_id] = inflight_event
+                    should_execute = True
+                else:
+                    should_execute = False
+
             if cached_result:
                 append_log("adapter", f"[REMOTE] Replayed cached result for {action_name} ({command_id}).")
                 await websocket.send_json(cached_result)
+                continue
+
+            if not should_execute:
+                # Same command id is already executing (a duplicate delivery, not
+                # a genuinely new command) -- wait for that run instead of
+                # starting a second one, which would open a second real order.
+                append_log("adapter", f"[REMOTE] Duplicate delivery of {action_name} ({command_id}); waiting for the in-flight run.")
+                await inflight_event.wait()
+                with _remote_command_lock:
+                    cached_result = _remote_command_cache.get(command_id)
+                await websocket.send_json(cached_result or {
+                    "type": "result",
+                    "id": command_id,
+                    "status": "error",
+                    "message": "Duplicate command could not be resolved.",
+                })
                 continue
 
             try:
@@ -1400,6 +1430,8 @@ async def remote_command_socket(websocket: WebSocket) -> None:
                 if len(_remote_command_cache) >= REMOTE_COMMAND_CACHE_LIMIT:
                     _remote_command_cache.pop(next(iter(_remote_command_cache)))
                 _remote_command_cache[command_id] = response
+                _remote_command_inflight.pop(command_id, None)
+            inflight_event.set()
             await websocket.send_json(response)
     except WebSocketDisconnect:
         append_log("adapter", "[REMOTE] Controller disconnected.")

@@ -69,12 +69,11 @@ The desktop launcher now uses Python `pywebview` instead of Electron, so the sam
 
 The project reads the root `.env` file for both backend and frontend dev flags.
 
-Use these flags in `.env`:
+Use this flag in `.env`:
 - `TRADER_DEV_MODE=true`
-- `VITE_DEV_MODE=true`
 
 With developer mode enabled, the UI loads mock trading data and simulated MT5 behavior so you can test pages without connecting a real MT5 account.
 
 ## 6) Remote Control (Two PCs)
 
-On the PC running MT5, install Tailscale and set `TRADER_REMOTE_TOKEN` to a long secret in `.env`. For live commands, set `TRADER_DEV_MODE=false`, `DEV_MODE=false`, and `TRADER_REMOTE_ENABLED=true`, then launch with `python run.py`. Use the **Remote Control** page from the other PC to connect to `ws://<tailscale-ip>:8000/remote/ws` with the same token.
+On the PC running MT5, install Tailscale. Set `TRADER_DEV_MODE=false` in `.env`, then launch with `python run.py`. On the **Remote Control** page, choose the **Receiver** role, generate a token, turn on "Accept remote trades", and save -- this is stored in `config.json`, not `.env`. On the other PC, choose the **Controller / Trader** role and add this PC as a receiver using `ws://<tailscale-ip>:8000/remote/ws` and the same token.

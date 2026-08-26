@@ -39,7 +39,7 @@ The launcher starts the FastAPI backend and Vite development server, then opens 
 
 ## Developer Mode
 
-The root `.env` file controls developer mode. With `TRADER_DEV_MODE=true` and `VITE_DEV_MODE=true`, the app uses mock MT5 data so you can browse and test pages without logging into a live MT5 account.
+The root `.env` file controls developer mode. With `TRADER_DEV_MODE=true`, the app uses mock MT5 data so you can browse and test pages without logging into a live MT5 account.
 
 ## Configuration
 

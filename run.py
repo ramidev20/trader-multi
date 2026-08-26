@@ -27,6 +27,7 @@ load_project_env()
 
 ROOT_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = ROOT_DIR / "frontend"
+WEBVIEW_STORAGE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LequidityTrader" / "webview"
 CONFIG_FILE = ROOT_DIR / "config.json"
 BACKEND_HEALTH_URL = "http://127.0.0.1:8000/health"
 FRONTEND_DEV_URL = "http://127.0.0.1:5173/"
@@ -202,7 +203,11 @@ def main() -> int:
         min_size=(1100, 760),
     )
     window.events.closed += lambda: (stop_process(frontend_process), stop_process(backend_process))
-    webview.start()
+    WEBVIEW_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    # pywebview defaults to private_mode=True (a fresh, throwaway browser profile
+    # every launch), which silently wipes localStorage -- including the
+    # Remote Control page's saved receiver list -- every time the app is closed.
+    webview.start(private_mode=False, storage_path=str(WEBVIEW_STORAGE_DIR))
     return 0
 
 

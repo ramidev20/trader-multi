@@ -73,13 +73,20 @@ def _http_ready(url: str) -> bool:
 
 
 def _find_listening_pids(port: int) -> list[int]:
-    """PIDs of processes with a LISTENING socket on `port` (Windows netstat)."""
+    """PIDs of processes with a LISTENING socket on `port` (Windows netstat).
+
+    `netstat` writes in the console's OEM codepage, which doesn't always match
+    Python's default text encoding (varies by machine/locale) -- decode with
+    `errors="replace"` so an unmappable byte can't crash this instead of just
+    garbling a column we don't even read.
+    """
     try:
-        output = subprocess.run(
-            ["netstat", "-ano"], capture_output=True, text=True, timeout=5
-        ).stdout
+        result = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True, errors="replace", timeout=5
+        )
     except Exception:
         return []
+    output = result.stdout or ""
     pids: set[int] = set()
     needle = f":{port}"
     for line in output.splitlines():

@@ -197,6 +197,47 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
             }
         except Exception as ex:
             return {"status": "error", "message": str(ex)}
+    if action == "history":
+        try:
+            info = mt5.account_info()
+            if info is None:
+                return {"status": "error", "message": "MT5 account information is unavailable."}
+            deals = mt5.history_deals_get(datetime(2000, 1, 1), datetime.now()) or []
+            rows = []
+            for deal in deals:
+                deal_type = int(getattr(deal, "type", -1))
+                buy_type = int(getattr(mt5, "DEAL_TYPE_BUY", 0))
+                sell_type = int(getattr(mt5, "DEAL_TYPE_SELL", 1))
+                if deal_type not in {buy_type, sell_type}:
+                    continue
+                deal_entry = int(getattr(deal, "entry", -1))
+                closing_entries = {
+                    int(getattr(mt5, "DEAL_ENTRY_OUT", 1)),
+                    int(getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)),
+                    int(getattr(mt5, "DEAL_ENTRY_INOUT", 2)),
+                }
+                if deal_entry not in closing_entries:
+                    continue
+                profit = float(getattr(deal, "profit", 0.0) or 0.0) + float(getattr(deal, "swap", 0.0) or 0.0) + float(getattr(deal, "commission", 0.0) or 0.0)
+                rows.append(
+                    {
+                        "ticket": int(getattr(deal, "ticket", 0) or 0),
+                        "symbol": str(getattr(deal, "symbol", "XAUUSD") or "XAUUSD"),
+                        "side": "BUY" if deal_type == buy_type else "SELL",
+                        "lot": float(getattr(deal, "volume", 0.0) or 0.0),
+                        "entry": float(getattr(deal, "price", 0.0) or 0.0),
+                        "profit": profit,
+                        "comment": str(getattr(deal, "comment", "") or ""),
+                        "time": int(getattr(deal, "time", 0) or 0),
+                    }
+                )
+            return {
+                "status": "ok",
+                "balance": float(getattr(info, "balance", 0.0) or 0.0),
+                "deals": rows,
+            }
+        except Exception as ex:
+            return {"status": "error", "message": str(ex)}
     if action == "snapshot":
         try:
             info = mt5.account_info()

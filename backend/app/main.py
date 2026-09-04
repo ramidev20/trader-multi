@@ -31,7 +31,6 @@ from .services.strategy_service import (
     stop_strategy_system,
     close_all_positions,
     calculate_manual_lot,
-    _initialize_mt5_for_account,
     _tick_for,
 )
 from .services.task_manager import set_runtime_logger
@@ -1066,63 +1065,47 @@ def trade_history() -> dict[str, Any]:
         for session in list_sessions(accounts)
         if str(session.get("state", "")).lower() == "connected"
     }
-    with MT5_LOCK:
-        for account in accounts:
-            login = _safe_int(account.get("user"))
-            if login <= 0 or login not in connected_logins:
-                continue
-            init_ok, init_detail = _initialize_mt5_for_account(account)
-            if not init_ok:
-                errors.append(f"{login}: {init_detail}")
-                continue
-            try:
-                info = mt5.account_info()
-                current_balance = float(getattr(info, "balance", 0.0) or 0.0) if info is not None else 0.0
-                deals = mt5.history_deals_get(datetime(2000, 1, 1), datetime.now()) or []
-                account_profit = 0.0
-                account_rows: list[dict[str, Any]] = []
-                for deal in deals:
-                    deal_type = int(getattr(deal, "type", -1))
-                    buy_type = int(getattr(mt5, "DEAL_TYPE_BUY", 0))
-                    sell_type = int(getattr(mt5, "DEAL_TYPE_SELL", 1))
-                    if deal_type not in {buy_type, sell_type}:
-                        continue
-                    deal_entry = int(getattr(deal, "entry", -1))
-                    closing_entries = {
-                        int(getattr(mt5, "DEAL_ENTRY_OUT", 1)),
-                        int(getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)),
-                        int(getattr(mt5, "DEAL_ENTRY_INOUT", 2)),
-                    }
-                    if deal_entry not in closing_entries:
-                        continue
-                    profit = float(getattr(deal, "profit", 0.0) or 0.0) + float(getattr(deal, "swap", 0.0) or 0.0) + float(getattr(deal, "commission", 0.0) or 0.0)
-                    account_profit += profit
-                    row = {
-                        "id": f"{login}-{int(getattr(deal, 'ticket', 0) or 0)}",
-                        "ticket": int(getattr(deal, "ticket", 0) or 0),
-                        "account_login": login,
-                        "account_name": str(account.get("username", f"Account {login}")),
-                        "symbol": str(getattr(deal, "symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT),
-                        "side": "BUY" if deal_type == buy_type else "SELL",
-                        "lot": float(getattr(deal, "volume", 0.0) or 0.0),
-                        "entry": float(getattr(deal, "price", 0.0) or 0.0),
-                        "profit": profit,
-                        "status": "Closed",
-                        "comment": str(getattr(deal, "comment", "") or ""),
-                        "created_at": _to_iso_from_epoch(getattr(deal, "time", 0)),
-                    }
-                    account_rows.append(row)
-                initial_balance = current_balance - account_profit
-                summaries.append({
-                    "login": login,
-                    "balance": current_balance,
-                    "initial_balance": initial_balance,
-                    "profit": account_profit,
-                    "profit_percent": (account_profit / initial_balance * 100) if initial_balance else 0,
-                })
-                history.extend(account_rows)
-            except Exception as exc:
-                errors.append(f"{login}: history read error {exc}")
+    for account in accounts:
+        login = _safe_int(account.get("user"))
+        if login <= 0 or login not in connected_logins:
+            continue
+        result = submit_adapter_command(login, "history", {}, timeout_sec=10.0)
+        if result.get("status") != "ok":
+            errors.append(f"{login}: {result.get('message', 'MT5 adapter command failed.')}")
+            continue
+        try:
+            current_balance = float(result.get("balance", 0.0) or 0.0)
+            account_profit = 0.0
+            account_rows: list[dict[str, Any]] = []
+            for deal in result.get("deals", []) or []:
+                profit = float(deal.get("profit", 0.0) or 0.0)
+                account_profit += profit
+                row = {
+                    "id": f"{login}-{int(deal.get('ticket', 0) or 0)}",
+                    "ticket": int(deal.get("ticket", 0) or 0),
+                    "account_login": login,
+                    "account_name": str(account.get("username", f"Account {login}")),
+                    "symbol": str(deal.get("symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT),
+                    "side": str(deal.get("side", "BUY")),
+                    "lot": float(deal.get("lot", 0.0) or 0.0),
+                    "entry": float(deal.get("entry", 0.0) or 0.0),
+                    "profit": profit,
+                    "status": "Closed",
+                    "comment": str(deal.get("comment", "") or ""),
+                    "created_at": _to_iso_from_epoch(deal.get("time", 0)),
+                }
+                account_rows.append(row)
+            initial_balance = current_balance - account_profit
+            summaries.append({
+                "login": login,
+                "balance": current_balance,
+                "initial_balance": initial_balance,
+                "profit": account_profit,
+                "profit_percent": (account_profit / initial_balance * 100) if initial_balance else 0,
+            })
+            history.extend(account_rows)
+        except Exception as exc:
+            errors.append(f"{login}: history read error {exc}")
     if not summaries and not errors:
         errors.append("No connected accounts available for trade history.")
 

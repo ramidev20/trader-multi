@@ -24,6 +24,11 @@ _sim_ticks = {"XAUUSD": 3350.0}
 _sim_last_candle_ts: dict[str, int] = {}
 MANUAL_TP_TASK_NAME = "manual_multi_tp"
 MANUAL_AUTO_CLOSE_TASK_NAME = "manual_auto_close_all"
+# MetaTrader5's Python API has no tick-event/callback hook -- symbol_info_tick()
+# is always a pull, not a push. This polls it directly (cheap local IPC call,
+# not a network round-trip) at a fifth of a second instead of a full second, to
+# cut worst-case TP-detection latency without meaningfully increasing load.
+MANUAL_TP_POLL_INTERVAL_SEC = 0.2
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
     "M3": mt5.TIMEFRAME_M3,
@@ -581,16 +586,33 @@ def _manual_tp_position(session: dict):
             if int(getattr(position, "ticket", 0) or 0) == ticket:
                 return position
 
+    # The opening order's result doesn't always carry the position ticket yet
+    # (never, for a still-pending LIMIT order; sometimes not for a MARKET fill,
+    # depending on the broker), so a session can still be unresolved on a later
+    # tick. Matching by side + entry price is inherently approximate -- two
+    # multi-TP positions opened close together in price (easy on a slow-moving
+    # symbol) can both match. Once another session has already claimed a
+    # ticket, it must never be picked again here, or that older session starts
+    # managing -- and partially closing -- a position that isn't its own.
+    claimed_tickets = {
+        int(other.get("ticket") or 0)
+        for other in _manual_tp_sessions
+        if other is not session and other.get("ticket")
+    }
     expected_type = mt5.ORDER_TYPE_BUY if session["side"] == "BUY" else mt5.ORDER_TYPE_SELL
     candidates = [
         position
         for position in positions
         if int(getattr(position, "type", -1)) == expected_type
         and abs(float(getattr(position, "price_open", 0.0) or 0.0) - float(session["entry"])) <= 1.0
+        and int(getattr(position, "ticket", 0) or 0) not in claimed_tickets
     ]
     if not candidates:
         return None
-    position = max(candidates, key=lambda item: int(getattr(item, "time", 0) or 0))
+    # Prefer the oldest remaining match: this session was registered before
+    # any later session that might also be waiting to resolve, so its position
+    # is more likely the earlier of the ambiguous candidates, not the newest.
+    position = min(candidates, key=lambda item: int(getattr(item, "time", 0) or 0))
     session["ticket"] = int(getattr(position, "ticket", 0) or 0) or None
     return position
 
@@ -605,15 +627,24 @@ def _manual_tp_pending_order(session: dict):
         for order in orders:
             if int(getattr(order, "ticket", 0) or 0) == ticket:
                 return order
+    # Same ambiguity as _manual_tp_position: a pending LIMIT order's ticket is
+    # never known at registration, so don't let this session claim an order
+    # another session has already resolved to.
+    claimed_tickets = {
+        int(other.get("ticket") or 0)
+        for other in _manual_tp_sessions
+        if other is not session and other.get("ticket")
+    }
     candidates = [
         order
         for order in orders
         if int(getattr(order, "type", -1)) == expected_type
         and abs(float(getattr(order, "price_open", 0.0) or 0.0) - float(session["entry"])) <= 1.0
+        and int(getattr(order, "ticket", 0) or 0) not in claimed_tickets
     ]
     if not candidates:
         return None
-    order = max(candidates, key=lambda item: int(getattr(item, "time_setup", 0) or 0))
+    order = min(candidates, key=lambda item: int(getattr(item, "time_setup", 0) or 0))
     session["ticket"] = int(getattr(order, "ticket", 0) or 0) or None
     return order
 
@@ -687,7 +718,7 @@ def _register_manual_tp_session(side: str, entry: float, targets: list[tuple[flo
         }
     )
     if not is_task_running(MANUAL_TP_TASK_NAME):
-        start_task(MANUAL_TP_TASK_NAME, _monitor_manual_multi_tp, interval_sec=1, log_schedule=False)
+        start_task(MANUAL_TP_TASK_NAME, _monitor_manual_multi_tp, interval_sec=MANUAL_TP_POLL_INTERVAL_SEC, log_schedule=False)
 
 
 def cancel_manual_auto_close() -> None:

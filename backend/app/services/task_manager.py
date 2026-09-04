@@ -11,7 +11,7 @@ LogFn = Callable[[str, str], None]
 @dataclass
 class ManagedTask:
     name: str
-    interval_sec: int
+    interval_sec: float
     start_time: datetime
     end_time: Optional[datetime]
     timer: threading.Timer | None = None
@@ -51,7 +51,7 @@ def start_task(
     task_name: str,
     func: Callable,
     *args,
-    interval_sec: int,
+    interval_sec: float,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
     end_time_enabled: bool = False,

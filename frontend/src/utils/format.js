@@ -16,3 +16,11 @@ export function decimalInput(value, digits = 2) {
   const [whole, fraction = ""] = cleaned.split(".");
   return fraction ? `${whole}.${fraction.slice(0, digits)}` : whole;
 }
+
+export function signedDecimalInput(value, digits = 2) {
+  const raw = String(value ?? "").trim();
+  const negative = raw.startsWith("-");
+  const cleaned = decimalInput(raw, digits);
+  if (!cleaned) return negative ? "-" : "";
+  return negative ? `-${cleaned}` : cleaned;
+}

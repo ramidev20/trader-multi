@@ -12,19 +12,22 @@ import {
   Trash2,
   Wrench,
   Info,
+  Check,
+  ChevronDown,
+  Hourglass,
+  Zap,
 } from "lucide-react";
 import {
   AppButton,
   Card,
   Dialog,
   Field,
-  SelectBox,
 } from "../components/ui/Primitives";
 import { TableFrame } from "../components/ui/TableFrame";
 import { LogList } from "../components/ui/LogList";
 import { MetricCard } from "./shared/MetricCard";
 import ChartPage from "./ChartPage";
-import { cx, decimalInput, money } from "../utils/format";
+import { cx, decimalInput, money, signedDecimalInput } from "../utils/format";
 import { api } from "../services/api";
 import {
   isRemoteConnected,
@@ -32,6 +35,152 @@ import {
 } from "../services/remoteControl";
 
 const TRADE_FORM_STORAGE_KEY = "trader.trade.form";
+// XAUUSD pip size, mirroring the backend which converts pips with `pips / 10`.
+const PIPS_PER_PRICE_UNIT = 10;
+
+const SECTION_TAG_TONES = {
+  blue: "bg-blue-100 text-blue-700",
+  amber: "bg-amber-100 text-amber-800",
+  slate: "bg-slate-200 text-slate-600",
+};
+
+function SectionTag({ tone = "slate", children }) {
+  return (
+    <span
+      className={cx(
+        "rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-wide",
+        SECTION_TAG_TONES[tone],
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+const ORDER_KIND_OPTIONS = [
+  { value: "MARKET", label: "MARKET", Icon: Zap },
+  { value: "LIMIT", label: "LIMIT", Icon: Hourglass },
+];
+
+function IconSelect({ label, value, options, onChange, disabled = false }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const selected = options.find((option) => option.value === value) ?? options[0];
+  const SelectedIcon = selected.Icon;
+
+  useEffect(() => {
+    if (!open) return undefined;
+    function onPointerDown(event) {
+      if (!rootRef.current?.contains(event.target)) setOpen(false);
+    }
+    function onKeyDown(event) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <span className="block text-xs font-black uppercase tracking-wide text-slate-500">
+        {label}
+      </span>
+      <button
+        type="button"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((previous) => !previous)}
+        className="mt-1.5 flex h-[46px] w-full items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 text-sm font-semibold text-slate-900 outline-none transition hover:bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        <SelectedIcon className="h-4 w-4 shrink-0 text-blue-600" />
+        <span className="min-w-0 flex-1 truncate text-left">
+          {selected.label}
+        </span>
+        <ChevronDown
+          className={cx(
+            "h-4 w-4 shrink-0 text-slate-400 transition",
+            open && "rotate-180",
+          )}
+        />
+      </button>
+      {open ? (
+        <ul
+          role="listbox"
+          className="absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg shadow-slate-950/10"
+        >
+          {options.map((option) => {
+            const OptionIcon = option.Icon;
+            const isSelected = option.value === selected.value;
+            return (
+              <li key={option.value}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  onClick={() => {
+                    onChange(option.value);
+                    setOpen(false);
+                  }}
+                  className={cx(
+                    "flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-semibold transition",
+                    isSelected
+                      ? "bg-blue-50 text-blue-700"
+                      : "text-slate-700 hover:bg-slate-50",
+                  )}
+                >
+                  <OptionIcon
+                    className={cx(
+                      "h-4 w-4 shrink-0",
+                      isSelected ? "text-blue-600" : "text-slate-400",
+                    )}
+                  />
+                  <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                  {isSelected ? (
+                    <Check className="h-4 w-4 shrink-0 text-blue-600" />
+                  ) : null}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+const PANEL_MIN_WIDTH = 300;
+const PANEL_MAX_WIDTH = 720;
+const PANEL_DEFAULT_WIDTH = 360;
+
+function clampPanelWidth(value) {
+  const width = Number(value);
+  if (!Number.isFinite(width)) return PANEL_DEFAULT_WIDTH;
+  return Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(width)));
+}
+
+function formatCountdown(seconds) {
+  const safe = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `0:${String(safe).padStart(2, "0")}`;
+}
+
+function roundPrice(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+// A pending order only rests on the far side of the market, so the pips amount
+// is applied away from it: below the candle open for BUY, above it for SELL.
+// (The backend rejects a BUY limit at or above the ask, and vice versa.)
+function searchLimitPriceFrom(candleOpen, orderSide, pips) {
+  const offset = pips / PIPS_PER_PRICE_UNIT;
+  return roundPrice(
+    orderSide === "BUY" ? candleOpen - offset : candleOpen + offset,
+  );
+}
 
 function loadTradeForm() {
   try {
@@ -56,6 +205,27 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [sl, setSl] = useState(() => savedTradeForm.sl ?? "600");
   const [spreadPips, setSpreadPips] = useState(
     () => savedTradeForm.spreadPips ?? "0",
+  );
+  const [searchPips, setSearchPips] = useState(
+    () => savedTradeForm.searchPips ?? "10",
+  );
+  // {time, open} of the newest M1 candle. `time` identifies the candle so we
+  // can tell when a genuinely new one has started.
+  const [m1Candle, setM1Candle] = useState(null);
+  // Armed = waiting for the next candle to open before sending the order.
+  const [searchArmed, setSearchArmed] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [panelWidth, setPanelWidth] = useState(() =>
+    clampPanelWidth(savedTradeForm.panelWidth ?? PANEL_DEFAULT_WIDTH),
+  );
+  const layoutRef = useRef(null);
+  // Search mode: when on, Open prices a pending limit off the M1 candle instead
+  // of sending the order as configured by Order Type.
+  const [searchEnabled, setSearchEnabled] = useState(() =>
+    Boolean(savedTradeForm.searchEnabled),
+  );
+  const [panelTab, setPanelTab] = useState(
+    () => savedTradeForm.panelTab ?? "search",
   );
   const [multiTp, setMultiTp] = useState(() => Boolean(savedTradeForm.multiTp));
   const [slPrice, setSlPrice] = useState(() => savedTradeForm.slPrice ?? "");
@@ -95,6 +265,10 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   // and to every remote receiver). A ref is read/written immediately, so it
   // closes that gap regardless of render timing.
   const submittingRef = useRef(false);
+  // Timestamp of the candle that was current when the search was armed; the
+  // order fires on the first candle newer than this one.
+  const armedFromRef = useRef(null);
+  const placeSearchOrderRef = useRef(null);
   const [refreshing, setRefreshing] = useState(false);
   const [positions, setPositions] = useState([]);
   const [positionsErrors, setPositionsErrors] = useState([]);
@@ -132,6 +306,19 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       .slice(-120)
       .reverse();
   }, [runtime, openOrders, limitOrders]);
+  const searchPipsValue = useMemo(() => {
+    const parsed = Number.parseFloat(searchPips);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }, [searchPips]);
+  // Entry the "Open With Search" button would use right now, so the offset is
+  // visible before it is sent rather than only afterwards in the order list.
+  // Minute boundaries line up in every timezone, so the wall clock is a safer
+  // countdown source than the broker timestamp on the candle.
+  const secondsToNextCandle = useMemo(
+    () => 60 - (Math.floor(nowMs / 1000) % 60),
+    [nowMs],
+  );
+  const searchOffsetLabel = `${side === "BUY" ? "-" : "+"}${Math.abs(searchPipsValue)} pips`;
   const totalRatio = useMemo(() => {
     let total = Number(tp1Ratio || 0);
     if (tp2Enabled) total += Number(tp2Ratio || 0);
@@ -158,6 +345,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           tp,
           sl,
           spreadPips,
+          searchPips,
+          searchEnabled,
           multiTp,
           slPrice,
           tp1Ratio,
@@ -170,6 +359,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           autoCloseEnabled,
           autoCloseAt,
           positionsTab,
+          panelTab,
+          panelWidth,
           tradeTab: positionsTab,
         }),
       );
@@ -183,6 +374,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     tp,
     sl,
     spreadPips,
+    searchPips,
+    searchEnabled,
     multiTp,
     slPrice,
     tp1Ratio,
@@ -195,6 +388,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     autoCloseEnabled,
     autoCloseAt,
     positionsTab,
+    panelTab,
+    panelWidth,
   ]);
 
   useEffect(() => {
@@ -209,6 +404,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             tp,
             sl,
             spreadPips,
+            searchPips,
+            searchEnabled,
             multiTp,
             slPrice,
             tp1Ratio,
@@ -221,6 +418,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             autoCloseEnabled,
             autoCloseAt,
             positionsTab,
+            panelTab,
+            panelWidth,
             tradeTab: positionsTab,
           }),
         );
@@ -243,6 +442,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     tp,
     sl,
     spreadPips,
+    searchPips,
+    searchEnabled,
     multiTp,
     slPrice,
     tp1Ratio,
@@ -255,6 +456,8 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     autoCloseEnabled,
     autoCloseAt,
     positionsTab,
+    panelTab,
+    panelWidth,
   ]);
 
   useEffect(() => {
@@ -344,35 +547,102 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     );
   }
 
-  function SideButton({ value, label, activeClassName, idleClassName }) {
+  // Side buttons only pick the direction now; the Open buttons below submit.
+  function SideButton({ value, label, activeClassName }) {
     const isActive = side === value;
-    const busy = submitting && isActive;
-    const actionLabel =
-      orderKind === "LIMIT" ? "Pending limit order" : "Market execution";
+    return (
+      <button
+        type="button"
+        role="radio"
+        aria-checked={isActive}
+        disabled={submitting}
+        onClick={() => setSide(value)}
+        className={cx(
+          "h-[42px] rounded-lg text-sm font-bold transition disabled:pointer-events-none disabled:opacity-60",
+          isActive ? activeClassName : "text-slate-600 hover:bg-white/70",
+        )}
+      >
+        {label}
+      </button>
+    );
+  }
+
+  function SideSelector() {
+    return (
+      <div
+        role="radiogroup"
+        aria-label="Order direction"
+        className="grid grid-cols-2 gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1"
+      >
+        <SideButton
+          value="BUY"
+          label="BUY"
+          activeClassName="bg-emerald-600 text-white shadow-sm"
+        />
+        <SideButton
+          value="SELL"
+          label="SELL"
+          activeClassName="bg-rose-600 text-white shadow-sm"
+        />
+      </div>
+    );
+  }
+
+  function SectionHeader({ title, tags, checked, onChange }) {
+    return (
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1.5">
+          <h4 className="font-black text-slate-950">{title}</h4>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {tags.map(([tone, label]) => (
+              <SectionTag key={label} tone={tone}>
+                {label}
+              </SectionTag>
+            ))}
+          </div>
+        </div>
+        <InlineSwitcher compact checked={checked} onChange={onChange} />
+      </div>
+    );
+  }
+
+  // Option groups live behind tabs so the panel's core controls and the open
+  // button stay put instead of scrolling out of reach.
+  function PanelTab({ id, label, enabled }) {
+    const selected = panelTab === id;
+    return (
+      <button
+        type="button"
+        role="tab"
+        aria-selected={selected}
+        onClick={() => setPanelTab(id)}
+        className={cx(
+          "relative h-[34px] rounded-lg px-2 text-xs font-bold transition",
+          selected
+            ? "bg-white text-slate-950 shadow-sm"
+            : "text-slate-600 hover:bg-white/70",
+        )}
+      >
+        {label}
+        {enabled ? (
+          <span
+            className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-emerald-500"
+            aria-hidden="true"
+          />
+        ) : null}
+      </button>
+    );
+  }
+
+  function OpenButton({ label, busy, onClick }) {
     return (
       <button
         type="button"
         disabled={submitting}
-        onClick={() => {
-          setSide(value);
-          openPosition(value);
-        }}
-        className={cx(
-          "flex min-h-[64px] w-full flex-col items-center justify-center rounded-2xl border px-4 py-2 text-sm font-bold transition",
-          isActive ? activeClassName : idleClassName,
-        )}
+        onClick={onClick}
+        className="flex min-h-[52px] w-full items-center justify-center rounded-2xl border border-slate-950 bg-slate-950 px-4 text-[15px] font-bold text-white shadow-lg shadow-slate-950/20 transition hover:bg-slate-800 disabled:pointer-events-none disabled:opacity-60"
       >
-        <span className="text-[15px] leading-none">
-          {busy ? `OPENING ${label}...` : `OPEN ${label}`}
-        </span>
-        <span
-          className={cx(
-            "mt-1 text-[11px] font-semibold tracking-wide",
-            isActive ? "text-white/85" : "text-slate-600",
-          )}
-        >
-          {actionLabel}
-        </span>
+        {busy ? `${label}...` : label}
       </button>
     );
   }
@@ -401,10 +671,79 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     }
   }
 
+  async function fetchM1Candle() {
+    const data = await api.chartData({
+      symbol: "XAUUSD",
+      timeframe: "M1",
+      count: 20,
+    });
+    const candles = Array.isArray(data?.candles) ? data.candles : [];
+    const latest = candles[candles.length - 1];
+    const open = Number(latest?.open);
+    const time = Number(latest?.time);
+    if (!Number.isFinite(open) || open <= 0 || !Number.isFinite(time)) {
+      throw new Error(
+        "Could not read the current 1 minute candle for XAUUSD.",
+      );
+    }
+    return { time, open };
+  }
+
+  async function refreshM1Candle() {
+    try {
+      const candle = await fetchM1Candle();
+      setM1Candle(candle);
+      return candle;
+    } catch {
+      // Keep the panel usable; the armed poll simply retries on its next tick.
+      return null;
+    }
+  }
+
   useEffect(() => {
     loadPositions();
     loadLimitOrders();
   }, []);
+
+  useEffect(() => {
+    if (!searchEnabled) {
+      setSearchArmed(false);
+      return undefined;
+    }
+    refreshM1Candle();
+    const timer = window.setInterval(refreshM1Candle, 5000);
+    return () => window.clearInterval(timer);
+  }, [searchEnabled]);
+
+  // While armed, poll every second so the order lands right on the new candle.
+  useEffect(() => {
+    if (!searchArmed) return undefined;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      if (cancelled || submittingRef.current) return;
+      const candle = await refreshM1Candle();
+      if (cancelled || !candle) return;
+      if (armedFromRef.current == null || candle.time <= armedFromRef.current)
+        return;
+      setSearchArmed(false);
+      armedFromRef.current = null;
+      // Read through the ref: the order must use the TP/SL/side in the form at
+      // fire time, not whatever was set when the search was armed.
+      placeSearchOrderRef.current?.(candle.open);
+    }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [searchArmed]);
+
+  // Drives the countdown shown on the Open button while a search is armed.
+  useEffect(() => {
+    if (!searchArmed) return undefined;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [searchArmed]);
 
   async function refreshTradeData() {
     if (refreshing) return;
@@ -413,6 +752,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       await onRefreshRuntime?.({ silent: true });
       await loadPositions({ silent: true });
       await loadLimitOrders({ silent: true });
+      if (searchEnabled) await refreshM1Candle();
     } finally {
       setRefreshing(false);
     }
@@ -425,25 +765,38 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     return dt.toLocaleString();
   }
 
-  async function openPosition(orderSide) {
+  // `prepare` runs inside the double-submit guard so an async entry lookup (the
+  // search button reading the M1 candle) cannot be raced by a second click.
+  async function openPosition(orderSide, options = {}) {
+    const { prepare = null } = options;
     if (submittingRef.current) return;
-    if (autoCloseEnabled && !autoCloseAt) {
-      setErrorText("Choose an end time for auto close.");
-      return;
-    }
-    if (multiTp && Number(slPrice || 0) <= 0) {
-      setErrorText(
-        "Enter a Stop Loss Price for Advanced Risk / Multi-TP orders.",
-      );
-      return;
-    }
     submittingRef.current = true;
     setSubmitting(true);
     try {
+      let kind = orderKind;
+      let entryPrice = limitPrice;
+      if (prepare) {
+        const prepared = await prepare();
+        kind = prepared?.orderKind ?? kind;
+        entryPrice = prepared?.limitPrice ?? entryPrice;
+      }
+      if (autoCloseEnabled && !autoCloseAt) {
+        throw new Error("Choose an end time for auto close.");
+      }
+      if (multiTp && Number(slPrice || 0) <= 0) {
+        throw new Error(
+          "Enter a Stop Loss Price for Advanced Risk / Multi-TP orders.",
+        );
+      }
+      if (kind === "LIMIT" && !(Number(entryPrice || 0) > 0)) {
+        throw new Error(
+          "Enter a limit entry price before opening a pending order.",
+        );
+      }
       const orderPayload = {
         side: orderSide,
-        order_kind: orderKind,
-        limit_price: orderKind === "LIMIT" ? Number(limitPrice || 0) : null,
+        order_kind: kind,
+        limit_price: kind === "LIMIT" ? Number(entryPrice || 0) : null,
         tp: Number(tp || 0),
         sl: Number(sl || 0),
         spread_pips: Number(spreadPips || 0),
@@ -475,6 +828,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           );
         }
       }
+      if (kind === "LIMIT") setSearchEnabled(false);
       await onRefreshRuntime?.();
       await loadPositions({ silent: true });
       await loadLimitOrders({ silent: true });
@@ -485,6 +839,74 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       submittingRef.current = false;
       setSubmitting(false);
     }
+  }
+
+  // Pending limit order priced off the open of the candle that has just started,
+  // offset by the search pips amount.
+  function openPositionWithSearch(candleOpen) {
+    return openPosition(side, {
+      prepare: async () => {
+        const price = searchLimitPriceFrom(candleOpen, side, searchPipsValue);
+        if (!(price > 0)) {
+          throw new Error(
+            `Search offset of ${searchPipsValue} pips gives an invalid limit price (${price}).`,
+          );
+        }
+        setOrderKind("LIMIT");
+        setLimitPrice(String(price));
+        return { orderKind: "LIMIT", limitPrice: price };
+      },
+    });
+  }
+
+  // Pressing Open under search does not send anything yet: it waits for the
+  // next M1 candle to start and prices the order off that candle's open.
+  placeSearchOrderRef.current = openPositionWithSearch;
+
+  async function armSearch() {
+    if (searchArmed) {
+      setSearchArmed(false);
+      return;
+    }
+    setErrorText("");
+    const candle = m1Candle ?? (await refreshM1Candle());
+    if (!candle) {
+      setErrorText(
+        "Could not read the current 1 minute candle for XAUUSD, so the search cannot start.",
+      );
+      return;
+    }
+    armedFromRef.current = candle.time;
+    setSearchArmed(true);
+  }
+
+  // Width is written straight to the CSS variable while dragging so the whole
+  // panel does not re-render on every pointer move; state is committed on drop.
+  function startPanelResize(event) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = panelWidth;
+    let nextWidth = startWidth;
+
+    function onMove(moveEvent) {
+      nextWidth = clampPanelWidth(startWidth + (startX - moveEvent.clientX));
+      layoutRef.current?.style.setProperty(
+        "--trade-panel-width",
+        `${nextWidth}px`,
+      );
+    }
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.removeProperty("user-select");
+      document.body.style.removeProperty("cursor");
+      setPanelWidth(nextWidth);
+    }
+
+    document.body.style.setProperty("user-select", "none");
+    document.body.style.setProperty("cursor", "col-resize");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   }
 
   async function closePositions() {
@@ -525,7 +947,11 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           {errorText}
         </div>
       ) : null}
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.65fr)_360px]">
+      <div
+        ref={layoutRef}
+        className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_6px_var(--trade-panel-width)]"
+        style={{ "--trade-panel-width": `${panelWidth}px` }}
+      >
         <div className="flex h-[calc(100vh-180px)] flex-col gap-4">
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-1">
@@ -737,18 +1163,25 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             )}
           </div>
         </div>
-        <div className="flex h-[calc(100vh-180px)] flex-col">
-          <Card className="flex h-full flex-col">
-            <h3 className="shrink-0 text-lg font-black text-slate-950">
-              Manual Trade
-            </h3>
-            <div className="mt-4 flex-1 space-y-3 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize trade panel"
+          title="Drag to resize · double-click to reset"
+          onPointerDown={startPanelResize}
+          onDoubleClick={() => setPanelWidth(PANEL_DEFAULT_WIDTH)}
+          className="hidden cursor-col-resize rounded-full bg-slate-200 transition hover:bg-blue-400 xl:block"
+        />
+        <div className="flex h-[calc(100vh-180px)] min-w-0 flex-col">
+          <Card className="flex h-full flex-col pt-3">
+            <div className="shrink-0 space-y-3">
+              <SideSelector />
               <div className="grid gap-3 md:grid-cols-2">
-                <SelectBox
+                <IconSelect
                   label="Order Type"
                   value={orderKind}
-                  options={["MARKET", "LIMIT"]}
-                  onChange={(e) => setOrderKind(e.target.value)}
+                  options={ORDER_KIND_OPTIONS}
+                  onChange={setOrderKind}
                 />
                 <Field
                   label={
@@ -767,20 +1200,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                       : undefined
                   }
                   disabled={orderKind !== "LIMIT"}
-                />
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                <SideButton
-                  value="BUY"
-                  label="BUY"
-                  activeClassName="border-emerald-600 bg-emerald-600 text-white shadow-lg shadow-emerald-600/20"
-                  idleClassName="border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                />
-                <SideButton
-                  value="SELL"
-                  label="SELL"
-                  activeClassName="border-rose-600 bg-rose-600 text-white shadow-lg shadow-rose-600/20"
-                  idleClassName="border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
                 />
               </div>
               <div className="grid gap-3 md:grid-cols-3">
@@ -802,138 +1221,207 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                   onChange={(e) => setSpreadPips(decimalInput(e.target.value))}
                 />
               </div>
-              <div className="space-y-3 rounded-[8px] border border-slate-200 bg-slate-50 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <h4 className="font-black text-slate-950">
-                    Auto Close All Positions
-                  </h4>
-                  <InlineSwitcher
-                    compact
+            </div>
+            <div
+              role="tablist"
+              aria-label="Trade options"
+              className="mt-4 grid shrink-0 grid-cols-3 gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1"
+            >
+              <PanelTab id="search" label="Search" enabled={searchEnabled} />
+              <PanelTab
+                id="autoclose"
+                label="Auto Close"
+                enabled={autoCloseEnabled}
+              />
+              <PanelTab id="advanced" label="Multi-TP" enabled={multiTp} />
+            </div>
+            <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
+              {panelTab === "search" ? (
+                <div className="space-y-3">
+                  <SectionHeader
+                    title="Open With Search"
+                    tags={[["blue", "Pending limit order"]]}
+                    checked={searchEnabled}
+                    onChange={setSearchEnabled}
+                  />
+                  <p className="text-xs font-semibold text-slate-600">
+                    Always places a pending LIMIT order priced off the 1 minute
+                    candle open.
+                  </p>
+                  {searchEnabled ? (
+                    <Field
+                      label="Limit Offset (Pips)"
+                      value={searchPips}
+                      inputMode="decimal"
+                      onChange={(e) =>
+                        setSearchPips(signedDecimalInput(e.target.value))
+                      }
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+              {panelTab === "autoclose" ? (
+                <div className="space-y-3">
+                  <SectionHeader
+                    title="Auto Close All Positions"
+                    tags={[["amber", "Closes every position opened"]]}
                     checked={autoCloseEnabled}
                     onChange={setAutoCloseEnabled}
                   />
+                  <p className="text-xs font-semibold text-slate-600">
+                    Closes every open position on the master and linked accounts
+                    at the end time you set.
+                  </p>
+                  {autoCloseEnabled ? (
+                    <>
+                      <Field
+                        label="End Time"
+                        value={autoCloseAt}
+                        type="datetime-local"
+                        onChange={(e) => setAutoCloseAt(e.target.value)}
+                      />
+                      {scheduledAutoCloseAt ? (
+                        <p className="text-xs font-semibold text-slate-600">
+                          Scheduled auto close:{" "}
+                          {fmtDateTime(scheduledAutoCloseAt)}
+                        </p>
+                      ) : null}
+                    </>
+                  ) : null}
                 </div>
-                {autoCloseEnabled ? (
-                  <>
-                    <Field
-                      label="End Time"
-                      value={autoCloseAt}
-                      type="datetime-local"
-                      onChange={(e) => setAutoCloseAt(e.target.value)}
-                    />
-                    {scheduledAutoCloseAt ? (
-                      <p className="text-xs font-semibold text-slate-600">
-                        Scheduled auto close:{" "}
-                        {fmtDateTime(scheduledAutoCloseAt)}
-                      </p>
-                    ) : null}
-                  </>
-                ) : null}
-              </div>
-              <div className="space-y-3 rounded-[8px] border border-slate-200 bg-slate-50 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <h4 className="font-black text-slate-950">
-                    Advanced Risk / Multi-TP
-                  </h4>
-                  <InlineSwitcher
-                    compact
+              ) : null}
+              {panelTab === "advanced" ? (
+                <div className="space-y-3">
+                  <SectionHeader
+                    title="Advanced Risk / Multi-TP"
+                    tags={[["blue", "Up to 3 take profits targets"]]}
                     checked={multiTp}
                     onChange={setMultiTp}
                   />
-                </div>
-                {multiTp ? (
-                  <>
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <Field
-                        label="Stop Loss Price"
-                        value={slPrice}
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        inputMode="decimal"
-                        onChange={(e) =>
-                          setSlPrice(decimalInput(e.target.value))
-                        }
-                      />
-                      <div>
-                        <span className="block text-xs font-black uppercase tracking-wide text-slate-500">
-                          Total Ratio
-                        </span>
-                        <div className="mt-1.5 flex h-[46px] items-center rounded-xl border border-slate-200 bg-slate-100 px-4 text-sm font-black text-slate-700">
-                          {totalRatio.toFixed(1)}
+                  <p className="text-xs font-semibold text-slate-600">
+                    Takes the stop from a price instead of pips and exits in up
+                    to three stages, each at its own risk ratio and share of the
+                    remaining volume.
+                  </p>
+                  {multiTp ? (
+                    <>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <Field
+                          label="Stop Loss Price"
+                          value={slPrice}
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          inputMode="decimal"
+                          onChange={(e) =>
+                            setSlPrice(decimalInput(e.target.value))
+                          }
+                        />
+                        <div>
+                          <span className="block text-xs font-black uppercase tracking-wide text-slate-500">
+                            Total Ratio
+                          </span>
+                          <div className="mt-1.5 flex h-[46px] items-center rounded-xl border border-slate-200 bg-slate-100 px-4 text-sm font-black text-slate-700">
+                            {totalRatio.toFixed(1)}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <Field
-                        label="TP1 Ratio"
-                        value={tp1Ratio}
-                        type="number"
-                        min="0.1"
-                        step="0.1"
-                        onChange={(e) =>
-                          setTp1Ratio(decimalInput(e.target.value))
-                        }
-                      />
-                      <Field
-                        label="TP1 %"
-                        value={tp1Percent}
-                        type="number"
-                        min="1"
-                        max="100"
-                        onChange={(e) => setTp1Percent(e.target.value)}
-                        disabled={!tp2Enabled}
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <Field
-                        label="TP2 Ratio"
-                        labelExtra={
-                          <MiniToggle
-                            checked={tp2Enabled}
-                            onChange={setTp2Enabled}
-                          />
-                        }
-                        value={tp2Ratio}
-                        type="number"
-                        min="0.1"
-                        step="0.1"
-                        onChange={(e) =>
-                          setTp2Ratio(decimalInput(e.target.value))
-                        }
-                        disabled={!tp2Enabled}
-                      />
-                      <Field
-                        label="TP2 %"
-                        value={tp2Percent}
-                        type="number"
-                        min="1"
-                        max="100"
-                        onChange={(e) => setTp2Percent(e.target.value)}
-                        disabled={!tp2Enabled || !tp3Enabled}
-                      />
-                    </div>
-                    <Field
-                      label="TP3 Ratio"
-                      labelExtra={
-                        <MiniToggle
-                          checked={tp3Enabled}
-                          onChange={setTp3Enabled}
+                      <div className="grid grid-cols-2 gap-3">
+                        <Field
+                          label="TP1 Ratio"
+                          value={tp1Ratio}
+                          type="number"
+                          min="0.1"
+                          step="0.1"
+                          onChange={(e) =>
+                            setTp1Ratio(decimalInput(e.target.value))
+                          }
+                        />
+                        <Field
+                          label="TP1 %"
+                          value={tp1Percent}
+                          type="number"
+                          min="1"
+                          max="100"
+                          onChange={(e) => setTp1Percent(e.target.value)}
                           disabled={!tp2Enabled}
                         />
-                      }
-                      value={tp3Ratio}
-                      type="number"
-                      min="0.1"
-                      step="0.1"
-                      onChange={(e) =>
-                        setTp3Ratio(decimalInput(e.target.value))
-                      }
-                      disabled={!tp3Enabled}
-                    />
-                  </>
-                ) : null}
-              </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <Field
+                          label="TP2 Ratio"
+                          labelExtra={
+                            <MiniToggle
+                              checked={tp2Enabled}
+                              onChange={setTp2Enabled}
+                            />
+                          }
+                          value={tp2Ratio}
+                          type="number"
+                          min="0.1"
+                          step="0.1"
+                          onChange={(e) =>
+                            setTp2Ratio(decimalInput(e.target.value))
+                          }
+                          disabled={!tp2Enabled}
+                        />
+                        <Field
+                          label="TP2 %"
+                          value={tp2Percent}
+                          type="number"
+                          min="1"
+                          max="100"
+                          onChange={(e) => setTp2Percent(e.target.value)}
+                          disabled={!tp2Enabled || !tp3Enabled}
+                        />
+                      </div>
+                      <Field
+                        label="TP3 Ratio"
+                        labelExtra={
+                          <MiniToggle
+                            checked={tp3Enabled}
+                            onChange={setTp3Enabled}
+                            disabled={!tp2Enabled}
+                          />
+                        }
+                        value={tp3Ratio}
+                        type="number"
+                        min="0.1"
+                        step="0.1"
+                        onChange={(e) =>
+                          setTp3Ratio(decimalInput(e.target.value))
+                        }
+                        disabled={!tp3Enabled}
+                      />
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+            <div className="mt-3 shrink-0 border-t border-slate-200 pt-3">
+              <p className="mb-2 text-center text-[13px] font-semibold text-blue-600">
+                {searchEnabled
+                  ? `Search: ${side} limit at next M1 open ${searchOffsetLabel}`
+                  : orderKind === "LIMIT"
+                    ? `${side} limit @ ${limitPrice || "-"}`
+                    : `${side} market execution`}
+              </p>
+              <OpenButton
+                label={
+                  searchArmed
+                    ? `WAITING · ${formatCountdown(secondsToNextCandle)}`
+                    : "OPEN"
+                }
+                busy={submitting}
+                onClick={() =>
+                  searchEnabled ? armSearch() : openPosition(side)
+                }
+              />
+              {searchArmed ? (
+                <p className="mt-2 text-center text-xs font-semibold text-slate-600">
+                  Sends on the next 1 minute candle open. Press again to cancel.
+                </p>
+              ) : null}
             </div>
           </Card>
         </div>

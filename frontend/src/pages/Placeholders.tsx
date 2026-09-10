@@ -347,6 +347,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           spreadPips,
           searchPips,
           searchEnabled,
+          searchArmed,
           multiTp,
           slPrice,
           tp1Ratio,
@@ -376,6 +377,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     spreadPips,
     searchPips,
     searchEnabled,
+    searchArmed,
     multiTp,
     slPrice,
     tp1Ratio,
@@ -406,6 +408,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             spreadPips,
             searchPips,
             searchEnabled,
+            searchArmed,
             multiTp,
             slPrice,
             tp1Ratio,
@@ -444,6 +447,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     spreadPips,
     searchPips,
     searchEnabled,
+    searchArmed,
     multiTp,
     slPrice,
     tp1Ratio,
@@ -715,6 +719,13 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     return () => window.clearInterval(timer);
   }, [searchEnabled]);
 
+  // TradePage unmounts on navigation, so a running countdown would be lost.
+  // Re-arm from the candle that is current now: the search stays live instead of
+  // resetting, without firing on a trigger that already passed while away.
+  useEffect(() => {
+    if (savedTradeForm.searchEnabled && savedTradeForm.searchArmed) armSearch();
+  }, []);
+
   // While armed, poll every second so the order lands right on the new candle.
   useEffect(() => {
     if (!searchArmed) return undefined;
@@ -768,7 +779,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   // `prepare` runs inside the double-submit guard so an async entry lookup (the
   // search button reading the M1 candle) cannot be raced by a second click.
   async function openPosition(orderSide, options = {}) {
-    const { prepare = null } = options;
+    const { prepare = null, fromSearch = false } = options;
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -828,7 +839,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           );
         }
       }
-      if (kind === "LIMIT") setSearchEnabled(false);
+      if (kind === "LIMIT" || fromSearch) setSearchEnabled(false);
       await onRefreshRuntime?.();
       await loadPositions({ silent: true });
       await loadLimitOrders({ silent: true });
@@ -841,10 +852,15 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     }
   }
 
-  // Pending limit order priced off the open of the candle that has just started,
-  // offset by the search pips amount.
+  // Fired when a new candle starts. Order Type decides what gets sent: MARKET
+  // executes on the spot, LIMIT rests at that candle's open plus the offset.
   function openPositionWithSearch(candleOpen) {
+    if (orderKind !== "LIMIT") {
+      // The candle open is only the trigger here; the fill comes off the tick.
+      return openPosition(side, { fromSearch: true });
+    }
     return openPosition(side, {
+      fromSearch: true,
       prepare: async () => {
         const price = searchLimitPriceFrom(candleOpen, side, searchPipsValue);
         if (!(price > 0)) {
@@ -852,7 +868,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             `Search offset of ${searchPipsValue} pips gives an invalid limit price (${price}).`,
           );
         }
-        setOrderKind("LIMIT");
         setLimitPrice(String(price));
         return { orderKind: "LIMIT", limitPrice: price };
       },
@@ -869,7 +884,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       return;
     }
     setErrorText("");
-    const candle = m1Candle ?? (await refreshM1Candle());
+    // Must be a fresh read: a cached candle from before the last fire would
+    // already be older than the live one and trigger immediately.
+    const candle = await refreshM1Candle();
     if (!candle) {
       setErrorText(
         "Could not read the current 1 minute candle for XAUUSD, so the search cannot start.",
@@ -1240,15 +1257,19 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                 <div className="space-y-3">
                   <SectionHeader
                     title="Open With Search"
-                    tags={[["blue", "Pending limit order"]]}
+                    tags={[
+                      ["blue", "Fires at candle open"],
+                      ["slate", "Follows Order Type"],
+                    ]}
                     checked={searchEnabled}
                     onChange={setSearchEnabled}
                   />
                   <p className="text-xs font-semibold text-slate-600">
-                    Always places a pending LIMIT order priced off the 1 minute
-                    candle open.
+                    Waits for the next 1 minute candle to open, then sends the
+                    order: at market with Order Type MARKET, or as a pending
+                    limit priced off that candle's open with LIMIT.
                   </p>
-                  {searchEnabled ? (
+                  {searchEnabled && orderKind === "LIMIT" ? (
                     <Field
                       label="Limit Offset (Pips)"
                       value={searchPips}
@@ -1401,7 +1422,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             <div className="mt-3 shrink-0 border-t border-slate-200 pt-3">
               <p className="mb-2 text-center text-[13px] font-semibold text-blue-600">
                 {searchEnabled
-                  ? `Search: ${side} limit at next M1 open ${searchOffsetLabel}`
+                  ? orderKind === "LIMIT"
+                    ? `Search: ${side} limit at next M1 open ${searchOffsetLabel}`
+                    : `Search: ${side} market at next M1 open`
                   : orderKind === "LIMIT"
                     ? `${side} limit @ ${limitPrice || "-"}`
                     : `${side} market execution`}

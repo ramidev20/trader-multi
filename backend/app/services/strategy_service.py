@@ -16,6 +16,7 @@ from .env_utils import is_dev_mode
 from .mt5_lock import MT5_LOCK
 from .path_utils import resolve_terminal_path, sanitize_terminal_path
 from .runtime_state import append_list, append_log, get, patch_path, replace_list, set_path
+from .session_service import list_sessions
 from .task_manager import emit_log, is_task_running, start_task, stop_task
 
 SYMBOL_DEFAULT = "XAUUSD"
@@ -1053,8 +1054,25 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
     master = _resolve_master_account(cfg)
     require_ticket_match = mt5_available() and bool(accounts)
     pending_closed_tickets: set[int] = set()
+    # Only touch accounts that are already connected. Initializing MT5 for a
+    # disconnected account launches its terminal, which is why closing used to
+    # bring up windows for accounts nobody had connected on the Dashboard.
+    connected_logins: set[int] = set()
     if mt5_available() and accounts:
-        for account in accounts:
+        connected_logins = {
+            _safe_int(session.get("login"))
+            for session in list_sessions(accounts)
+            if str(session.get("state", "")).lower() == "connected"
+        }
+        target_accounts = [
+            account for account in accounts
+            if _safe_int(account.get("user")) in connected_logins
+        ]
+        if not target_accounts:
+            message = "No connected accounts; connect one from Dashboard before closing positions."
+            errors.append(message)
+            append_log("search", f"[WARNING] {message}")
+        for account in target_accounts:
             login = _safe_int(account.get("user"))
             if login <= 0:
                 continue
@@ -1112,7 +1130,7 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
                             append_log("search", f"[ERROR] {message}")
             finally:
                 pass
-        if master:
+        if master and _safe_int(master.get("user")) in connected_logins:
             restore_ok, restore_detail = _initialize_mt5_for_account(master)
             if not restore_ok:
                 errors.append(f"master restore failed: {restore_detail}")

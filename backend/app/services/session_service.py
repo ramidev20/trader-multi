@@ -70,6 +70,9 @@ def submit_adapter_command(login: int, action: str, payload: dict[str, Any], tim
     temp_path.replace(request_path)
 
     deadline = time.monotonic() + max(1.0, float(timeout_sec))
+    # Poll the result file hard (a bare stat) but keep the liveness probe, which
+    # reads and parses a status file, at its old rate.
+    checks = 0
     while time.monotonic() < deadline:
         if result_path.exists():
             try:
@@ -78,9 +81,10 @@ def submit_adapter_command(login: int, action: str, payload: dict[str, Any], tim
                     return result
             finally:
                 result_path.unlink(missing_ok=True)
-        if not _has_active_adapter(login):
+        checks += 1
+        if checks % 5 == 0 and not _has_active_adapter(login):
             break
-        time.sleep(0.05)
+        time.sleep(0.01)
 
     request_path.unlink(missing_ok=True)
     return {"status": "error", "message": "The MT5 adapter did not return a command result in time."}

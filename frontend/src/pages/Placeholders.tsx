@@ -730,34 +730,62 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     if (savedTradeForm.searchEnabled && savedTradeForm.searchArmed) armSearch();
   }, []);
 
-  // While armed, poll every second so the order lands right on the new candle.
+  // Sleep until the boundary rather than polling for it: a 1s poll fired the
+  // order up to a second late, and a MARKET search needs no data to go.
   useEffect(() => {
     if (!searchArmed) return undefined;
     let cancelled = false;
-    const timer = window.setInterval(async () => {
-      if (cancelled || submittingRef.current) return;
-      if (armedMinuteRef.current == null) return;
-      // The minute the search was armed in has to be over.
-      if (Math.floor(Date.now() / 60000) <= armedMinuteRef.current) return;
-      let candleOpen = null;
-      if (armedCandleRef.current != null) {
-        // LIMIT: hold until the broker actually publishes the new bar, so the
-        // price is that bar's open and not the previous one's.
-        const candle = await refreshM1Candle();
-        if (cancelled || !candle || candle.time <= armedCandleRef.current)
-          return;
-        candleOpen = candle.open;
-      }
+    let timer = null;
+    let barWaitDeadline = 0;
+
+    function send(candleOpen) {
       setSearchArmed(false);
       armedMinuteRef.current = null;
       armedCandleRef.current = null;
       // Read through the ref: the order must use the TP/SL/side in the form at
       // fire time, not whatever was set when the search was armed.
       placeSearchOrderRef.current?.(candleOpen);
-    }, 1000);
+    }
+
+    async function fire() {
+      if (cancelled || submittingRef.current) return;
+      // Timers can wake a hair early; make sure the minute really has rolled.
+      if (
+        armedMinuteRef.current != null &&
+        Math.floor(Date.now() / 60000) <= armedMinuteRef.current
+      ) {
+        timer = window.setTimeout(fire, 15);
+        return;
+      }
+      if (armedCandleRef.current == null) {
+        send(null);
+        return;
+      }
+      // LIMIT: the new bar's open is the price, so wait for the broker to
+      // publish it -- but retry fast instead of on a one-second beat.
+      if (!barWaitDeadline) barWaitDeadline = Date.now() + 5000;
+      const candle = await refreshM1Candle();
+      if (cancelled) return;
+      if (candle && candle.time > armedCandleRef.current) {
+        send(candle.open);
+        return;
+      }
+      if (Date.now() >= barWaitDeadline) {
+        setSearchArmed(false);
+        armedMinuteRef.current = null;
+        armedCandleRef.current = null;
+        setErrorText(
+          "The new 1 minute candle did not arrive in time, so no limit order was sent.",
+        );
+        return;
+      }
+      timer = window.setTimeout(fire, 100);
+    }
+
+    timer = window.setTimeout(fire, 60000 - (Date.now() % 60000));
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer) window.clearTimeout(timer);
     };
   }, [searchArmed]);
 
@@ -792,10 +820,11 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   // `prepare` runs inside the double-submit guard so an async entry lookup (the
   // search button reading the M1 candle) cannot be raced by a second click.
   async function openPosition(orderSide, options = {}) {
-    const { prepare = null, fromSearch = false } = options;
+    const { prepare = null } = options;
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
+    let placed = false;
     try {
       let kind = orderKind;
       let entryPrice = limitPrice;
@@ -842,6 +871,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         symbol: "XAUUSD",
       };
       await api.openPosition(orderPayload);
+      // Local order is live from here on; a receiver failure below must still
+      // refresh the tables, it just also reports the mirroring error.
+      placed = true;
       if (isRemoteConnected()) {
         const { risk_percent, riskPercent, ...receiverPayload } = orderPayload;
         const { results } = await sendRemoteCommand("open", receiverPayload);
@@ -852,16 +884,22 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           );
         }
       }
-      if (kind === "LIMIT" || fromSearch) setSearchEnabled(false);
-      await onRefreshRuntime?.();
-      await loadPositions({ silent: true });
-      await loadLimitOrders({ silent: true });
       setErrorText("");
     } catch (error) {
       setErrorText(String(error?.message || error));
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
+      if (placed) {
+        // The order already exists at this point, so refresh in the background
+        // and in parallel instead of holding the panel disabled through three
+        // more round trips -- each of which queues behind the adapter anyway.
+        void Promise.allSettled([
+          onRefreshRuntime?.(),
+          loadPositions({ silent: true }),
+          loadLimitOrders({ silent: true }),
+        ]);
+      }
     }
   }
 
@@ -870,10 +908,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   function openPositionWithSearch(candleOpen) {
     if (orderKind !== "LIMIT") {
       // The candle open is only the trigger here; the fill comes off the tick.
-      return openPosition(side, { fromSearch: true });
+      return openPosition(side);
     }
     return openPosition(side, {
-      fromSearch: true,
       prepare: async () => {
         const price = searchLimitPriceFrom(candleOpen, side, searchPipsValue);
         if (!(price > 0)) {

@@ -455,9 +455,12 @@ def main() -> None:
                     },
                 )
             # Keep account status on a two-second cadence while serving chart and
-            # trade commands promptly from the adapter-owned MT5 session.
-            for _ in range(20):
-                time.sleep(0.1)
+            # trade commands promptly from the adapter-owned MT5 session. The
+            # command scan is a cheap directory glob, so polling it at 50Hz
+            # instead of 10Hz cuts up to 80ms of dead time off every hop --
+            # which a manual open pays three times over (master + each sub).
+            for _ in range(100):
+                time.sleep(0.02)
                 process_pending_commands(args.login)
     except KeyboardInterrupt:
         pass

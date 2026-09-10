@@ -265,9 +265,13 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   // and to every remote receiver). A ref is read/written immediately, so it
   // closes that gap regardless of render timing.
   const submittingRef = useRef(false);
-  // Timestamp of the candle that was current when the search was armed; the
-  // order fires on the first candle newer than this one.
-  const armedFromRef = useRef(null);
+  // Minute index the search was armed in. The trigger is the wall clock, the
+  // same source the countdown uses, so the two can never disagree -- and it does
+  // not depend on how the backend stamps candle times.
+  const armedMinuteRef = useRef(null);
+  // Candle time at arm, used only by LIMIT so the price comes off the real new
+  // bar rather than the one that was current when the search was armed.
+  const armedCandleRef = useRef(null);
   const placeSearchOrderRef = useRef(null);
   const [refreshing, setRefreshing] = useState(false);
   const [positions, setPositions] = useState([]);
@@ -732,15 +736,24 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     let cancelled = false;
     const timer = window.setInterval(async () => {
       if (cancelled || submittingRef.current) return;
-      const candle = await refreshM1Candle();
-      if (cancelled || !candle) return;
-      if (armedFromRef.current == null || candle.time <= armedFromRef.current)
-        return;
+      if (armedMinuteRef.current == null) return;
+      // The minute the search was armed in has to be over.
+      if (Math.floor(Date.now() / 60000) <= armedMinuteRef.current) return;
+      let candleOpen = null;
+      if (armedCandleRef.current != null) {
+        // LIMIT: hold until the broker actually publishes the new bar, so the
+        // price is that bar's open and not the previous one's.
+        const candle = await refreshM1Candle();
+        if (cancelled || !candle || candle.time <= armedCandleRef.current)
+          return;
+        candleOpen = candle.open;
+      }
       setSearchArmed(false);
-      armedFromRef.current = null;
+      armedMinuteRef.current = null;
+      armedCandleRef.current = null;
       // Read through the ref: the order must use the TP/SL/side in the form at
       // fire time, not whatever was set when the search was armed.
-      placeSearchOrderRef.current?.(candle.open);
+      placeSearchOrderRef.current?.(candleOpen);
     }, 1000);
     return () => {
       cancelled = true;
@@ -884,16 +897,22 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       return;
     }
     setErrorText("");
-    // Must be a fresh read: a cached candle from before the last fire would
-    // already be older than the live one and trigger immediately.
-    const candle = await refreshM1Candle();
-    if (!candle) {
-      setErrorText(
-        "Could not read the current 1 minute candle for XAUUSD, so the search cannot start.",
-      );
-      return;
+    if (orderKind === "LIMIT") {
+      // Must be a fresh read: a cached candle from before the last fire is
+      // already older than the live one and would trigger immediately.
+      const candle = await refreshM1Candle();
+      if (!candle) {
+        setErrorText(
+          "Could not read the current 1 minute candle for XAUUSD, so the search cannot start.",
+        );
+        return;
+      }
+      armedCandleRef.current = candle.time;
+    } else {
+      // A market order needs no candle data at all, only the boundary.
+      armedCandleRef.current = null;
     }
-    armedFromRef.current = candle.time;
+    armedMinuteRef.current = Math.floor(Date.now() / 60000);
     setSearchArmed(true);
   }
 

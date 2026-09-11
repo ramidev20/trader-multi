@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  ArrowDown,
   Check,
   CheckCircle2,
   CircleOff,
@@ -13,6 +14,7 @@ import {
   RadioTower,
   RefreshCw,
   Save,
+  Search,
   ShieldCheck,
   Trash2,
   Wifi,
@@ -21,6 +23,7 @@ import {
 import { LogList } from "../components/ui/LogList";
 import { api } from "../services/api";
 import {
+  clearRemoteLogs,
   connectReceiver,
   disconnectReceiver,
   removeReceiver,
@@ -36,7 +39,27 @@ const LEGACY_CONTROLLER_SETTINGS_KEY = "trader.remoteControl.controllerSettings"
 
 type RemoteRole = "receiver" | "controller";
 type RemoteTab = "settings" | "logs";
-type RemoteLogEntry = { id: string; level: "info" | "success" | "warning" | "error"; message: string; at: string };
+type RemoteLogEntry = {
+  id: string;
+  level: "info" | "success" | "warning" | "error";
+  message: string;
+  at: string;
+  atMs?: number;
+  receiver?: string | null;
+};
+const LOG_LEVELS = ["error", "warning", "success", "info"] as const;
+const LOG_LEVEL_LABEL: Record<(typeof LOG_LEVELS)[number], string> = {
+  error: "Error",
+  warning: "Warning",
+  success: "Success",
+  info: "Info",
+};
+const LOG_LEVEL_CHIP_ACTIVE: Record<(typeof LOG_LEVELS)[number], string> = {
+  error: "border-rose-500 bg-rose-500 text-white",
+  warning: "border-amber-500 bg-amber-500 text-white",
+  success: "border-teal-500 bg-teal-500 text-white",
+  info: "border-slate-500 bg-slate-500 text-white",
+};
 type ReceiverRecord = {
   id: string;
   label: string;
@@ -147,16 +170,209 @@ function inferServerLevel(message: string): RemoteLogEntry["level"] {
   return "info";
 }
 
-function RemoteLogPanel({ emptyText, entries }: { emptyText: string; entries: RemoteLogEntry[] }) {
-  const lines = entries.map((entry) => `[${entry.level.toUpperCase()}] ${entry.at} ${entry.message}`);
+/** Content-based identity for a log line (there's no server-side sequence
+ * number to key off), used only to let "Clear view" hide already-seen lines
+ * without touching the underlying log store. */
+function logEntryKey(entry: RemoteLogEntry) {
+  return `${entry.at}::${entry.message}`;
+}
+
+function RemoteLogPanel({
+  emptyText,
+  entries,
+  onClear,
+  showReceiverFilter = false,
+}: {
+  emptyText: string;
+  entries: RemoteLogEntry[];
+  /** Provide when the log is owned by this browser (controller) so Clear can
+   * really delete it. Omit for a backend-owned log (receiver): Clear then
+   * only hides what's already on screen, it can't erase the receiver's log. */
+  onClear?: () => void;
+  showReceiverFilter?: boolean;
+}) {
+  const [levelFilter, setLevelFilter] = useState<(typeof LOG_LEVELS)[number] | "all">("all");
+  const [receiverFilter, setReceiverFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(() => new Set());
+  const [copied, setCopied] = useState(false);
+  const [following, setFollowing] = useState(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  const receiverNames = useMemo(() => {
+    if (!showReceiverFilter) return [];
+    const names = new Set<string>();
+    entries.forEach((entry) => { if (entry.receiver) names.add(entry.receiver); });
+    return Array.from(names).sort();
+  }, [entries, showReceiverFilter]);
+
+  const counts = useMemo(() => {
+    const next: Record<string, number> = { error: 0, warning: 0, success: 0, info: 0 };
+    entries.forEach((entry) => { next[entry.level] = (next[entry.level] || 0) + 1; });
+    return next;
+  }, [entries]);
+
+  const visible = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return entries.filter((entry) => {
+      if (hiddenKeys.has(logEntryKey(entry))) return false;
+      if (levelFilter !== "all" && entry.level !== levelFilter) return false;
+      if (receiverFilter !== "all" && entry.receiver !== receiverFilter) return false;
+      if (query && !entry.message.toLowerCase().includes(query) && !(entry.receiver || "").toLowerCase().includes(query)) return false;
+      return true;
+    });
+  }, [entries, hiddenKeys, levelFilter, receiverFilter, search]);
+
+  // Stick to the bottom as new lines arrive, unless the operator has
+  // scrolled up to read history -- matches a normal chat/log-tail feel.
+  useEffect(() => {
+    if (!following) return;
+    const node = scrollRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [visible, following]);
+
+  function handleScroll() {
+    const node = scrollRef.current;
+    if (!node) return;
+    const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 24;
+    setFollowing(atBottom);
+  }
+
+  function jumpToLatest() {
+    setFollowing(true);
+    const node = scrollRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }
+
+  function handleClear() {
+    if (onClear) {
+      onClear();
+      setHiddenKeys(new Set());
+    } else {
+      setHiddenKeys((current) => {
+        const next = new Set(current);
+        entries.forEach((entry) => next.add(logEntryKey(entry)));
+        return next;
+      });
+    }
+  }
+
+  async function handleCopy() {
+    const text = visible.map((entry) => `[${entry.level.toUpperCase()}] ${entry.at} ${entry.receiver ? `[${entry.receiver}] ` : ""}${entry.message}`).join("\n");
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard access can be denied; the log stays visible either way.
+    }
+  }
+
+  const lines = visible.map((entry) => {
+    const tag = entry.receiver ? `[${entry.receiver}] ` : "";
+    return `[${entry.level.toUpperCase()}] ${entry.at} ${tag}${entry.message}`;
+  });
+
   return (
-    <div className="min-h-[420px] rounded-2xl border border-slate-200 bg-white">
-      <LogList logs={lines} emptyMessage={emptyText} className="max-h-[420px] overflow-y-auto" />
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => setLevelFilter("all")}
+          className={`rounded-full border px-2.5 py-1 text-[11px] font-black transition ${levelFilter === "all" ? "border-slate-700 bg-slate-700 text-white" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
+        >
+          All · {entries.length}
+        </button>
+        {LOG_LEVELS.map((level) => (
+          <button
+            key={level}
+            type="button"
+            onClick={() => setLevelFilter((current) => (current === level ? "all" : level))}
+            disabled={!counts[level]}
+            className={`rounded-full border px-2.5 py-1 text-[11px] font-black transition disabled:cursor-not-allowed disabled:opacity-40 ${levelFilter === level ? LOG_LEVEL_CHIP_ACTIVE[level] : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
+          >
+            {LOG_LEVEL_LABEL[level]} · {counts[level] || 0}
+          </button>
+        ))}
+        {showReceiverFilter && receiverNames.length ? (
+          <select
+            value={receiverFilter}
+            onChange={(event) => setReceiverFilter(event.target.value)}
+            className="h-[26px] rounded-full border border-slate-200 bg-white px-2.5 text-[11px] font-black text-slate-600 outline-none focus:border-blue-400"
+            aria-label="Filter logs by receiver"
+          >
+            <option value="all">All receivers</option>
+            {receiverNames.map((name) => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </select>
+        ) : null}
+        <div className="relative ml-auto">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search logs..."
+            className="h-[26px] w-[160px] rounded-full border border-slate-200 bg-white pl-8 pr-2.5 text-[11px] font-semibold text-slate-700 outline-none transition focus:w-[200px] focus:border-blue-400 sm:w-[180px]"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={handleCopy}
+          disabled={!visible.length}
+          title="Copy visible lines"
+          className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {copied ? <Check className="h-3.5 w-3.5 text-teal-600" /> : <Copy className="h-3.5 w-3.5" />}
+        </button>
+        <button
+          type="button"
+          onClick={handleClear}
+          disabled={!entries.length}
+          title={onClear ? "Clear this log" : "Hide everything shown so far (the receiver keeps its own copy)"}
+          className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-rose-200 bg-white text-rose-500 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      <div className="relative min-h-[380px] rounded-2xl border border-slate-200 bg-white">
+        <div ref={scrollRef} onScroll={handleScroll} className="max-h-[380px] overflow-y-auto">
+          <LogList logs={lines} emptyMessage={entries.length ? "No log lines match the current filter." : emptyText} />
+        </div>
+        {!following && visible.length ? (
+          <button
+            type="button"
+            onClick={jumpToLatest}
+            className="absolute bottom-3 right-3 inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-3 py-1.5 text-[11px] font-black text-white shadow-lg transition hover:bg-slate-800"
+          >
+            <ArrowDown className="h-3.5 w-3.5" />Jump to latest
+          </button>
+        ) : null}
+      </div>
+      {onClear ? null : (
+        <p className="text-[11px] text-slate-400">
+          "Clear" only hides what's shown here in this browser -- it does not erase the receiver's own log.
+        </p>
+      )}
     </div>
   );
 }
 
-function RemoteTabs({ role, activeTab, onChange }: { role: RemoteRole; activeTab: RemoteTab; onChange: (tab: RemoteTab) => void }) {
+function RemoteTabs({
+  role,
+  activeTab,
+  onChange,
+  errorCount = 0,
+}: {
+  role: RemoteRole;
+  activeTab: RemoteTab;
+  onChange: (tab: RemoteTab) => void;
+  /** Shown as a badge on the Logs tab so a problem is visible without
+   * switching to it -- e.g. while parked on Settings during a test. */
+  errorCount?: number;
+}) {
   const accentActive = role === "receiver" ? "text-teal-600" : "text-blue-600";
   const accentBar = role === "receiver" ? "bg-teal-500" : "bg-blue-600";
   return (
@@ -166,9 +382,14 @@ function RemoteTabs({ role, activeTab, onChange }: { role: RemoteRole; activeTab
           key={tab.id}
           type="button"
           onClick={() => onChange(tab.id)}
-          className={`relative px-3 py-4 text-sm font-bold transition ${activeTab === tab.id ? accentActive : "text-slate-500 hover:text-slate-950"}`}
+          className={`relative flex items-center gap-1.5 px-3 py-4 text-sm font-bold transition ${activeTab === tab.id ? accentActive : "text-slate-500 hover:text-slate-950"}`}
         >
           {tab.label}
+          {tab.id === "logs" && errorCount > 0 ? (
+            <span className="grid h-4 min-w-[16px] place-items-center rounded-full bg-rose-500 px-1 text-[10px] font-black text-white">
+              {errorCount > 99 ? "99+" : errorCount}
+            </span>
+          ) : null}
           {activeTab === tab.id ? <span className={`absolute inset-x-3 bottom-0 h-0.5 rounded-full ${accentBar}`} /> : null}
         </button>
       ))}
@@ -408,6 +629,8 @@ export default function RemoteControlPage() {
 
   const onlineCount = useMemo(() => receivers.filter((r) => r.status.state === "online").length, [receivers]);
   const enabledCount = useMemo(() => receivers.filter((r) => r.enabled).length, [receivers]);
+  const controllerErrorCount = useMemo(() => controllerLogs.filter((entry) => entry.level === "error").length, [controllerLogs]);
+  const receiverErrorCount = useMemo(() => receiverLogs.filter((entry) => entry.level === "error").length, [receiverLogs]);
 
   useEffect(() => {
     importLegacyReceiver();
@@ -612,7 +835,7 @@ export default function RemoteControlPage() {
               animate={receiverConnections > 0}
             />
             <div className="space-y-6 rounded-3xl border border-teal-100 bg-white p-4 shadow-sm sm:p-5">
-              <RemoteTabs role="receiver" activeTab={activeTab} onChange={setActiveTab} />
+              <RemoteTabs role="receiver" activeTab={activeTab} onChange={setActiveTab} errorCount={receiverErrorCount} />
 
               {activeTab === "settings" ? (
                 <>
@@ -695,7 +918,7 @@ export default function RemoteControlPage() {
             />
             <div className="space-y-6 rounded-3xl border border-blue-100 bg-white p-4 shadow-sm sm:p-5">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                <RemoteTabs role="controller" activeTab={activeTab} onChange={setActiveTab} />
+                <RemoteTabs role="controller" activeTab={activeTab} onChange={setActiveTab} errorCount={controllerErrorCount} />
                 <div className="flex items-center gap-2 self-start rounded-full bg-slate-100 px-4 py-2 text-sm font-black text-slate-700 sm:ml-auto">
                   <Wifi className={`h-4 w-4 ${onlineCount ? "text-teal-600" : "text-slate-400"}`} />
                   {onlineCount}/{receivers.length} online · {enabledCount} in trade broadcast
@@ -739,7 +962,12 @@ export default function RemoteControlPage() {
                   {errorText ? <p className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm font-semibold text-rose-700">{errorText}</p> : null}
                 </>
               ) : (
-                <RemoteLogPanel emptyText="No controller events yet. Connection attempts and remote command results will appear here." entries={controllerLogs} />
+                <RemoteLogPanel
+                  emptyText="No controller events yet. Connection attempts and remote command results will appear here."
+                  entries={controllerLogs}
+                  onClear={clearRemoteLogs}
+                  showReceiverFilter
+                />
               )}
             </div>
           </motion.div>

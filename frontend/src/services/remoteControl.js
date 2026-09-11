@@ -79,8 +79,12 @@ function appendLog(level, message, receiverLabel) {
   const entry = {
     id: globalThis.crypto?.randomUUID?.() || `remote-log-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     level,
-    message: receiverLabel ? `[${receiverLabel}] ${message}` : message,
+    // Kept as its own field (not baked into the message text) so the UI can
+    // filter/tag by receiver without parsing a "[Label] " prefix back out.
+    receiver: receiverLabel || null,
+    message,
     at: nowLabel(),
+    atMs: Date.now(),
   };
   logEntries.push(entry);
   if (logEntries.length > LOG_LIMIT) logEntries.splice(0, logEntries.length - LOG_LIMIT);
@@ -88,6 +92,18 @@ function appendLog(level, message, receiverLabel) {
     globalThis.localStorage?.setItem(LOG_STORAGE_KEY, JSON.stringify(logEntries));
   } catch {
     // Logging must continue when browser storage is unavailable.
+  }
+  logListeners.forEach((listener) => listener([...logEntries]));
+}
+
+/** Empties the controller's own connection/command log. Does not affect any
+ * receiver's own log (that log lives on the receiver's backend, not here). */
+export function clearRemoteLogs() {
+  logEntries.length = 0;
+  try {
+    globalThis.localStorage?.setItem(LOG_STORAGE_KEY, JSON.stringify(logEntries));
+  } catch {
+    // Nothing further to do if storage is unavailable.
   }
   logListeners.forEach((listener) => listener([...logEntries]));
 }

@@ -1309,118 +1309,146 @@ async def remote_command_socket(websocket: WebSocket) -> None:
         "message": "Authenticated remote command receiver is ready.",
         "server_time": datetime.now().isoformat(),
     })
+    # Sending on one websocket from more than one coroutine at a time can
+    # interleave frames, so every send funnels through this lock.
+    send_lock = asyncio.Lock()
+
+    async def send_safe(payload: dict[str, Any]) -> None:
+        try:
+            async with send_lock:
+                await websocket.send_json(payload)
+        except Exception:
+            # The connection may already be gone (see handle_command below,
+            # which keeps running after a disconnect); there is no one to
+            # deliver this to, but the command itself must not be aborted.
+            pass
+
+    async def handle_command(raw_message: dict[str, Any]) -> None:
+        command_id = str(raw_message.get("id", "")).strip()
+        action_name = str(raw_message.get("action", "")).strip().lower()
+        data = raw_message.get("data", {})
+        if not command_id or not action_name or not isinstance(data, dict):
+            append_log("adapter", "[REMOTE] Rejected malformed command payload from controller.")
+            await send_safe({
+                "type": "result",
+                "id": command_id or None,
+                "status": "error",
+                "message": "Each command requires an id, action, and object data.",
+            })
+            return
+
+        with _remote_command_lock:
+            cached_result = _remote_command_cache.get(command_id)
+            inflight_event = None if cached_result else _remote_command_inflight.get(command_id)
+            if cached_result is None and inflight_event is None:
+                inflight_event = asyncio.Event()
+                _remote_command_inflight[command_id] = inflight_event
+                should_execute = True
+            else:
+                should_execute = False
+
+        if cached_result:
+            append_log("adapter", f"[REMOTE] Replayed cached result for {action_name} ({command_id}).")
+            await send_safe(cached_result)
+            return
+
+        if not should_execute:
+            # Same command id is already executing (a duplicate delivery, not
+            # a genuinely new command) -- wait for that run instead of
+            # starting a second one, which would open a second real order.
+            append_log("adapter", f"[REMOTE] Duplicate delivery of {action_name} ({command_id}); waiting for the in-flight run.")
+            await inflight_event.wait()
+            with _remote_command_lock:
+                cached_result = _remote_command_cache.get(command_id)
+            await send_safe(cached_result or {
+                "type": "result",
+                "id": command_id,
+                "status": "error",
+                "message": "Duplicate command could not be resolved.",
+            })
+            return
+
+        try:
+            if action_name == "open":
+                data, receiver_login, receiver_risk, receiver_delay = _receiver_open_settings(data)
+                append_log("adapter", f"[REMOTE] Using receiver account {receiver_login} risk {receiver_risk:.2f}% for {command_id}.")
+                await send_safe({
+                    "type": "log",
+                    "level": "info",
+                    "message": f"Receiver account {receiver_login} risk {receiver_risk:.2f}% selected for the remote order.",
+                })
+                await send_safe({
+                    "type": "log",
+                    "level": "info",
+                    "message": f"Receiver account {receiver_login} order delay is {receiver_delay} seconds.",
+                })
+                if receiver_delay > 0:
+                    append_log("adapter", f"[REMOTE] Waiting receiver order delay of {receiver_delay}s for {command_id}.")
+                    await send_safe({
+                        "type": "log",
+                        "level": "info",
+                        "message": f"Waiting receiver order delay of {receiver_delay} seconds.",
+                    })
+                    await asyncio.sleep(receiver_delay)
+                    append_log("adapter", f"[REMOTE] Receiver order delay completed for {command_id}.")
+                    await send_safe({
+                        "type": "log",
+                        "level": "success",
+                        "message": f"Receiver delay completed after {receiver_delay} seconds. Submitting the order now.",
+                    })
+            # Run off the event loop: MT5 adapter round-trips block synchronously
+            # for several seconds. This whole handler runs as a background task
+            # (see the read loop below) instead of being awaited inline, so a
+            # slow command can never delay this connection's replies to
+            # heartbeat pings -- that used to be exactly what made the
+            # controller believe a busy-but-fine receiver had gone offline and
+            # disconnect mid-command, sometimes losing the very order in flight.
+            result = await asyncio.to_thread(_execute_remote_command, action_name, data)
+            response = {"type": "result", "id": command_id, "status": "success", "result": result}
+            append_log("adapter", f"[REMOTE] Executed {action_name} ({command_id}).")
+            state_patch("remote_control", {
+                "last_command_at": datetime.now().isoformat(),
+                "last_command_action": action_name,
+            })
+        except HTTPException as exc:
+            response = {"type": "result", "id": command_id, "status": "error", "message": str(exc.detail)}
+            append_log("adapter", f"[REMOTE] {action_name} ({command_id}) failed: {exc.detail}")
+        except (TypeError, ValueError, RuntimeError) as exc:
+            response = {"type": "result", "id": command_id, "status": "error", "message": str(exc)}
+            append_log("adapter", f"[REMOTE] {action_name} ({command_id}) failed: {exc}")
+        except Exception:
+            response = {"type": "result", "id": command_id, "status": "error", "message": "The remote command could not be completed."}
+            append_log("adapter", f"[REMOTE] {action_name} ({command_id}) failed with an unexpected server error.")
+
+        with _remote_command_lock:
+            if len(_remote_command_cache) >= REMOTE_COMMAND_CACHE_LIMIT:
+                _remote_command_cache.pop(next(iter(_remote_command_cache)))
+            _remote_command_cache[command_id] = response
+            _remote_command_inflight.pop(command_id, None)
+        inflight_event.set()
+        await send_safe(response)
+
+    # Commands run as background tasks instead of being awaited in this loop,
+    # so the loop is always free to answer the next incoming ping immediately
+    # -- see handle_command's docstring-comment above for why that matters.
+    background_tasks: set[asyncio.Task] = set()
     try:
         while True:
             raw_message = await websocket.receive_json()
             if isinstance(raw_message, dict) and raw_message.get("type") == "ping":
-                await websocket.send_json({"type": "pong", "server_time": datetime.now().isoformat()})
+                await send_safe({"type": "pong", "server_time": datetime.now().isoformat()})
                 continue
-            command_id = str(raw_message.get("id", "")).strip()
-            action_name = str(raw_message.get("action", "")).strip().lower()
-            data = raw_message.get("data", {})
-            if not command_id or not action_name or not isinstance(data, dict):
-                append_log("adapter", "[REMOTE] Rejected malformed command payload from controller.")
-                await websocket.send_json({
-                    "type": "result",
-                    "id": command_id or None,
-                    "status": "error",
-                    "message": "Each command requires an id, action, and object data.",
-                })
-                continue
-
-            with _remote_command_lock:
-                cached_result = _remote_command_cache.get(command_id)
-                inflight_event = None if cached_result else _remote_command_inflight.get(command_id)
-                if cached_result is None and inflight_event is None:
-                    inflight_event = asyncio.Event()
-                    _remote_command_inflight[command_id] = inflight_event
-                    should_execute = True
-                else:
-                    should_execute = False
-
-            if cached_result:
-                append_log("adapter", f"[REMOTE] Replayed cached result for {action_name} ({command_id}).")
-                await websocket.send_json(cached_result)
-                continue
-
-            if not should_execute:
-                # Same command id is already executing (a duplicate delivery, not
-                # a genuinely new command) -- wait for that run instead of
-                # starting a second one, which would open a second real order.
-                append_log("adapter", f"[REMOTE] Duplicate delivery of {action_name} ({command_id}); waiting for the in-flight run.")
-                await inflight_event.wait()
-                with _remote_command_lock:
-                    cached_result = _remote_command_cache.get(command_id)
-                await websocket.send_json(cached_result or {
-                    "type": "result",
-                    "id": command_id,
-                    "status": "error",
-                    "message": "Duplicate command could not be resolved.",
-                })
-                continue
-
-            try:
-                if action_name == "open":
-                    data, receiver_login, receiver_risk, receiver_delay = _receiver_open_settings(data)
-                    append_log("adapter", f"[REMOTE] Using receiver account {receiver_login} risk {receiver_risk:.2f}% for {command_id}.")
-                    await websocket.send_json({
-                        "type": "log",
-                        "level": "info",
-                        "message": f"Receiver account {receiver_login} risk {receiver_risk:.2f}% selected for the remote order.",
-                    })
-                    await websocket.send_json({
-                        "type": "log",
-                        "level": "info",
-                        "message": f"Receiver account {receiver_login} order delay is {receiver_delay} seconds.",
-                    })
-                    if receiver_delay > 0:
-                        append_log("adapter", f"[REMOTE] Waiting receiver order delay of {receiver_delay}s for {command_id}.")
-                        await websocket.send_json({
-                            "type": "log",
-                            "level": "info",
-                            "message": f"Waiting receiver order delay of {receiver_delay} seconds.",
-                        })
-                        await asyncio.sleep(receiver_delay)
-                        append_log("adapter", f"[REMOTE] Receiver order delay completed for {command_id}.")
-                        await websocket.send_json({
-                            "type": "log",
-                            "level": "success",
-                            "message": f"Receiver delay completed after {receiver_delay} seconds. Submitting the order now.",
-                        })
-                # Run off the event loop: MT5 adapter round-trips block synchronously
-                # for several seconds and would otherwise freeze this coroutine,
-                # starving every other coroutine on the loop -- including the
-                # heartbeat pings that keep this very websocket from looking idle
-                # to network intermediaries (Tailscale, routers, etc).
-                result = await asyncio.to_thread(_execute_remote_command, action_name, data)
-                response = {"type": "result", "id": command_id, "status": "success", "result": result}
-                append_log("adapter", f"[REMOTE] Executed {action_name} ({command_id}).")
-                state_patch("remote_control", {
-                    "last_command_at": datetime.now().isoformat(),
-                    "last_command_action": action_name,
-                })
-            except HTTPException as exc:
-                response = {"type": "result", "id": command_id, "status": "error", "message": str(exc.detail)}
-                append_log("adapter", f"[REMOTE] {action_name} ({command_id}) failed: {exc.detail}")
-            except (TypeError, ValueError, RuntimeError) as exc:
-                response = {"type": "result", "id": command_id, "status": "error", "message": str(exc)}
-                append_log("adapter", f"[REMOTE] {action_name} ({command_id}) failed: {exc}")
-            except Exception:
-                response = {"type": "result", "id": command_id, "status": "error", "message": "The remote command could not be completed."}
-                append_log("adapter", f"[REMOTE] {action_name} ({command_id}) failed with an unexpected server error.")
-
-            with _remote_command_lock:
-                if len(_remote_command_cache) >= REMOTE_COMMAND_CACHE_LIMIT:
-                    _remote_command_cache.pop(next(iter(_remote_command_cache)))
-                _remote_command_cache[command_id] = response
-                _remote_command_inflight.pop(command_id, None)
-            inflight_event.set()
-            await websocket.send_json(response)
+            task = asyncio.create_task(handle_command(raw_message))
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
     except WebSocketDisconnect:
         append_log("adapter", "[REMOTE] Controller disconnected.")
     except Exception as exc:
         append_log("adapter", f"[REMOTE] Controller connection ended unexpectedly: {exc}")
     finally:
+        # Deliberately not cancelled: a command already in flight (e.g. an
+        # order mid-submission) must run to completion even if the socket
+        # that requested it just dropped, not be aborted by a network blip.
         remaining_connections = max(0, int(state_get("remote_control.connections", 1) or 1) - 1)
         state_patch("remote_control", {"connections": remaining_connections})
         append_log("adapter", f"[REMOTE] Active connections: {remaining_connections}.")

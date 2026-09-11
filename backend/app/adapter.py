@@ -17,6 +17,7 @@ from backend.app.services.strategy_service import (
     _copy_targets,
     _load_config,
     _safe_int,
+    close_positions_on_current_session,
     open_manual_position,
 )
 
@@ -303,6 +304,14 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                 "orders": orders,
                 "spread": spread,
             }
+        except Exception as ex:
+            return {"status": "error", "message": str(ex)}
+    if action == "close_all":
+        try:
+            side = str(payload.get("side", "all") or "all").lower()
+            symbol = payload.get("symbol")
+            result = close_positions_on_current_session(side, symbol)
+            return {"status": "ok", **result}
         except Exception as ex:
             return {"status": "error", "message": str(ex)}
     if action != "open":

@@ -29,10 +29,7 @@ import { MetricCard } from "./shared/MetricCard";
 import ChartPage from "./ChartPage";
 import { cx, decimalInput, money, signedDecimalInput } from "../utils/format";
 import { api } from "../services/api";
-import {
-  isRemoteConnected,
-  sendRemoteCommand,
-} from "../services/remoteControl";
+import { listReceivers, sendRemoteCommand } from "../services/remoteControl";
 
 const TRADE_FORM_STORAGE_KEY = "trader.trade.form";
 // XAUUSD pip size, mirroring the backend which converts pips with `pips / 10`.
@@ -874,7 +871,14 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       // Local order is live from here on; a receiver failure below must still
       // refresh the tables, it just also reports the mirroring error.
       placed = true;
-      if (isRemoteConnected()) {
+      // Attempt this whenever a receiver is configured, not only when
+      // isRemoteConnected() already reads true: that flag can be stale for a
+      // few hundred ms right after a reconnect, and gating on it meant a
+      // receiver that looked briefly offline got silently skipped -- with no
+      // error shown -- instead of failing loudly like every other receiver
+      // problem. sendRemoteCommand re-checks each receiver's live state and
+      // reports "not connected" as a normal per-receiver failure below.
+      if (listReceivers().some((receiver) => receiver.enabled)) {
         const { risk_percent, riskPercent, ...receiverPayload } = orderPayload;
         const { results } = await sendRemoteCommand("open", receiverPayload);
         const failed = results.filter((result) => result.status === "error");
@@ -986,7 +990,11 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     try {
       setCloseConfirmOpen(false);
       const response = await api.closePositions();
-      if (isRemoteConnected()) {
+      // See openPosition's comment: attempt this whenever a receiver is
+      // configured, not only when isRemoteConnected() already reads true, or
+      // a receiver that is actually reachable but briefly looked offline gets
+      // silently skipped instead of failing loudly.
+      if (listReceivers().some((receiver) => receiver.enabled)) {
         const { results } = await sendRemoteCommand("close_all", {});
         const failed = results.filter((result) => result.status === "error");
         if (failed.length) {

@@ -16,7 +16,7 @@ from .env_utils import is_dev_mode
 from .mt5_lock import MT5_LOCK
 from .path_utils import resolve_terminal_path, sanitize_terminal_path
 from .runtime_state import append_list, append_log, get, patch_path, replace_list, set_path
-from .session_service import list_sessions
+from .session_service import list_sessions, submit_adapter_command
 from .task_manager import emit_log, is_task_running, start_task, stop_task
 
 SYMBOL_DEFAULT = "XAUUSD"
@@ -1042,23 +1042,87 @@ def calculate_manual_lot(
     return lot, f"Lot calculated from {float(risk_percent):.2f}% risk and {abs(entry_price - stop_loss):.2f} price distance."
 
 
+def close_positions_on_current_session(side: str, symbol: str | None) -> dict[str, Any]:
+    """Close every position/pending order on the MT5 session already active in
+    this process. Only call this from a process that owns that session (an
+    account's dedicated adapter subprocess) -- calling it from the API process
+    would make it re-authenticate a terminal the adapter already has open,
+    which can drop or corrupt that adapter's live session. `/positions/open`
+    avoids the same mistake via `submit_adapter_command`; this mirrors that."""
+    attempted = 0
+    closed_tickets: list[int] = []
+    pending_closed_tickets: list[int] = []
+    errors: list[str] = []
+    try:
+        positions = mt5.positions_get() if symbol is None else mt5.positions_get(symbol=symbol)
+        for pos in positions or []:
+            try:
+                position_side = "buy" if int(getattr(pos, "type", -1)) == mt5.ORDER_TYPE_BUY else "sell"
+                if side == "buy" and position_side != "buy":
+                    continue
+                if side == "sell" and position_side != "sell":
+                    continue
+                attempted += 1
+                closed_ok, close_detail = _close_mt5_position(pos)
+                if closed_ok:
+                    closed_tickets.append(int(getattr(pos, "ticket", 0) or 0))
+                else:
+                    symbol_name = str(getattr(pos, "symbol", symbol or SYMBOL_DEFAULT) or SYMBOL_DEFAULT)
+                    errors.append(f"Close failed ticket={getattr(pos, 'ticket', '-')} symbol={symbol_name} {close_detail}")
+            except Exception as ex:
+                errors.append(f"close error: {ex}")
+    except Exception as ex:
+        errors.append(f"positions_get failed: {ex}")
+
+    try:
+        pending_orders = mt5.orders_get() if symbol is None else mt5.orders_get(symbol=symbol)
+        for order in pending_orders or []:
+            try:
+                order_type = int(getattr(order, "type", -1))
+                order_side = "buy" if order_type in {getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2), getattr(mt5, "ORDER_TYPE_BUY_STOP", 4)} else "sell"
+                if side == "buy" and order_side != "buy":
+                    continue
+                if side == "sell" and order_side != "sell":
+                    continue
+                attempted += 1
+                closed_ok, close_detail = _close_mt5_pending_order(order)
+                if closed_ok:
+                    pending_closed_tickets.append(int(getattr(order, "ticket", 0) or 0))
+                else:
+                    symbol_name = str(getattr(order, "symbol", symbol or SYMBOL_DEFAULT) or SYMBOL_DEFAULT)
+                    errors.append(f"Cancel failed ticket={getattr(order, 'ticket', '-')} symbol={symbol_name} {close_detail}")
+            except Exception as ex:
+                errors.append(f"cancel error: {ex}")
+    except Exception as ex:
+        errors.append(f"orders_get failed: {ex}")
+
+    return {
+        "attempted": attempted,
+        "closed_tickets": closed_tickets,
+        "pending_closed_tickets": pending_closed_tickets,
+        "errors": errors,
+    }
+
+
 def close_all_positions(side: str = "all", symbol: str | None = None):
     _manual_tp_sessions.clear()
     stop_task(MANUAL_TP_TASK_NAME)
     cancel_manual_auto_close()
     closed_tickets: set[int] = set()
+    pending_closed_tickets: set[int] = set()
     attempted = 0
     errors: list[str] = []
     cfg = _load_config()
     accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
-    master = _resolve_master_account(cfg)
     require_ticket_match = mt5_available() and bool(accounts)
-    pending_closed_tickets: set[int] = set()
-    # Only touch accounts that are already connected. Initializing MT5 for a
-    # disconnected account launches its terminal, which is why closing used to
-    # bring up windows for accounts nobody had connected on the Dashboard.
-    connected_logins: set[int] = set()
     if mt5_available() and accounts:
+        # Route through each account's own adapter subprocess instead of
+        # touching MT5 from here. Initializing MT5 in this (API) process would
+        # re-authenticate a terminal an adapter already owns -- for a
+        # disconnected account that also launches its terminal, and for a
+        # connected one it can drop or corrupt that adapter's live session
+        # (reported as "closing" the account's terminal). `/positions/open`
+        # already avoids this via `submit_adapter_command`; do the same here.
         connected_logins = {
             _safe_int(session.get("login"))
             for session in list_sessions(accounts)
@@ -1076,65 +1140,21 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
             login = _safe_int(account.get("user"))
             if login <= 0:
                 continue
-            init_ok, init_detail = _initialize_mt5_for_account(account)
-            if not init_ok:
-                errors.append(f"{login}: init failed {init_detail}")
-                append_log("search", f"[ERROR] Close init failed for {login}: {init_detail}")
+            result = submit_adapter_command(login, "close_all", {"side": side, "symbol": symbol}, timeout_sec=20.0)
+            if result.get("status") != "ok":
+                message = f"{login}: {result.get('message', 'close_all adapter command failed')}"
+                errors.append(message)
+                append_log("search", f"[ERROR] {message}")
                 continue
-            try:
-                positions = mt5.positions_get() if symbol is None else mt5.positions_get(symbol=symbol)
-                pending_orders = mt5.orders_get() if symbol is None else mt5.orders_get(symbol=symbol)
-                if not positions:
-                    positions = []
-                for pos in positions:
-                    try:
-                        position_side = "buy" if int(getattr(pos, "type", -1)) == mt5.ORDER_TYPE_BUY else "sell"
-                        if side == "buy" and position_side != "buy":
-                            continue
-                        if side == "sell" and position_side != "sell":
-                            continue
-                        attempted += 1
-                        closed_ok, close_detail = _close_mt5_position(pos)
-                        if closed_ok:
-                            closed_tickets.add(int(getattr(pos, "ticket", 0) or 0))
-                        else:
-                            symbol_name = str(getattr(pos, "symbol", symbol or SYMBOL_DEFAULT) or SYMBOL_DEFAULT)
-                            message = f"Close failed ticket={getattr(pos, 'ticket', '-')} symbol={symbol_name} {close_detail}"
-                            errors.append(message)
-                            append_log("search", f"[ERROR] {message}")
-                    except Exception as ex:
-                        message = f"{login}: close error {ex}"
-                        errors.append(message)
-                        append_log("search", f"[ERROR] {message}")
-                if pending_orders:
-                    for order in pending_orders:
-                        try:
-                            order_type = int(getattr(order, "type", -1))
-                            order_side = "buy" if order_type in {getattr(mt5, "ORDER_TYPE_BUY_LIMIT", 2), getattr(mt5, "ORDER_TYPE_BUY_STOP", 4)} else "sell"
-                            if side == "buy" and order_side != "buy":
-                                continue
-                            if side == "sell" and order_side != "sell":
-                                continue
-                            attempted += 1
-                            closed_ok, close_detail = _close_mt5_pending_order(order)
-                            if closed_ok:
-                                pending_closed_tickets.add(int(getattr(order, "ticket", 0) or 0))
-                            else:
-                                symbol_name = str(getattr(order, "symbol", symbol or SYMBOL_DEFAULT) or SYMBOL_DEFAULT)
-                                message = f"Cancel failed ticket={getattr(order, 'ticket', '-')} symbol={symbol_name} {close_detail}"
-                                errors.append(message)
-                                append_log("search", f"[ERROR] {message}")
-                        except Exception as ex:
-                            message = f"{login}: cancel error {ex}"
-                            errors.append(message)
-                            append_log("search", f"[ERROR] {message}")
-            finally:
-                pass
-        if master and _safe_int(master.get("user")) in connected_logins:
-            restore_ok, restore_detail = _initialize_mt5_for_account(master)
-            if not restore_ok:
-                errors.append(f"master restore failed: {restore_detail}")
-                append_log("search", f"[ERROR] Master session restore failed: {restore_detail}")
+            attempted += int(result.get("attempted", 0) or 0)
+            for ticket in result.get("closed_tickets", []) or []:
+                closed_tickets.add(int(ticket))
+            for ticket in result.get("pending_closed_tickets", []) or []:
+                pending_closed_tickets.add(int(ticket))
+            for err in result.get("errors", []) or []:
+                message = f"{login}: {err}"
+                errors.append(message)
+                append_log("search", f"[ERROR] {message}")
     else:
         for order in get("orders", []):
             if order.get("status") != "open":

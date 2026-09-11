@@ -26,21 +26,11 @@ _state: dict[str, Any] = {
         "end_time": None,
         "last_stop_reason": None,
     },
-    "risk_monitor": {
-        "running": False,
-        "started_at": None,
-        "interval_sec": 60,
-        "risk_percent": 1.0,
-        "profit_percent": 1.0,
-        "orders_limit": 10,
-        "start_balance": None,
-    },
     "liquidity_levels": [],
     "orders": [],
     "sessions": {},
     "logs": {
         "search": [],
-        "risk": [],
         "adapter": [],
     },
 }
@@ -93,7 +83,7 @@ def patch_path(path: str, values: dict[str, Any]) -> None:
 
 
 def append_log(kind: str, message: str) -> None:
-    key = kind if kind in {"search", "risk", "adapter"} else "search"
+    key = kind if kind in {"search", "adapter"} else "search"
     line = f"[{now_label()}] {message}"
     with _lock:
         logs = _state["logs"][key]
@@ -103,7 +93,7 @@ def append_log(kind: str, message: str) -> None:
 
 
 def clear_logs(kind: str) -> None:
-    if kind not in {"search", "risk", "adapter"}:
+    if kind not in {"search", "adapter"}:
         return
     with _lock:
         _state["logs"][kind] = []

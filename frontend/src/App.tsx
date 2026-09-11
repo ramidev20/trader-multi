@@ -6,7 +6,7 @@ import TopBar from "./components/layout/TopBar";
 import { AppButton, Dialog, Field, SelectBox } from "./components/ui/Primitives";
 import DashboardPage from "./pages/DashboardPage";
 import SearchPage from "./pages/SearchPage";
-import { NotificationsPage, ProfilePage, RiskManagementPage, SettingsPlaceholder, TradePage } from "./pages/Placeholders";
+import { NotificationsPage, ProfilePage, SettingsPlaceholder, TradePage } from "./pages/Placeholders";
 import TradeHistoryPage from "./pages/TradeHistoryPage";
 import RemoteControlPage from "./pages/RemoteControlPage";
 import { initialAccounts, liquidityLevels, strategyLogs } from "./data/mockData";
@@ -375,9 +375,7 @@ export default function App() {
         ? "Trade"
         : activePage === "history"
             ? "Trade History"
-            : activePage === "risk"
-              ? "Risk Management"
-              : activePage === "settings"
+            : activePage === "settings"
                 ? "Settings"
                 : activePage === "remote"
                   ? "Remote Control"
@@ -401,7 +399,6 @@ export default function App() {
             {activePage === "search" && (masterConnected ? <SearchPage runtime={runtime} searchLogs={searchLogs} onRefreshRuntime={refreshBootstrap} timeRange={searchTimeRange} onTimeRangeChange={setSearchTimeRange} /> : <MasterConnectionRequiredPage />)}
             {activePage === "trade" && (masterConnected ? <TradePage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
             {activePage === "history" && (masterConnected ? <TradeHistoryPage runtime={runtime} historyRows={tradeHistory.history} /> : <MasterConnectionRequiredPage />)}
-            {activePage === "risk" && (masterConnected ? <RiskManagementPage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
             {activePage === "remote" && <RemoteControlPage />}
             {activePage === "settings" && <SettingsPlaceholder initialTab={settingsTabRequest} accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} notificationSettings={notificationSettings} onNotificationSettingsChange={setNotificationSettings} themeMode={themeMode} onThemeModeChange={setThemeMode} uiZoomPercent={uiZoomPercent} onUiZoomPercentChange={setUiZoomPercent} />}
             {activePage === "profile" && <ProfilePage accountsData={accountList} runtime={runtime} historyRows={tradeHistory.history} summaries={tradeHistory.summaries} />}
@@ -475,13 +472,12 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
   const priorityForTitle = (title) => {
     if (title === "Account disconnected" || title === "Algorithmic trading disabled") return 0;
     if (title === "Trade execution") return 1;
-    if (title === "Account connection" || title === "Risk management") return 1;
+    if (title === "Account connection") return 1;
     if (title === "Strategy status") return 2;
     return 3;
   };
   const logs = [
     ...(runtime.logs?.search || []).map((message) => ({ source: "search", message })),
-    ...(runtime.logs?.risk || []).map((message) => ({ source: "risk", message })),
     ...(runtime.logs?.adapter || []).map((message) => ({ source: "adapter", message })),
   ];
   logs.slice(-60).forEach(({ source, message }, index) => {
@@ -491,7 +487,7 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
     if (notifications.some((item) => item.id === id)) return;
     const lower = normalizedMessage.toLowerCase();
     const level = text.includes("[ERROR]") || lower.includes("failed") || lower.includes("blocked") ? "error" : text.includes("[WARNING]") || lower.includes("disabled") || lower.includes("disconnected") ? "warning" : text.includes("[SUCCESS]") ? "success" : "info";
-    const title = lower.includes("algo") || lower.includes("algorithmic") ? "MT5 Algo Trading" : source === "risk" || lower.includes("risk") ? "Risk management" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
+    const title = lower.includes("algo") || lower.includes("algorithmic") ? "MT5 Algo Trading" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
     notifications.push({
       id,
       title,
@@ -556,15 +552,6 @@ function buildDeveloperBootstrap() {
       end_time: null,
       last_stop_reason: null,
     },
-    risk_monitor: {
-      running: false,
-      started_at: null,
-      interval_sec: 60,
-      risk_percent: 1,
-      profit_percent: 1,
-      orders_limit: 10,
-      start_balance: null,
-    },
     manual_trade: {
       auto_close_at: null,
       scheduled_at: null,
@@ -589,7 +576,6 @@ function buildDeveloperBootstrap() {
     sessions: {},
     logs: {
       search: strategyLogs,
-      risk: ["[INFO] Developer mode risk monitor ready."],
       adapter: ["[INFO] Developer mode adapter simulation active."],
     },
     bootstrap_cache: {

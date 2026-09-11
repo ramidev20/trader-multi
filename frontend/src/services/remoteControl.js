@@ -257,7 +257,6 @@ function openReceiverSocket(record, reconnecting = false) {
   }
   if (record.heartbeatTimer) globalThis.clearInterval(record.heartbeatTimer);
   record.heartbeatTimer = null;
-  appendLog("info", `${reconnecting ? "Reconnecting" : "Connecting"} to ${record.url}...`, record.label);
   record.status = { state: "connecting", message: "Authenticating with the trading PC..." };
   publishReceivers();
 
@@ -269,7 +268,6 @@ function openReceiverSocket(record, reconnecting = false) {
 
     nextSocket.onopen = () => {
       socketOpened = true;
-      appendLog("info", "Socket opened. Sending authentication token.", record.label);
       nextSocket.send(JSON.stringify({ type: "authenticate", token: record.token }));
     };
 
@@ -298,7 +296,8 @@ function openReceiverSocket(record, reconnecting = false) {
         return;
       }
       if (message.type === "log" && message.message) {
-        appendLog(message.level || "info", message.message, record.label);
+        // Per-step execution narration (risk % selected, order-delay
+        // countdown, ...) -- noise here; the result below is what matters.
         return;
       }
       const waiting = record.pending.get(message.id);
@@ -307,8 +306,8 @@ function openReceiverSocket(record, reconnecting = false) {
       if (message.status === "success") {
         const resultMessage = message.result?.message || message.result?.adapter_result?.message;
         const copySummary = message.result?.copy_summary || message.result?.adapter_result?.copy_summary;
-        appendLog("success", resultMessage || `Command ${message.id || "unknown"} completed successfully.`, record.label);
-        if (copySummary) appendLog("info", copySummary, record.label);
+        const summary = [resultMessage, copySummary].filter(Boolean).join(" — ") || `Command ${message.id || "unknown"} completed successfully.`;
+        appendLog("success", summary, record.label);
         waiting.resolve(message);
       } else {
         appendLog("error", `Command ${message.id || "unknown"} failed: ${message.message || "Remote command failed."}`, record.label);

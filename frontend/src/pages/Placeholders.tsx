@@ -3,11 +3,9 @@ import {
   AlertTriangle,
   Bell,
   CheckCircle2,
-  Play,
   RefreshCcw,
   Server,
   Settings,
-  StopCircle,
   Terminal,
   Trash2,
   Wrench,
@@ -987,6 +985,12 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   }
 
   async function closePositions() {
+    // The controller and each receiver are separate PCs with separate
+    // accounts: it's entirely normal for the controller's own accounts to
+    // have nothing open (e.g. a position only ever lived on a receiver via
+    // mirroring). Track whether a remote mirror was attempted and succeeded
+    // so that case doesn't get reported as a local error below.
+    const receiversMirrored = listReceivers().some((receiver) => receiver.enabled);
     try {
       setCloseConfirmOpen(false);
       const response = await api.closePositions();
@@ -994,7 +998,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       // configured, not only when isRemoteConnected() already reads true, or
       // a receiver that is actually reachable but briefly looked offline gets
       // silently skipped instead of failing loudly.
-      if (listReceivers().some((receiver) => receiver.enabled)) {
+      if (receiversMirrored) {
         const { results } = await sendRemoteCommand("close_all", {});
         const failed = results.filter((result) => result.status === "error");
         if (failed.length) {
@@ -1011,10 +1015,15 @@ export function TradePage({ runtime, onRefreshRuntime }) {
         setErrorText("");
       } else if (Number(summary.attempted || 0) > 0) {
         setErrorText(
-          "Close-all completed, but no positions were confirmed closed. Check backend logs.",
+          "Close-all completed, but no positions were confirmed closed locally. Check backend logs.",
         );
-      } else {
+      } else if (!receiversMirrored) {
         setErrorText("No open positions were found to close.");
+      } else {
+        // Nothing to close on this PC's own accounts, but the close request
+        // was sent to and accepted by every enabled receiver above -- not an
+        // error condition, just nothing local to report.
+        setErrorText("");
       }
     } catch (error) {
       setErrorText(String(error?.message || error));
@@ -1550,90 +1559,6 @@ function toDateTimeLocalValue(value) {
 
 function defaultAutoCloseValue() {
   return toDateTimeLocalValue(new Date(Date.now() + 60 * 60 * 1000));
-}
-
-export function RiskManagementPage({ runtime, onRefreshRuntime }) {
-  const [intervalSec, setIntervalSec] = useState("60");
-  const [ordersLimit, setOrdersLimit] = useState("10");
-  const [riskLimit, setRiskLimit] = useState("1");
-  const [profitLimit, setProfitLimit] = useState("1");
-  const [errorText, setErrorText] = useState("");
-
-  const monitorRunning = Boolean(runtime?.risk_monitor?.running);
-
-  async function startMonitor() {
-    try {
-      await api.startRiskMonitor({
-        interval_sec: Number(intervalSec || 60),
-        orders_limit: Number(ordersLimit || 10),
-        risk_percent: Number(riskLimit || 1),
-        profit_percent: Number(profitLimit || 1),
-      });
-      await onRefreshRuntime?.();
-      setErrorText("");
-    } catch (error) {
-      setErrorText(String(error?.message || error));
-    }
-  }
-
-  async function stopMonitor() {
-    try {
-      await api.stopRiskMonitor();
-      await onRefreshRuntime?.();
-      setErrorText("");
-    } catch (error) {
-      setErrorText(String(error?.message || error));
-    }
-  }
-
-  return (
-    <Card>
-      <h3 className="text-lg font-black text-slate-950">Risk Management</h3>
-      {errorText ? (
-        <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
-          {errorText}
-        </div>
-      ) : null}
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
-        <Field
-          label="Check Interval (seconds)"
-          value={intervalSec}
-          onChange={(e) => setIntervalSec(e.target.value)}
-        />
-        <Field
-          label="Orders Limit"
-          value={ordersLimit}
-          onChange={(e) => setOrdersLimit(e.target.value)}
-        />
-        <Field
-          label="Risk Limit (%)"
-          value={riskLimit}
-          onChange={(e) => setRiskLimit(e.target.value)}
-        />
-        <Field
-          label="Profit Limit (%)"
-          value={profitLimit}
-          onChange={(e) => setProfitLimit(e.target.value)}
-        />
-      </div>
-      <div className="mt-4 flex gap-2">
-        <AppButton
-          variant="green"
-          disabled={monitorRunning}
-          onClick={startMonitor}
-        >
-          <Play className="h-4 w-4" /> Start Monitoring
-        </AppButton>
-        <AppButton
-          variant="soft"
-          disabled={!monitorRunning}
-          onClick={stopMonitor}
-        >
-          <StopCircle className="h-4 w-4" /> Stop Monitoring
-        </AppButton>
-      </div>
-    </Card>
-  );
 }
 
 export function ProfilePage({

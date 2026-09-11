@@ -5,7 +5,6 @@ import {
   Search,
   Settings,
   Radio,
-  ShieldCheck,
   Terminal,
 } from "lucide-react";
 import { cx } from "../../utils/format";
@@ -23,7 +22,6 @@ export default function Sidebar({ activePage, onChangePage }: SidebarProps) {
     { key: "search", label: "Search", icon: Search },
     { key: "trade", label: "Trade", icon: Terminal },
     { key: "history", label: "Trade History", icon: Copy },
-    { key: "risk", label: "Risk Manager", icon: ShieldCheck },
     { key: "remote", label: "Remote Control", icon: Radio },
     { key: "settings", label: "Settings", icon: Settings },
   ];

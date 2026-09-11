@@ -61,6 +61,4 @@ export const api = {
   openPosition: (payload) => request("/positions/open", { method: "POST", body: JSON.stringify(payload) }),
   closePositions: () => request("/positions/close", { method: "POST" }),
 
-  startRiskMonitor: (payload) => request("/risk/start", { method: "POST", body: JSON.stringify(payload) }),
-  stopRiskMonitor: () => request("/risk/stop", { method: "POST" }),
 };

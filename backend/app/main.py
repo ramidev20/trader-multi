@@ -17,7 +17,6 @@ from pydantic import BaseModel
 
 from .services.mt5_compat import mt5, mt5_available
 from .services.env_utils import is_dev_mode, load_project_env
-from .services.risk_service import start_risk_monitor, stop_risk_monitor
 from .services.mt5_lock import MT5_LOCK
 from .services.runtime_state import append_log, get as state_get, patch_path as state_patch, set_path as state_set, snapshot
 from .services.session_service import connect_account, disconnect_account, disconnect_all, list_sessions, submit_adapter_command
@@ -226,11 +225,6 @@ class LiquidityLevelPayload(BaseModel):
     side: str
 
 
-class RiskStartPayload(BaseModel):
-    interval_sec: int = 60
-    risk_percent: float = 1.0
-    profit_percent: float = 1.0
-    orders_limit: int = 10
 
 
 app = FastAPI(title="MT5 Trader API", version="0.3.0")
@@ -253,9 +247,7 @@ app.add_middleware(
 
 def _runtime_logger(message: str, level: str) -> None:
     level_label = str(level or "info").upper()
-    # Route strategy/risk lines by task prefix.
-    log_kind = "risk" if any(x in message for x in ("account_management", "risk")) else "search"
-    append_log(log_kind, f"[{level_label}] {message}")
+    append_log("search", f"[{level_label}] {message}")
 
 
 set_runtime_logger(_runtime_logger)
@@ -772,7 +764,6 @@ def bootstrap() -> dict[str, Any]:
         "metrics": _metrics(front_accounts),
         "logs": {
             "search": runtime["logs"]["search"][-200:] or ["[INFO] Strategy engine initialized for XAUUSD M1."],
-            "risk": runtime["logs"]["risk"][-200:] or ["[INFO] Risk monitor initialized."],
             "adapter": runtime["logs"]["adapter"][-200:],
         },
         "runtime": runtime,
@@ -1226,22 +1217,6 @@ def close_positions() -> dict[str, Any]:
     return {"status": "ok", "summary": summary, "orders": state_get("orders", [])}
 
 
-@app.post("/risk/start")
-def risk_start(payload: RiskStartPayload) -> dict[str, Any]:
-    _require_master_connected()
-    return start_risk_monitor(
-        risk_percent=float(payload.risk_percent),
-        profit_percent=float(payload.profit_percent),
-        orders_limit=int(payload.orders_limit),
-        interval_sec=max(1, int(payload.interval_sec)),
-    )
-
-
-@app.post("/risk/stop")
-def risk_stop() -> dict[str, Any]:
-    return stop_risk_monitor()
-
-
 @app.post("/actions")
 def action(payload: ActionPayload) -> dict[str, Any]:
     action_name = payload.action
@@ -1257,10 +1232,6 @@ def action(payload: ActionPayload) -> dict[str, Any]:
         return close_positions()
     if action_name == "add_liquidity_level":
         return add_liquidity_level(LiquidityLevelPayload(**data))
-    if action_name == "start_risk_monitor":
-        return risk_start(RiskStartPayload(**data))
-    if action_name == "stop_risk_monitor":
-        return risk_stop()
     if action_name == "load_defaults":
         return {"status": "ok", "message": "Defaults loaded."}
     if action_name == "connect_account":

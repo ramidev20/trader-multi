@@ -1190,29 +1190,6 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
     append_log("search", f"[WARNING] Close positions requested ({side}) for {symbol}.")
 
 
-def account_management(profit_percent, risk_percent, start_balance, symbol: str = SYMBOL_DEFAULT):
-    if mt5_available():
-        info = mt5.account_info()
-        if info is None:
-            return True, "warning", "No account info available."
-        current_balance = float(info.equity)
-    else:
-        accounts = _load_config().get("trading_accounts", [])
-        current_balance = float(sum(float(a.get("equity", a.get("balance", 0)) or 0) for a in accounts) or start_balance)
-
-    trade_diff = current_balance - float(start_balance or 0)
-    profit_threshold = float(start_balance) * (float(profit_percent) / 100.0)
-    risk_threshold = float(start_balance) * (float(risk_percent) / 100.0)
-
-    if trade_diff >= profit_threshold:
-        close_all_positions(symbol=symbol)
-        return False, "success", f"Daily profit limit reached: {trade_diff:.2f} USD"
-    if trade_diff <= -risk_threshold:
-        close_all_positions(symbol=symbol)
-        return False, "warning", f"Daily risk limit reached: {abs(trade_diff):.2f} USD"
-    return True, "debug", f"Balance: {current_balance:.2f} | Current P/L: {trade_diff:.2f} USD"
-
-
 @_mt5_session_locked
 def open_order_strategy(config_data):
     def body_pips(open_price, close_price):
@@ -1792,5 +1769,4 @@ def running_tasks() -> dict[str, bool]:
         "search_global": is_task_running("search_global"),
         "search_leq": is_task_running("search_leq"),
         "pos_search": is_task_running("pos_search"),
-        "account_management": is_task_running("account_management"),
     }

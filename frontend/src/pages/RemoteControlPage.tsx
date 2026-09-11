@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  AlertTriangle,
   ArrowDown,
   Check,
   CheckCircle2,
@@ -19,8 +20,8 @@ import {
   Trash2,
   Wifi,
   X,
+  XCircle,
 } from "lucide-react";
-import { LogList } from "../components/ui/LogList";
 import { api } from "../services/api";
 import {
   clearRemoteLogs,
@@ -47,18 +48,20 @@ type RemoteLogEntry = {
   atMs?: number;
   receiver?: string | null;
 };
-const LOG_LEVELS = ["error", "warning", "success", "info"] as const;
-const LOG_LEVEL_LABEL: Record<(typeof LOG_LEVELS)[number], string> = {
-  error: "Error",
-  warning: "Warning",
-  success: "Success",
-  info: "Info",
-};
-const LOG_LEVEL_CHIP_ACTIVE: Record<(typeof LOG_LEVELS)[number], string> = {
-  error: "border-rose-500 bg-rose-500 text-white",
-  warning: "border-amber-500 bg-amber-500 text-white",
-  success: "border-teal-500 bg-teal-500 text-white",
-  info: "border-slate-500 bg-slate-500 text-white",
+/** Per-level row treatment: colored left border + tint + icon + label, tuned
+ * for a white card (the pastel text-only coloring used elsewhere reads too
+ * washed out here). Level is already visually obvious from this, so there's
+ * no separate filter-by-level control -- search covers narrowing it down. */
+const LOG_LEVEL_STYLE: Record<
+  RemoteLogEntry["level"],
+  { row: string; icon: React.ComponentType<{ className?: string }>; iconClass: string; label: string; textClass: string }
+> = {
+  error: { row: "border-l-rose-500 bg-rose-50", icon: XCircle, iconClass: "text-rose-600", label: "ERROR", textClass: "text-rose-700" },
+  warning: { row: "border-l-amber-500 bg-amber-50", icon: AlertTriangle, iconClass: "text-amber-600", label: "WARNING", textClass: "text-amber-700" },
+  success: { row: "border-l-teal-500 bg-teal-50/70", icon: CheckCircle2, iconClass: "text-teal-600", label: "SUCCESS", textClass: "text-teal-700" },
+  // Info is the default/no-news case, so it stays neutral -- but a readable,
+  // slightly darker grey rather than the washed-out slate-400/500 used before.
+  info: { row: "border-l-slate-200 bg-white", icon: Info, iconClass: "text-slate-500", label: "INFO", textClass: "text-slate-600" },
 };
 type ReceiverRecord = {
   id: string;
@@ -191,7 +194,6 @@ function RemoteLogPanel({
   onClear?: () => void;
   showReceiverFilter?: boolean;
 }) {
-  const [levelFilter, setLevelFilter] = useState<(typeof LOG_LEVELS)[number] | "all">("all");
   const [receiverFilter, setReceiverFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(() => new Set());
@@ -206,22 +208,15 @@ function RemoteLogPanel({
     return Array.from(names).sort();
   }, [entries, showReceiverFilter]);
 
-  const counts = useMemo(() => {
-    const next: Record<string, number> = { error: 0, warning: 0, success: 0, info: 0 };
-    entries.forEach((entry) => { next[entry.level] = (next[entry.level] || 0) + 1; });
-    return next;
-  }, [entries]);
-
   const visible = useMemo(() => {
     const query = search.trim().toLowerCase();
     return entries.filter((entry) => {
       if (hiddenKeys.has(logEntryKey(entry))) return false;
-      if (levelFilter !== "all" && entry.level !== levelFilter) return false;
       if (receiverFilter !== "all" && entry.receiver !== receiverFilter) return false;
       if (query && !entry.message.toLowerCase().includes(query) && !(entry.receiver || "").toLowerCase().includes(query)) return false;
       return true;
     });
-  }, [entries, hiddenKeys, levelFilter, receiverFilter, search]);
+  }, [entries, hiddenKeys, receiverFilter, search]);
 
   // Stick to the bottom as new lines arrive, unless the operator has
   // scrolled up to read history -- matches a normal chat/log-tail feel.
@@ -269,32 +264,9 @@ function RemoteLogPanel({
     }
   }
 
-  const lines = visible.map((entry) => {
-    const tag = entry.receiver ? `[${entry.receiver}] ` : "";
-    return `[${entry.level.toUpperCase()}] ${entry.at} ${tag}${entry.message}`;
-  });
-
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-1.5">
-        <button
-          type="button"
-          onClick={() => setLevelFilter("all")}
-          className={`rounded-full border px-2.5 py-1 text-[11px] font-black transition ${levelFilter === "all" ? "border-slate-700 bg-slate-700 text-white" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
-        >
-          All · {entries.length}
-        </button>
-        {LOG_LEVELS.map((level) => (
-          <button
-            key={level}
-            type="button"
-            onClick={() => setLevelFilter((current) => (current === level ? "all" : level))}
-            disabled={!counts[level]}
-            className={`rounded-full border px-2.5 py-1 text-[11px] font-black transition disabled:cursor-not-allowed disabled:opacity-40 ${levelFilter === level ? LOG_LEVEL_CHIP_ACTIVE[level] : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
-          >
-            {LOG_LEVEL_LABEL[level]} · {counts[level] || 0}
-          </button>
-        ))}
         {showReceiverFilter && receiverNames.length ? (
           <select
             value={receiverFilter}
@@ -338,8 +310,31 @@ function RemoteLogPanel({
       </div>
 
       <div className="relative min-h-[380px] rounded-2xl border border-slate-200 bg-white">
-        <div ref={scrollRef} onScroll={handleScroll} className="max-h-[380px] overflow-y-auto">
-          <LogList logs={lines} emptyMessage={entries.length ? "No log lines match the current filter." : emptyText} />
+        <div ref={scrollRef} onScroll={handleScroll} className="max-h-[380px] divide-y divide-slate-100 overflow-y-auto">
+          {visible.length ? (
+            visible.map((entry) => {
+              const style = LOG_LEVEL_STYLE[entry.level];
+              const LevelIcon = style.icon;
+              return (
+                <div key={entry.id} className={`flex items-start gap-2 border-l-[3px] px-3 py-2 text-[12.5px] leading-relaxed ${style.row}`}>
+                  <LevelIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${style.iconClass}`} />
+                  <span className="shrink-0 font-mono text-[10.5px] text-slate-400">{entry.at}</span>
+                  {entry.receiver ? (
+                    <span className="shrink-0 rounded-full bg-slate-900/5 px-1.5 py-0.5 text-[9.5px] font-black uppercase tracking-wide text-slate-600">
+                      {entry.receiver}
+                    </span>
+                  ) : null}
+                  <span className={`min-w-0 flex-1 break-words font-semibold ${style.textClass}`}>
+                    <span className="font-mono font-black">[{style.label}]</span> {entry.message}
+                  </span>
+                </div>
+              );
+            })
+          ) : (
+            <div className="grid min-h-[380px] place-items-center px-4 text-center text-sm font-semibold text-slate-400">
+              {entries.length ? "No log lines match the current filter." : emptyText}
+            </div>
+          )}
         </div>
         {!following && visible.length ? (
           <button
@@ -665,7 +660,10 @@ export default function RemoteControlPage() {
         if (cancelled) return;
         const adapterLines = Array.isArray(runtime?.logs?.adapter) ? runtime.logs.adapter : [];
         const nextLogs: RemoteLogEntry[] = adapterLines
-          .filter((line) => typeof line === "string")
+          // The adapter channel also carries unrelated activity (account
+          // connects, MT5 session events); only [REMOTE]-tagged lines are
+          // actually about the remote-control link, so that's all this shows.
+          .filter((line) => typeof line === "string" && line.includes("[REMOTE]"))
           .slice(-80)
           .map((line, index) => {
             const match = line.match(/^\[(.*?)\]\s+(.*)$/);

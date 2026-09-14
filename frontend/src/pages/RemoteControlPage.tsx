@@ -1,8 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  AlertTriangle,
-  ArrowDown,
   Check,
   CheckCircle2,
   CircleOff,
@@ -20,8 +18,8 @@ import {
   Trash2,
   Wifi,
   X,
-  XCircle,
 } from "lucide-react";
+import { ConsoleLogPanel, type ConsoleLogEntry } from "../components/ui/ConsoleLogPanel";
 import { api } from "../services/api";
 import {
   clearRemoteLogs,
@@ -47,21 +45,6 @@ type RemoteLogEntry = {
   at: string;
   atMs?: number;
   receiver?: string | null;
-};
-/** Per-level row treatment: colored left border + tint + icon + label, tuned
- * for a white card (the pastel text-only coloring used elsewhere reads too
- * washed out here). Level is already visually obvious from this, so there's
- * no separate filter-by-level control -- search covers narrowing it down. */
-const LOG_LEVEL_STYLE: Record<
-  RemoteLogEntry["level"],
-  { row: string; icon: React.ComponentType<{ className?: string }>; iconClass: string; label: string; textClass: string }
-> = {
-  error: { row: "border-l-rose-500 bg-rose-50", icon: XCircle, iconClass: "text-rose-600", label: "ERROR", textClass: "text-rose-700" },
-  warning: { row: "border-l-amber-500 bg-amber-50", icon: AlertTriangle, iconClass: "text-amber-600", label: "WARNING", textClass: "text-amber-700" },
-  success: { row: "border-l-teal-500 bg-teal-50/70", icon: CheckCircle2, iconClass: "text-teal-600", label: "SUCCESS", textClass: "text-teal-700" },
-  // Info is the default/no-news case, so it stays neutral -- but a readable,
-  // slightly darker grey rather than the washed-out slate-400/500 used before.
-  info: { row: "border-l-slate-200 bg-white", icon: Info, iconClass: "text-slate-500", label: "INFO", textClass: "text-slate-600" },
 };
 type ReceiverRecord = {
   id: string;
@@ -173,13 +156,6 @@ function inferServerLevel(message: string): RemoteLogEntry["level"] {
   return "info";
 }
 
-/** Content-based identity for a log line (there's no server-side sequence
- * number to key off), used only to let "Clear view" hide already-seen lines
- * without touching the underlying log store. */
-function logEntryKey(entry: RemoteLogEntry) {
-  return `${entry.at}::${entry.message}`;
-}
-
 function RemoteLogPanel({
   emptyText,
   entries,
@@ -194,164 +170,18 @@ function RemoteLogPanel({
   onClear?: () => void;
   showReceiverFilter?: boolean;
 }) {
-  const [receiverFilter, setReceiverFilter] = useState("all");
-  const [search, setSearch] = useState("");
-  const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(() => new Set());
-  const [copied, setCopied] = useState(false);
-  const [following, setFollowing] = useState(true);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-
-  const receiverNames = useMemo(() => {
-    if (!showReceiverFilter) return [];
-    const names = new Set<string>();
-    entries.forEach((entry) => { if (entry.receiver) names.add(entry.receiver); });
-    return Array.from(names).sort();
-  }, [entries, showReceiverFilter]);
-
-  const visible = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    return entries.filter((entry) => {
-      if (hiddenKeys.has(logEntryKey(entry))) return false;
-      if (receiverFilter !== "all" && entry.receiver !== receiverFilter) return false;
-      if (query && !entry.message.toLowerCase().includes(query) && !(entry.receiver || "").toLowerCase().includes(query)) return false;
-      return true;
-    });
-  }, [entries, hiddenKeys, receiverFilter, search]);
-
-  // Stick to the bottom as new lines arrive, unless the operator has
-  // scrolled up to read history -- matches a normal chat/log-tail feel.
-  useEffect(() => {
-    if (!following) return;
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [visible, following]);
-
-  function handleScroll() {
-    const node = scrollRef.current;
-    if (!node) return;
-    const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 24;
-    setFollowing(atBottom);
-  }
-
-  function jumpToLatest() {
-    setFollowing(true);
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }
-
-  function handleClear() {
-    if (onClear) {
-      onClear();
-      setHiddenKeys(new Set());
-    } else {
-      setHiddenKeys((current) => {
-        const next = new Set(current);
-        entries.forEach((entry) => next.add(logEntryKey(entry)));
-        return next;
-      });
-    }
-  }
-
-  async function handleCopy() {
-    const text = visible.map((entry) => `[${entry.level.toUpperCase()}] ${entry.at} ${entry.receiver ? `[${entry.receiver}] ` : ""}${entry.message}`).join("\n");
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // Clipboard access can be denied; the log stays visible either way.
-    }
-  }
-
+  const consoleEntries = useMemo<ConsoleLogEntry[]>(
+    () => entries.map((entry) => ({ id: entry.id, level: entry.level, message: entry.message, at: entry.at, tag: entry.receiver })),
+    [entries],
+  );
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-1.5">
-        {showReceiverFilter && receiverNames.length ? (
-          <select
-            value={receiverFilter}
-            onChange={(event) => setReceiverFilter(event.target.value)}
-            className="h-[26px] rounded-full border border-slate-200 bg-white px-2.5 text-[11px] font-black text-slate-600 outline-none focus:border-blue-400"
-            aria-label="Filter logs by receiver"
-          >
-            <option value="all">All receivers</option>
-            {receiverNames.map((name) => (
-              <option key={name} value={name}>{name}</option>
-            ))}
-          </select>
-        ) : null}
-        <div className="relative ml-auto">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search logs..."
-            className="h-[26px] w-[160px] rounded-full border border-slate-200 bg-white pl-8 pr-2.5 text-[11px] font-semibold text-slate-700 outline-none transition focus:w-[200px] focus:border-blue-400 sm:w-[180px]"
-          />
-        </div>
-        <button
-          type="button"
-          onClick={handleCopy}
-          disabled={!visible.length}
-          title="Copy visible lines"
-          className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {copied ? <Check className="h-3.5 w-3.5 text-teal-600" /> : <Copy className="h-3.5 w-3.5" />}
-        </button>
-        <button
-          type="button"
-          onClick={handleClear}
-          disabled={!entries.length}
-          title={onClear ? "Clear this log" : "Hide everything shown so far (the receiver keeps its own copy)"}
-          className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-rose-200 bg-white text-rose-500 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
-      </div>
-
-      <div className="relative min-h-[380px] rounded-2xl border border-slate-200 bg-white">
-        <div ref={scrollRef} onScroll={handleScroll} className="max-h-[380px] divide-y divide-slate-100 overflow-y-auto">
-          {visible.length ? (
-            visible.map((entry) => {
-              const style = LOG_LEVEL_STYLE[entry.level];
-              const LevelIcon = style.icon;
-              return (
-                <div key={entry.id} className={`flex items-start gap-2 border-l-[3px] px-3 py-2 text-[12.5px] leading-relaxed ${style.row}`}>
-                  <LevelIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${style.iconClass}`} />
-                  <span className="shrink-0 font-mono text-[10.5px] text-slate-400">{entry.at}</span>
-                  {entry.receiver ? (
-                    <span className="shrink-0 rounded-full bg-slate-900/5 px-1.5 py-0.5 text-[9.5px] font-black uppercase tracking-wide text-slate-600">
-                      {entry.receiver}
-                    </span>
-                  ) : null}
-                  <span className={`min-w-0 flex-1 break-words font-semibold ${style.textClass}`}>
-                    <span className="font-mono font-black">[{style.label}]</span> {entry.message}
-                  </span>
-                </div>
-              );
-            })
-          ) : (
-            <div className="grid min-h-[380px] place-items-center px-4 text-center text-sm font-semibold text-slate-400">
-              {entries.length ? "No log lines match the current filter." : emptyText}
-            </div>
-          )}
-        </div>
-        {!following && visible.length ? (
-          <button
-            type="button"
-            onClick={jumpToLatest}
-            className="absolute bottom-3 right-3 inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-3 py-1.5 text-[11px] font-black text-white shadow-lg transition hover:bg-slate-800"
-          >
-            <ArrowDown className="h-3.5 w-3.5" />Jump to latest
-          </button>
-        ) : null}
-      </div>
-      {onClear ? null : (
-        <p className="text-[11px] text-slate-400">
-          "Clear" only hides what's shown here in this browser -- it does not erase the receiver's own log.
-        </p>
-      )}
-    </div>
+    <ConsoleLogPanel
+      emptyText={emptyText}
+      entries={consoleEntries}
+      onClear={onClear}
+      showTagFilter={showReceiverFilter}
+      tagFilterLabel="All receivers"
+    />
   );
 }
 

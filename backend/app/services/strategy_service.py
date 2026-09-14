@@ -650,6 +650,82 @@ def _manual_tp_pending_order(session: dict):
     return order
 
 
+def _price_move_pct(side: str, entry: float, price: float) -> float:
+    """Percent price move from entry to price, sign-adjusted so a profitable
+    move (the only kind a TP or a winning close represents) reads positive
+    regardless of side."""
+    if entry <= 0:
+        return 0.0
+    if side == "BUY":
+        return (price - entry) / entry * 100.0
+    return (entry - price) / entry * 100.0
+
+
+def _mark_order_closed(ticket: int, profit: float | None = None) -> None:
+    """Reconcile the local order row once MT5 confirms a ticket is gone --
+    without this, a position the broker closed on its own (SL, or a plain TP
+    with no multi-TP session) stays "open" in the app forever, since nothing
+    else ever revisits it after the initial fill."""
+    if ticket <= 0:
+        return
+    orders = get("orders", [])
+    changed = False
+    for order in orders:
+        if int(order.get("ticket", 0) or 0) == ticket and order.get("status") == "open":
+            order["status"] = "closed"
+            order["closed_at"] = datetime.now().isoformat()
+            if profit is not None:
+                order["profit"] = round(float(profit), 2)
+            changed = True
+    if changed:
+        replace_list("orders", orders)
+
+
+def _report_manual_tp_session_closed(session: dict) -> None:
+    """The position a multi-TP session was tracking is gone before every
+    target fired. The poll loop below only ever logs a TP *hit*, so without
+    this an SL stop-out or a manual close mid-sequence left no log line at
+    all. Looks up the real closing deal(s) so the amount is exact, not an
+    estimate from floating profit at the last poll tick."""
+    ticket = int(session.get("ticket") or 0)
+    if not mt5_available() or not ticket:
+        emit_log(
+            f"[manual_tp] {session.get('side', '-')} {session.get('symbol', SYMBOL_DEFAULT)} position is no longer open.",
+            "warning",
+        )
+        return
+    deals = mt5.history_deals_get(position=ticket) or []
+    closing_entry = int(getattr(mt5, "DEAL_ENTRY_OUT", 1))
+    closing_deals = [d for d in deals if int(getattr(d, "entry", -1)) == closing_entry]
+    if not closing_deals:
+        # Nothing closed yet as far as history reports (can lag a beat behind
+        # positions_get); the next poll will pick it up once it appears.
+        return
+    total_profit = sum(
+        float(getattr(deal, "profit", 0.0) or 0.0)
+        + float(getattr(deal, "swap", 0.0) or 0.0)
+        + float(getattr(deal, "commission", 0.0) or 0.0)
+        for deal in closing_deals
+    )
+    last_deal = closing_deals[-1]
+    close_price = float(getattr(last_deal, "price", 0.0) or 0.0)
+    reason = int(getattr(last_deal, "reason", -1))
+    move_pct = _price_move_pct(str(session.get("side", "BUY")), float(session.get("entry", 0.0) or 0.0), close_price)
+    if reason == int(getattr(mt5, "DEAL_REASON_SL", -100)):
+        label, level = "SL hit", "warning"
+    elif reason == int(getattr(mt5, "DEAL_REASON_TP", -101)):
+        label, level = "TP hit", "success"
+    else:
+        label, level = "Closed manually", "info"
+    emit_log(
+        f"[manual_tp] {label}: {session.get('side', '-')} {session.get('symbol', SYMBOL_DEFAULT)} "
+        f"closed @ {close_price:.2f} ({move_pct:+.2f}% from entry {float(session.get('entry', 0.0) or 0.0):.2f}) "
+        f"-- {total_profit:+.2f} USD.",
+        level,
+    )
+    _mark_order_closed(ticket, total_profit)
+
+
 def _monitor_manual_multi_tp() -> None:
     if not _manual_tp_sessions:
         stop_task(MANUAL_TP_TASK_NAME)
@@ -663,12 +739,14 @@ def _monitor_manual_multi_tp() -> None:
             continue
 
         target_price, withdrawal_percent = targets[target_index]
+        closed_profit: float | None = None
         if mt5_available():
             position = _manual_tp_position(session)
             if position is None:
                 pending_order = _manual_tp_pending_order(session)
                 if pending_order is not None:
                     continue
+                _report_manual_tp_session_closed(session)
                 _manual_tp_sessions.remove(session)
                 continue
             tick = mt5.symbol_info_tick(session["symbol"])
@@ -679,11 +757,16 @@ def _monitor_manual_multi_tp() -> None:
             if not target_hit:
                 continue
             current_volume = float(getattr(position, "volume", 0.0) or 0.0)
+            position_profit = float(getattr(position, "profit", 0.0) or 0.0)
             close_volume = current_volume * float(withdrawal_percent) / 100.0
             closed, detail = _close_mt5_position(position, close_volume, "manual TP partial close")
             if not closed:
                 emit_log(f"[manual_tp] TP{target_index + 1} partial close failed: {detail}", "warning")
                 continue
+            # The exact fill isn't available from order_send() without another
+            # round trip; this prorates the position's floating profit at the
+            # moment of the close, which is effectively the realized amount.
+            closed_profit = position_profit * (close_volume / current_volume) if current_volume else 0.0
         else:
             order_id = str(session.get("order_id") or "")
             orders = get("orders", [])
@@ -700,8 +783,12 @@ def _monitor_manual_multi_tp() -> None:
             replace_list("orders", orders)
 
         session["next_target"] = target_index + 1
+        move_pct = _price_move_pct(session["side"], float(session.get("entry", 0.0) or 0.0), float(target_price))
+        profit_text = f" -- ~{closed_profit:+.2f} USD" if closed_profit is not None else ""
         emit_log(
-            f"[manual_tp] TP{target_index + 1} reached at {float(target_price):.2f}; withdrew {float(withdrawal_percent):.0f}% of remaining volume.",
+            f"[manual_tp] TP{target_index + 1} hit: {session['side']} {session['symbol']} @ {float(target_price):.2f} "
+            f"({move_pct:+.2f}% from entry {float(session.get('entry', 0.0) or 0.0):.2f}) -- withdrew "
+            f"{float(withdrawal_percent):.0f}% of remaining volume{profit_text}.",
             "success",
         )
 
@@ -1053,6 +1140,9 @@ def close_positions_on_current_session(side: str, symbol: str | None) -> dict[st
     closed_tickets: list[int] = []
     pending_closed_tickets: list[int] = []
     errors: list[str] = []
+    total_profit = 0.0
+    account_info = mt5.account_info()
+    balance_before = float(getattr(account_info, "balance", 0.0) or 0.0) if account_info is not None else 0.0
     try:
         positions = mt5.positions_get() if symbol is None else mt5.positions_get(symbol=symbol)
         for pos in positions or []:
@@ -1063,9 +1153,14 @@ def close_positions_on_current_session(side: str, symbol: str | None) -> dict[st
                 if side == "sell" and position_side != "sell":
                     continue
                 attempted += 1
+                # A full close realizes essentially this floating profit, so
+                # capture it before the close rather than needing a second
+                # history lookup afterward.
+                position_profit = float(getattr(pos, "profit", 0.0) or 0.0)
                 closed_ok, close_detail = _close_mt5_position(pos)
                 if closed_ok:
                     closed_tickets.append(int(getattr(pos, "ticket", 0) or 0))
+                    total_profit += position_profit
                 else:
                     symbol_name = str(getattr(pos, "symbol", symbol or SYMBOL_DEFAULT) or SYMBOL_DEFAULT)
                     errors.append(f"Close failed ticket={getattr(pos, 'ticket', '-')} symbol={symbol_name} {close_detail}")
@@ -1101,6 +1196,8 @@ def close_positions_on_current_session(side: str, symbol: str | None) -> dict[st
         "closed_tickets": closed_tickets,
         "pending_closed_tickets": pending_closed_tickets,
         "errors": errors,
+        "profit": total_profit,
+        "balance_before": balance_before,
     }
 
 
@@ -1112,6 +1209,8 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
     pending_closed_tickets: set[int] = set()
     attempted = 0
     errors: list[str] = []
+    total_profit = 0.0
+    total_balance_before = 0.0
     cfg = _load_config()
     accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
     require_ticket_match = mt5_available() and bool(accounts)
@@ -1151,6 +1250,8 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
                 closed_tickets.add(int(ticket))
             for ticket in result.get("pending_closed_tickets", []) or []:
                 pending_closed_tickets.add(int(ticket))
+            total_profit += float(result.get("profit", 0.0) or 0.0)
+            total_balance_before += float(result.get("balance_before", 0.0) or 0.0)
             for err in result.get("errors", []) or []:
                 message = f"{login}: {err}"
                 errors.append(message)
@@ -1186,8 +1287,29 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
         order["status"] = "closed"
         order["closed_at"] = datetime.now().isoformat()
     replace_list("orders", orders)
-    return {"attempted": attempted, "closed": len(closed_tickets), "real_close": mt5_available(), "errors": errors}
-    append_log("search", f"[WARNING] Close positions requested ({side}) for {symbol}.")
+    profit_percent = (total_profit / total_balance_before * 100.0) if total_balance_before > 0 else 0.0
+    # This used to be unreachable (placed after the function's `return`
+    # below), which is why closing positions produced no log line at all --
+    # not even on success.
+    if closed_tickets or pending_closed_tickets:
+        profit_text = f" -- {total_profit:+.2f} USD ({profit_percent:+.2f}%)" if closed_tickets else ""
+        append_log(
+            "search",
+            f"[SUCCESS] Close all ({side}): closed {len(closed_tickets)} position(s), "
+            f"canceled {len(pending_closed_tickets)} pending order(s){profit_text}.",
+        )
+    elif errors:
+        append_log("search", f"[WARNING] Close all ({side}) completed with {len(errors)} error(s); see details above.")
+    else:
+        append_log("search", f"[INFO] Close all ({side}): no open positions or pending orders found for {symbol or SYMBOL_DEFAULT}.")
+    return {
+        "attempted": attempted,
+        "closed": len(closed_tickets),
+        "real_close": mt5_available(),
+        "errors": errors,
+        "profit": round(total_profit, 2),
+        "profit_percent": round(profit_percent, 2),
+    }
 
 
 @_mt5_session_locked

@@ -27,7 +27,7 @@ export default function Sidebar({ activePage, onChangePage }: SidebarProps) {
   ];
 
   return (
-    <aside className="app-sidebar sticky top-0 z-20 hidden h-screen w-[212px] shrink-0 flex-col self-start border-r border-slate-200 bg-white p-3 lg:flex">
+    <aside className="app-sidebar sticky top-0 z-20 hidden w-[212px] shrink-0 flex-col self-stretch border-r border-slate-200 bg-white p-3 lg:flex">
       <div className="flex items-center gap-2.5 px-2 pb-2">
         <span className="grid h-9 w-9 place-items-center rounded-xl bg-blue-600 text-sm font-black text-white">
           MT

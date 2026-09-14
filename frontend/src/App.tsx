@@ -386,12 +386,19 @@ export default function App() {
                 : "Trading Control Center";
 
   return (
-    <div className="app-shell lg:grid lg:grid-cols-[212px_minmax(0,1fr)]" style={styles.appShell}>
+    <div className="app-shell lg:flex" style={styles.appShell}>
       <Sidebar activePage={activePage} onChangePage={setActivePage} connectedCount={totals.connected} totalCount={accountList.length} />
-      <main className="app-main min-w-0">
+      {/* flex-col + min-h-0 lets the page-content div below claim exactly the
+          remaining height and scroll internally, instead of every page having
+          to independently guess it via a hardcoded `calc(100vh - Npx)` (which
+          drifted from the real TopBar height and left a gap under short
+          content -- and under the app's own zoom setting, which scales via
+          the non-standard CSS `zoom` property and can throw raw vh-based
+          sizing off further). */}
+      <main className="app-main flex min-h-screen min-w-0 flex-col lg:min-h-0 lg:flex-1">
         <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
-        <div className="px-3 py-6 lg:px-5" style={styles.pageContent}>
-          <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }}>
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-6 lg:px-5" style={styles.pageContent}>
+          <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }} className="flex min-h-full flex-col">
             {errorText ? <div style={styles.errorBanner}>{errorText}</div> : null}
             {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock MT5 data unless a live backend session is available.</div> : null}
             {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}

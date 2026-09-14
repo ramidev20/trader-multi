@@ -22,7 +22,7 @@ import {
   Field,
 } from "../components/ui/Primitives";
 import { TableFrame } from "../components/ui/TableFrame";
-import { LogList } from "../components/ui/LogList";
+import { ConsoleLogPanel } from "../components/ui/ConsoleLogPanel";
 import { MetricCard } from "./shared/MetricCard";
 import ChartPage from "./ChartPage";
 import { cx, decimalInput, money, signedDecimalInput } from "../utils/format";
@@ -252,6 +252,9 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     () => savedTradeForm.autoCloseAt ?? defaultAutoCloseValue(),
   );
   const [errorText, setErrorText] = useState("");
+  // Separate from errorText so a close-all result isn't shown in the rose
+  // "something's wrong" banner -- this is a confirmation, not a problem.
+  const [closeSummaryText, setCloseSummaryText] = useState("");
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   // React state updates aren't synchronous: a very fast double-click can fire
@@ -276,35 +279,40 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   const [positionsTab, setPositionsTab] = useState(
     () => savedTradeForm.tradeTab ?? savedTradeForm.positionsTab ?? "chart",
   );
-  const openOrders = useMemo(
-    () => (runtime?.orders || []).filter((o) => o.status === "open"),
-    [runtime],
-  );
+  // Backend search-channel lines are "[HH:MM:SS] [LEVEL] message"; split both
+  // brackets out so the panel can color by the real level instead of guessing.
+  function parseSearchLogLine(line, index) {
+    const text = String(line);
+    const match = text.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*\[(\w+)\]\s*(.*)$/);
+    if (match) {
+      const [, at, levelWord, message] = match;
+      const level = ["error", "warning", "success", "info"].includes(levelWord.toLowerCase())
+        ? levelWord.toLowerCase()
+        : "info";
+      return { id: `search-${index}-${at}-${message}`, level, message, at };
+    }
+    const fallback = text.match(/^\[(.*?)\]\s*(.*)$/);
+    return {
+      id: `search-${index}-${text}`,
+      level: "info",
+      message: fallback?.[2] ?? text,
+      at: fallback?.[1] ?? "--:--:--",
+    };
+  }
+
+  // Only real events here, not a restated snapshot of current state: the
+  // panel below auto-scrolls to the newest line, and a "current positions"
+  // block re-timestamped on every 5s runtime poll would look like new
+  // activity was constantly arriving even while nothing changed. Open
+  // positions and pending orders already have their own tabs for that.
   const tradeFeedLogs = useMemo(() => {
     const tradeLogPattern =
       /manual|order|position|limit|close|auto close|tp\d?|take profit|stop loss|trade/i;
-    const runtimeLogs = (runtime?.logs?.search || []).filter((line) =>
-      tradeLogPattern.test(String(line)),
-    );
-    const openOrderLogs = openOrders
-      .filter(
-        (order) => String(order.order_kind || "").toUpperCase() !== "LIMIT",
-      )
-      .map((order) => {
-        const kind = String(order.order_kind || "MARKET").toUpperCase();
-        const sideLabel = String(order.side || "-").toUpperCase();
-        const entry = Number(order.entry ?? order.price ?? 0) || 0;
-        return `[INFO] ${kind} ${sideLabel} ${order.symbol || "XAUUSD"} @ ${entry.toFixed(2)} lot=${Number(order.lot || 0).toFixed(2)} status=${order.status || "open"}`;
-      });
-    const pendingOrderLogs = limitOrders.map((order) => {
-      const sideLabel = String(order.side || "-").toUpperCase();
-      const entry = Number(order.price ?? order.entry ?? 0) || 0;
-      return `[INFO] LIMIT ${sideLabel} ${order.symbol || "XAUUSD"} @ ${entry.toFixed(2)} lot=${Number(order.lot || 0).toFixed(2)} ticket=${order.ticket || "-"}`;
-    });
-    return [...runtimeLogs, ...openOrderLogs, ...pendingOrderLogs]
-      .slice(-120)
-      .reverse();
-  }, [runtime, openOrders, limitOrders]);
+    return (runtime?.logs?.search || [])
+      .filter((line) => tradeLogPattern.test(String(line)))
+      .map(parseSearchLogLine)
+      .slice(-200);
+  }, [runtime]);
   const searchPipsValue = useMemo(() => {
     const parsed = Number.parseFloat(searchPips);
     return Number.isFinite(parsed) ? parsed : 0;
@@ -1011,38 +1019,57 @@ export function TradePage({ runtime, onRefreshRuntime }) {
       await loadPositions({ silent: true });
       await loadLimitOrders({ silent: true });
       const summary = response?.summary || {};
-      if (Number(summary.closed || 0) > 0) {
+      const closedCount = Number(summary.closed || 0);
+      if (closedCount > 0) {
         setErrorText("");
+        const profit = Number(summary.profit || 0);
+        const profitPercent = Number(summary.profit_percent || 0);
+        const sign = profit >= 0 ? "+" : "";
+        setCloseSummaryText(
+          `Closed ${closedCount} position${closedCount === 1 ? "" : "s"}: ${sign}${profit.toFixed(2)} USD (${sign}${profitPercent.toFixed(2)}%).`,
+        );
       } else if (Number(summary.attempted || 0) > 0) {
+        setCloseSummaryText("");
         setErrorText(
           "Close-all completed, but no positions were confirmed closed locally. Check backend logs.",
         );
       } else if (!receiversMirrored) {
+        setCloseSummaryText("");
         setErrorText("No open positions were found to close.");
       } else {
         // Nothing to close on this PC's own accounts, but the close request
         // was sent to and accepted by every enabled receiver above -- not an
         // error condition, just nothing local to report.
         setErrorText("");
+        setCloseSummaryText("");
       }
     } catch (error) {
+      setCloseSummaryText("");
       setErrorText(String(error?.message || error));
     }
   }
 
   return (
-    <div className="space-y-4">
+    // h-full resolves against App.tsx's page-content flex chain (fixed there
+    // specifically because the old `calc(100vh - 180px)` guess didn't match
+    // the real TopBar height and left a gap under the panels below).
+    <div className="flex h-full min-h-0 flex-col gap-4">
       {errorText ? (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
+        <div className="shrink-0 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
           {errorText}
+        </div>
+      ) : null}
+      {closeSummaryText ? (
+        <div className="shrink-0 rounded-xl border border-teal-200 bg-teal-50 px-3 py-2 text-sm font-semibold text-teal-700">
+          {closeSummaryText}
         </div>
       ) : null}
       <div
         ref={layoutRef}
-        className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_6px_var(--trade-panel-width)]"
+        className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_6px_var(--trade-panel-width)]"
         style={{ "--trade-panel-width": `${panelWidth}px` }}
       >
-        <div className="flex h-[calc(100vh-180px)] flex-col gap-4">
+        <div className="flex h-full flex-col gap-4">
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-1">
               {[
@@ -1243,11 +1270,13 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                     </table>
                   </TableFrame>
                 ) : (
-                  <LogList
-                    className="mt-4 min-h-[360px]"
-                    logs={tradeFeedLogs}
-                    emptyMessage="[INFO] No trade activity logs yet."
-                  />
+                  <div className="mt-4 min-h-0 flex-1">
+                    <ConsoleLogPanel
+                      emptyText="No trade activity logs yet."
+                      entries={tradeFeedLogs}
+                      fill
+                    />
+                  </div>
                 )}
               </Card>
             )}
@@ -1262,7 +1291,7 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           onDoubleClick={() => setPanelWidth(PANEL_DEFAULT_WIDTH)}
           className="hidden cursor-col-resize rounded-full bg-slate-200 transition hover:bg-blue-400 xl:block"
         />
-        <div className="flex h-[calc(100vh-180px)] min-w-0 flex-col">
+        <div className="flex h-full min-w-0 flex-col">
           <Card className="flex h-full flex-col pt-3">
             <div className="shrink-0 space-y-3">
               <SideSelector />

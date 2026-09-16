@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCcw } from "lucide-react";
 import {
   BaselineSeries,
@@ -84,12 +84,20 @@ export default function ChartPage() {
       }
     >
   >(new Map());
+  const zoneOverlayRef = useRef<{
+    triggerLine: any;
+    zoneBand: any;
+    entryLine: any;
+    slLine: any;
+    tpLine: any;
+  } | null>(null);
   const fittedRef = useRef(false);
   const [timeframe, setTimeframe] = useState("M1");
   const [snapshot, setSnapshot] = useState<ChartSnapshot>({
     candles: [],
     orders: [],
   });
+  const [zoneStatus, setZoneStatus] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [errorText, setErrorText] = useState("");
@@ -130,6 +138,24 @@ export default function ChartPage() {
   }, [timeframe]);
 
   useEffect(() => {
+    let cancelled = false;
+    async function pollZoneStrategy() {
+      try {
+        const result = await api.zoneStrategyStatus();
+        if (!cancelled) setZoneStatus(result?.zone_strategy || null);
+      } catch {
+        // transient network errors are fine to skip silently on a poll loop
+      }
+    }
+    pollZoneStrategy();
+    const timer = window.setInterval(pollZoneStrategy, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!containerRef.current) return undefined;
     const chart = createChart(containerRef.current, {
       autoSize: true,
@@ -163,29 +189,35 @@ export default function ChartPage() {
       chartRef.current = null;
       seriesRef.current = null;
       positionSeriesRef.current.clear();
+      zoneOverlayRef.current = null;
     };
   }, []);
 
+  const normalizedCandles = useMemo(
+    () =>
+      snapshot.candles
+        .map((candle) => ({
+          time: Number(candle.time),
+          open: Number(candle.open),
+          high: Number(candle.high),
+          low: Number(candle.low),
+          close: Number(candle.close),
+        }))
+        .filter((candle) =>
+          [candle.time, candle.open, candle.high, candle.low, candle.close].every(
+            Number.isFinite,
+          ),
+        )
+        .sort((left, right) => left.time - right.time)
+        .filter(
+          (candle, index, all) =>
+            index === 0 || candle.time !== all[index - 1].time,
+        ),
+    [snapshot.candles],
+  );
+
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
-    const normalizedCandles = snapshot.candles
-      .map((candle) => ({
-        time: Number(candle.time),
-        open: Number(candle.open),
-        high: Number(candle.high),
-        low: Number(candle.low),
-        close: Number(candle.close),
-      }))
-      .filter((candle) =>
-        [candle.time, candle.open, candle.high, candle.low, candle.close].every(
-          Number.isFinite,
-        ),
-      )
-      .sort((left, right) => left.time - right.time)
-      .filter(
-        (candle, index, all) =>
-          index === 0 || candle.time !== all[index - 1].time,
-      );
     seriesRef.current.setData(normalizedCandles);
 
     const positions = snapshot.orders.filter(
@@ -331,7 +363,183 @@ export default function ChartPage() {
       chartRef.current?.timeScale().fitContent();
       fittedRef.current = true;
     }
-  }, [snapshot]);
+  }, [snapshot.orders, normalizedCandles]);
+
+  useEffect(() => {
+    if (!seriesRef.current || !chartRef.current || !normalizedCandles.length) return;
+    let overlay = zoneOverlayRef.current;
+    if (!overlay) {
+      overlay = {
+        triggerLine: null,
+        m5ZoneBand: null,
+        m1ZoneBand: null,
+        entryLine: null,
+        slLine: null,
+        tpLine: null,
+      };
+      zoneOverlayRef.current = overlay;
+    }
+
+    const endTime = normalizedCandles[normalizedCandles.length - 1]?.time;
+    // The chart only ever shows XAUUSD today, same as the strategy's default.
+    const symbolMatches =
+      !zoneStatus?.symbol ||
+      String(zoneStatus.symbol).toUpperCase() === "XAUUSD";
+
+    const triggerPrice = Number(zoneStatus?.trigger_price || 0);
+    const showTrigger =
+      symbolMatches &&
+      triggerPrice > 0 &&
+      ["waiting_trigger", "searching_m5_zone", "searching_m1_zone"].includes(
+        zoneStatus?.phase,
+      );
+    if (showTrigger) {
+      const title = `${String(zoneStatus.trigger_zone_type || "").toUpperCase()} trigger`;
+      if (!overlay.triggerLine) {
+        overlay.triggerLine = seriesRef.current.createPriceLine({
+          price: triggerPrice,
+          color: "#7c3aed",
+          lineWidth: 2,
+          lineStyle: 3,
+          axisLabelVisible: true,
+          title,
+        });
+      } else {
+        overlay.triggerLine.applyOptions({ price: triggerPrice, title });
+      }
+    } else if (overlay.triggerLine) {
+      seriesRef.current.removePriceLine(overlay.triggerLine);
+      overlay.triggerLine = null;
+    }
+
+    // Draw a zone rectangle as a BaselineSeries band running from the zone's
+    // own base candle to the latest candle -- same trick used for the TP/SL
+    // shading around an open position, just anchored to the zone's own edges.
+    function drawZoneBand(zone, refKey, label, fillAlpha) {
+      if (!zone) {
+        if (overlay[refKey]) {
+          chartRef.current.removeSeries(overlay[refKey]);
+          overlay[refKey] = null;
+        }
+        return;
+      }
+      let startTime =
+        nearestCandleTime(zone.base_candle_time, normalizedCandles) ??
+        normalizedCandles[0].time;
+      if (startTime === endTime && normalizedCandles.length > 1) {
+        startTime = normalizedCandles[normalizedCandles.length - 2].time;
+      }
+      const zoneColor = zone.type === "demand" ? "#16a34a" : "#e11d48";
+      const zoneFill =
+        zone.type === "demand"
+          ? `rgba(22, 163, 74, ${fillAlpha})`
+          : `rgba(225, 29, 72, ${fillAlpha})`;
+      const title = `${zone.type.toUpperCase()} ${label}`;
+      if (!overlay[refKey]) {
+        overlay[refKey] = chartRef.current.addSeries(BaselineSeries, {
+          baseValue: { type: "price", price: zone.price_low },
+          topLineColor: zoneColor,
+          topFillColor1: zoneFill,
+          topFillColor2: zoneFill,
+          bottomLineColor: zoneColor,
+          bottomFillColor1: "rgba(0, 0, 0, 0)",
+          bottomFillColor2: "rgba(0, 0, 0, 0)",
+          lineVisible: false,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          title,
+        });
+      } else {
+        overlay[refKey].applyOptions({
+          baseValue: { type: "price", price: zone.price_low },
+          topLineColor: zoneColor,
+          topFillColor1: zoneFill,
+          topFillColor2: zoneFill,
+          bottomLineColor: zoneColor,
+          title,
+        });
+      }
+      overlay[refKey].setData([
+        { time: startTime, value: zone.price_high },
+        { time: endTime, value: zone.price_high },
+      ]);
+    }
+
+    // The M5 zone is the intermediate trigger for the M1 search -- shade it
+    // lighter than the M1 zone, which is the one the order actually opens
+    // from.
+    drawZoneBand(
+      symbolMatches ? zoneStatus?.m5_zone : null,
+      "m5ZoneBand",
+      "M5 zone",
+      0.1,
+    );
+    drawZoneBand(
+      symbolMatches ? zoneStatus?.m1_zone : null,
+      "m1ZoneBand",
+      "M1 zone",
+      0.22,
+    );
+
+    const order = symbolMatches ? zoneStatus?.placed_order : null;
+    const entryPrice = Number(order?.entry || 0);
+    const slPrice = Number(order?.sl || 0);
+    const tpPrice = Number(order?.tp || 0);
+
+    if (order && entryPrice > 0) {
+      if (!overlay.entryLine) {
+        overlay.entryLine = seriesRef.current.createPriceLine({
+          price: entryPrice,
+          color: "#2563eb",
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: `Scalp entry #${order.ticket ?? ""}`,
+        });
+      } else {
+        overlay.entryLine.applyOptions({ price: entryPrice });
+      }
+    } else if (overlay.entryLine) {
+      seriesRef.current.removePriceLine(overlay.entryLine);
+      overlay.entryLine = null;
+    }
+
+    if (order && slPrice > 0) {
+      if (!overlay.slLine) {
+        overlay.slLine = seriesRef.current.createPriceLine({
+          price: slPrice,
+          color: "#e11d48",
+          lineWidth: 2,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: "Scalp SL",
+        });
+      } else {
+        overlay.slLine.applyOptions({ price: slPrice });
+      }
+    } else if (overlay.slLine) {
+      seriesRef.current.removePriceLine(overlay.slLine);
+      overlay.slLine = null;
+    }
+
+    if (order && tpPrice > 0) {
+      if (!overlay.tpLine) {
+        overlay.tpLine = seriesRef.current.createPriceLine({
+          price: tpPrice,
+          color: "#16a34a",
+          lineWidth: 2,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: "Scalp TP",
+        });
+      } else {
+        overlay.tpLine.applyOptions({ price: tpPrice });
+      }
+    } else if (overlay.tpLine) {
+      seriesRef.current.removePriceLine(overlay.tpLine);
+      overlay.tpLine = null;
+    }
+  }, [normalizedCandles, zoneStatus]);
 
   async function refreshChart() {
     setRefreshing(true);
@@ -343,7 +551,7 @@ export default function ChartPage() {
   }
 
   return (
-    <div className="flex h-full flex-col gap-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
       {errorText ? (
         <div className="shrink-0 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
           {errorText}

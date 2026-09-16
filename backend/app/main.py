@@ -33,6 +33,7 @@ from .services.strategy_service import (
     _tick_for,
 )
 from .services.task_manager import set_runtime_logger
+from .services.zone_strategy_service import start_zone_strategy_system, stop_zone_strategy_system
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 load_project_env()
@@ -223,6 +224,22 @@ class LotCalculationPayload(BaseModel):
 class LiquidityLevelPayload(BaseModel):
     price: float
     side: str
+
+
+class ZoneStrategyStartPayload(BaseModel):
+    symbol: str = "XAUUSD"
+    trigger_price: float
+    trigger_zone_type: str
+    manual_sl_distance: float
+    sl_distance_in_pips: bool = True
+    order_kind: str = "MARKET"
+    lot: float | None = None
+    risk_percent: float | None = None
+    tp: float | None = None
+    tp_in_pips: bool = True
+    displacement_min_pips: float | None = None
+    displacement_avg_multiplier: float | None = None
+    base_max_body_ratio: float | None = None
 
 
 
@@ -1129,6 +1146,27 @@ def start_strategy(payload: StrategyStartPayload) -> dict[str, Any]:
 def stop_strategy() -> dict[str, Any]:
     stop_strategy_system()
     return {"status": "ok", "strategy": state_get("strategy", {})}
+
+
+@app.post("/zone-strategy/start")
+def start_zone_strategy(payload: ZoneStrategyStartPayload) -> dict[str, Any]:
+    _require_master_connected()
+    try:
+        start_zone_strategy_system(payload.model_dump())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "ok", "zone_strategy": state_get("zone_strategy", {})}
+
+
+@app.post("/zone-strategy/stop")
+def stop_zone_strategy() -> dict[str, Any]:
+    stop_zone_strategy_system()
+    return {"status": "ok", "zone_strategy": state_get("zone_strategy", {})}
+
+
+@app.get("/zone-strategy/status")
+def zone_strategy_status() -> dict[str, Any]:
+    return {"status": "ok", "zone_strategy": state_get("zone_strategy", {})}
 
 
 @app.post("/liquidity-levels")

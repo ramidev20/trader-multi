@@ -25,6 +25,7 @@ import { TableFrame } from "../components/ui/TableFrame";
 import { ConsoleLogPanel } from "../components/ui/ConsoleLogPanel";
 import { MetricCard } from "./shared/MetricCard";
 import ChartPage from "./ChartPage";
+import ScalpingPage from "./ScalpingPage";
 import { cx, decimalInput, money, signedDecimalInput } from "../utils/format";
 import { api } from "../services/api";
 import { listReceivers, sendRemoteCommand } from "../services/remoteControl";
@@ -52,12 +53,12 @@ function SectionTag({ tone = "slate", children }) {
   );
 }
 
-const ORDER_KIND_OPTIONS = [
+export const ORDER_KIND_OPTIONS = [
   { value: "MARKET", label: "MARKET", Icon: Zap },
   { value: "LIMIT", label: "LIMIT", Icon: Hourglass },
 ];
 
-function IconSelect({ label, value, options, onChange, disabled = false }) {
+export function IconSelect({ label, value, options, onChange, disabled = false }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const selected = options.find((option) => option.value === value) ?? options[0];
@@ -148,16 +149,6 @@ function IconSelect({ label, value, options, onChange, disabled = false }) {
   );
 }
 
-const PANEL_MIN_WIDTH = 300;
-const PANEL_MAX_WIDTH = 720;
-const PANEL_DEFAULT_WIDTH = 360;
-
-function clampPanelWidth(value) {
-  const width = Number(value);
-  if (!Number.isFinite(width)) return PANEL_DEFAULT_WIDTH;
-  return Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(width)));
-}
-
 function formatCountdown(seconds) {
   const safe = Math.max(0, Math.floor(Number(seconds) || 0));
   return `0:${String(safe).padStart(2, "0")}`;
@@ -210,10 +201,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   // Armed = waiting for the next candle to open before sending the order.
   const [searchArmed, setSearchArmed] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [panelWidth, setPanelWidth] = useState(() =>
-    clampPanelWidth(savedTradeForm.panelWidth ?? PANEL_DEFAULT_WIDTH),
-  );
-  const layoutRef = useRef(null);
   // Search mode: when on, Open prices a pending limit off the M1 candle instead
   // of sending the order as configured by Order Type.
   const [searchEnabled, setSearchEnabled] = useState(() =>
@@ -368,7 +355,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           autoCloseAt,
           positionsTab,
           panelTab,
-          panelWidth,
           tradeTab: positionsTab,
         }),
       );
@@ -398,7 +384,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     autoCloseAt,
     positionsTab,
     panelTab,
-    panelWidth,
   ]);
 
   useEffect(() => {
@@ -429,7 +414,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             autoCloseAt,
             positionsTab,
             panelTab,
-            panelWidth,
             tradeTab: positionsTab,
           }),
         );
@@ -468,7 +452,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     autoCloseAt,
     positionsTab,
     panelTab,
-    panelWidth,
   ]);
 
   useEffect(() => {
@@ -963,35 +946,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
     setSearchArmed(true);
   }
 
-  // Width is written straight to the CSS variable while dragging so the whole
-  // panel does not re-render on every pointer move; state is committed on drop.
-  function startPanelResize(event) {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = panelWidth;
-    let nextWidth = startWidth;
-
-    function onMove(moveEvent) {
-      nextWidth = clampPanelWidth(startWidth + (startX - moveEvent.clientX));
-      layoutRef.current?.style.setProperty(
-        "--trade-panel-width",
-        `${nextWidth}px`,
-      );
-    }
-    function onUp() {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      document.body.style.removeProperty("user-select");
-      document.body.style.removeProperty("cursor");
-      setPanelWidth(nextWidth);
-    }
-
-    document.body.style.setProperty("user-select", "none");
-    document.body.style.setProperty("cursor", "col-resize");
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  }
-
   async function closePositions() {
     // The controller and each receiver are separate PCs with separate
     // accounts: it's entirely normal for the controller's own accounts to
@@ -1050,10 +1004,14 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   }
 
   return (
-    // h-full resolves against App.tsx's page-content flex chain (fixed there
-    // specifically because the old `calc(100vh - 180px)` guess didn't match
-    // the real TopBar height and left a gap under the panels below).
-    <div className="flex h-full min-h-0 flex-col gap-4">
+    // flex-1 (not just h-full) is required here: the parent only sets
+    // min-height, and percentage heights don't reliably cascade through a
+    // min-height chain -- this used to be masked because the old two-column
+    // layout's right-hand panel had enough intrinsic content height to
+    // stretch the grid row it lived in. Once that panel became its own tab,
+    // nothing was left to force the height, and every tab's content
+    // (chart included) collapsed to its shrink-wrapped size.
+    <div className="flex h-full min-h-0 flex-1 flex-col gap-4">
       {errorText ? (
         <div className="shrink-0 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
           {errorText}
@@ -1064,18 +1022,15 @@ export function TradePage({ runtime, onRefreshRuntime }) {
           {closeSummaryText}
         </div>
       ) : null}
-      <div
-        ref={layoutRef}
-        className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_6px_var(--trade-panel-width)]"
-        style={{ "--trade-panel-width": `${panelWidth}px` }}
-      >
-        <div className="flex h-full flex-col gap-4">
+      <div className="flex min-h-0 flex-1 flex-col gap-4">
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-1">
               {[
                 ["chart", "Chart"],
                 ["live", "Live Positions"],
                 ["orders", "Limit Orders"],
+                ["scalping", "Scalping"],
+                ["panel", "Trade Panel"],
                 ["log", "Log"],
               ].map(([key, label]) => (
                 <button
@@ -1123,11 +1078,269 @@ export function TradePage({ runtime, onRefreshRuntime }) {
             </div>
           ) : null}
 
-          <div className="min-h-0 flex-1">
+          <div className="flex min-h-0 flex-1 flex-col">
             {positionsTab === "chart" ? (
               <ChartPage />
+            ) : positionsTab === "panel" ? (
+              <Card className="flex min-h-0 flex-1 flex-col pt-3">
+                <div className="shrink-0 space-y-3">
+                  <SideSelector />
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <IconSelect
+                      label="Order Type"
+                      value={orderKind}
+                      options={ORDER_KIND_OPTIONS}
+                      onChange={setOrderKind}
+                    />
+                    <Field
+                      label={
+                        orderKind === "LIMIT" ? "Limit Entry Price" : "Entry Mode"
+                      }
+                      value={
+                        orderKind === "LIMIT" ? limitPrice : "Market execution"
+                      }
+                      type={orderKind === "LIMIT" ? "number" : "text"}
+                      min="0"
+                      step="0.01"
+                      inputMode="decimal"
+                      onChange={
+                        orderKind === "LIMIT"
+                          ? (e) => setLimitPrice(decimalInput(e.target.value))
+                          : undefined
+                      }
+                      disabled={orderKind !== "LIMIT"}
+                    />
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <Field
+                      label="TP (Pips)"
+                      value={tp}
+                      onChange={(e) => setTp(e.target.value)}
+                      disabled={multiTp}
+                    />
+                    <Field
+                      label="SL (Pips)"
+                      value={sl}
+                      onChange={(e) => setSl(e.target.value)}
+                      disabled={multiTp}
+                    />
+                    <Field
+                      label="Spread"
+                      value={spreadPips}
+                      onChange={(e) => setSpreadPips(decimalInput(e.target.value))}
+                    />
+                  </div>
+                </div>
+                <div
+                  role="tablist"
+                  aria-label="Trade options"
+                  className="mt-4 grid shrink-0 grid-cols-3 gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1"
+                >
+                  <PanelTab id="search" label="Search" enabled={searchEnabled} />
+                  <PanelTab
+                    id="autoclose"
+                    label="Auto Close"
+                    enabled={autoCloseEnabled}
+                  />
+                  <PanelTab id="advanced" label="Multi-TP" enabled={multiTp} />
+                </div>
+                <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
+                  {panelTab === "search" ? (
+                    <div className="space-y-3">
+                      <SectionHeader
+                        title="Open With Search"
+                        tags={[
+                          ["blue", "Fires at candle open"],
+                          ["slate", "Follows Order Type"],
+                        ]}
+                        checked={searchEnabled}
+                        onChange={setSearchEnabled}
+                      />
+                      <p className="text-xs font-semibold text-slate-600">
+                        Waits for the next 1 minute candle to open, then sends the
+                        order: at market with Order Type MARKET, or as a pending
+                        limit priced off that candle's open with LIMIT.
+                      </p>
+                      {searchEnabled && orderKind === "LIMIT" ? (
+                        <Field
+                          label="Limit Offset (Pips)"
+                          value={searchPips}
+                          inputMode="decimal"
+                          onChange={(e) =>
+                            setSearchPips(signedDecimalInput(e.target.value))
+                          }
+                        />
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {panelTab === "autoclose" ? (
+                    <div className="space-y-3">
+                      <SectionHeader
+                        title="Auto Close All Positions"
+                        tags={[["amber", "Closes every position opened"]]}
+                        checked={autoCloseEnabled}
+                        onChange={setAutoCloseEnabled}
+                      />
+                      <p className="text-xs font-semibold text-slate-600">
+                        Closes every open position on the master and linked accounts
+                        at the end time you set.
+                      </p>
+                      {autoCloseEnabled ? (
+                        <>
+                          <Field
+                            label="End Time"
+                            value={autoCloseAt}
+                            type="datetime-local"
+                            onChange={(e) => setAutoCloseAt(e.target.value)}
+                          />
+                          {scheduledAutoCloseAt ? (
+                            <p className="text-xs font-semibold text-slate-600">
+                              Scheduled auto close:{" "}
+                              {fmtDateTime(scheduledAutoCloseAt)}
+                            </p>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {panelTab === "advanced" ? (
+                    <div className="space-y-3">
+                      <SectionHeader
+                        title="Advanced Risk / Multi-TP"
+                        tags={[["blue", "Up to 3 take profits targets"]]}
+                        checked={multiTp}
+                        onChange={setMultiTp}
+                      />
+                      <p className="text-xs font-semibold text-slate-600">
+                        Takes the stop from a price instead of pips and exits in up
+                        to three stages, each at its own risk ratio and share of the
+                        remaining volume.
+                      </p>
+                      {multiTp ? (
+                        <>
+                          <div className="grid gap-3 md:grid-cols-2">
+                            <Field
+                              label="Stop Loss Price"
+                              value={slPrice}
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              inputMode="decimal"
+                              onChange={(e) =>
+                                setSlPrice(decimalInput(e.target.value))
+                              }
+                            />
+                            <div>
+                              <span className="block text-xs font-black uppercase tracking-wide text-slate-500">
+                                Total Ratio
+                              </span>
+                              <div className="mt-1.5 flex h-[46px] items-center rounded-xl border border-slate-200 bg-slate-100 px-4 text-sm font-black text-slate-700">
+                                {totalRatio.toFixed(1)}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <Field
+                              label="TP1 Ratio"
+                              value={tp1Ratio}
+                              type="number"
+                              min="0.1"
+                              step="0.1"
+                              onChange={(e) =>
+                                setTp1Ratio(decimalInput(e.target.value))
+                              }
+                            />
+                            <Field
+                              label="TP1 %"
+                              value={tp1Percent}
+                              type="number"
+                              min="1"
+                              max="100"
+                              onChange={(e) => setTp1Percent(e.target.value)}
+                              disabled={!tp2Enabled}
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <Field
+                              label="TP2 Ratio"
+                              labelExtra={
+                                <MiniToggle
+                                  checked={tp2Enabled}
+                                  onChange={setTp2Enabled}
+                                />
+                              }
+                              value={tp2Ratio}
+                              type="number"
+                              min="0.1"
+                              step="0.1"
+                              onChange={(e) =>
+                                setTp2Ratio(decimalInput(e.target.value))
+                              }
+                              disabled={!tp2Enabled}
+                            />
+                            <Field
+                              label="TP2 %"
+                              value={tp2Percent}
+                              type="number"
+                              min="1"
+                              max="100"
+                              onChange={(e) => setTp2Percent(e.target.value)}
+                              disabled={!tp2Enabled || !tp3Enabled}
+                            />
+                          </div>
+                          <Field
+                            label="TP3 Ratio"
+                            labelExtra={
+                              <MiniToggle
+                                checked={tp3Enabled}
+                                onChange={setTp3Enabled}
+                                disabled={!tp2Enabled}
+                              />
+                            }
+                            value={tp3Ratio}
+                            type="number"
+                            min="0.1"
+                            step="0.1"
+                            onChange={(e) =>
+                              setTp3Ratio(decimalInput(e.target.value))
+                            }
+                            disabled={!tp3Enabled}
+                          />
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="mt-3 shrink-0 border-t border-slate-200 pt-3">
+                  <p className="mb-2 text-center text-[13px] font-semibold text-blue-600">
+                    {searchEnabled
+                      ? orderKind === "LIMIT"
+                        ? `Search: ${side} limit at next M1 open ${searchOffsetLabel}`
+                        : `Search: ${side} market at next M1 open`
+                      : orderKind === "LIMIT"
+                        ? `${side} limit @ ${limitPrice || "-"}`
+                        : `${side} market execution`}
+                  </p>
+                  <OpenButton
+                    label={
+                      searchArmed
+                        ? `WAITING · ${formatCountdown(secondsToNextCandle)}`
+                        : "OPEN"
+                    }
+                    busy={submitting}
+                    onClick={() =>
+                      searchEnabled ? armSearch() : openPosition(side)
+                    }
+                  />
+                  {searchArmed ? (
+                    <p className="mt-2 text-center text-xs font-semibold text-slate-600">
+                      Sends on the next 1 minute candle open. Press again to cancel.
+                    </p>
+                  ) : null}
+                </div>
+              </Card>
             ) : (
-              <Card className="flex h-full flex-col">
+              <Card className="flex min-h-0 flex-1 flex-col">
                 {positionsTab === "live" ? (
                   <TableFrame className="mt-4 min-h-[360px]">
                     <table className="h-full w-full min-w-[700px] text-left">
@@ -1269,6 +1482,10 @@ export function TradePage({ runtime, onRefreshRuntime }) {
                       </tbody>
                     </table>
                   </TableFrame>
+                ) : positionsTab === "scalping" ? (
+                  <div className="mt-4 min-h-0 flex-1">
+                    <ScalpingPage />
+                  </div>
                 ) : (
                   <div className="mt-4 min-h-0 flex-1">
                     <ConsoleLogPanel
@@ -1281,275 +1498,6 @@ export function TradePage({ runtime, onRefreshRuntime }) {
               </Card>
             )}
           </div>
-        </div>
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize trade panel"
-          title="Drag to resize · double-click to reset"
-          onPointerDown={startPanelResize}
-          onDoubleClick={() => setPanelWidth(PANEL_DEFAULT_WIDTH)}
-          className="hidden cursor-col-resize rounded-full bg-slate-200 transition hover:bg-blue-400 xl:block"
-        />
-        <div className="flex h-full min-w-0 flex-col">
-          <Card className="flex h-full flex-col pt-3">
-            <div className="shrink-0 space-y-3">
-              <SideSelector />
-              <div className="grid gap-3 md:grid-cols-2">
-                <IconSelect
-                  label="Order Type"
-                  value={orderKind}
-                  options={ORDER_KIND_OPTIONS}
-                  onChange={setOrderKind}
-                />
-                <Field
-                  label={
-                    orderKind === "LIMIT" ? "Limit Entry Price" : "Entry Mode"
-                  }
-                  value={
-                    orderKind === "LIMIT" ? limitPrice : "Market execution"
-                  }
-                  type={orderKind === "LIMIT" ? "number" : "text"}
-                  min="0"
-                  step="0.01"
-                  inputMode="decimal"
-                  onChange={
-                    orderKind === "LIMIT"
-                      ? (e) => setLimitPrice(decimalInput(e.target.value))
-                      : undefined
-                  }
-                  disabled={orderKind !== "LIMIT"}
-                />
-              </div>
-              <div className="grid gap-3 md:grid-cols-3">
-                <Field
-                  label="TP (Pips)"
-                  value={tp}
-                  onChange={(e) => setTp(e.target.value)}
-                  disabled={multiTp}
-                />
-                <Field
-                  label="SL (Pips)"
-                  value={sl}
-                  onChange={(e) => setSl(e.target.value)}
-                  disabled={multiTp}
-                />
-                <Field
-                  label="Spread"
-                  value={spreadPips}
-                  onChange={(e) => setSpreadPips(decimalInput(e.target.value))}
-                />
-              </div>
-            </div>
-            <div
-              role="tablist"
-              aria-label="Trade options"
-              className="mt-4 grid shrink-0 grid-cols-3 gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1"
-            >
-              <PanelTab id="search" label="Search" enabled={searchEnabled} />
-              <PanelTab
-                id="autoclose"
-                label="Auto Close"
-                enabled={autoCloseEnabled}
-              />
-              <PanelTab id="advanced" label="Multi-TP" enabled={multiTp} />
-            </div>
-            <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
-              {panelTab === "search" ? (
-                <div className="space-y-3">
-                  <SectionHeader
-                    title="Open With Search"
-                    tags={[
-                      ["blue", "Fires at candle open"],
-                      ["slate", "Follows Order Type"],
-                    ]}
-                    checked={searchEnabled}
-                    onChange={setSearchEnabled}
-                  />
-                  <p className="text-xs font-semibold text-slate-600">
-                    Waits for the next 1 minute candle to open, then sends the
-                    order: at market with Order Type MARKET, or as a pending
-                    limit priced off that candle's open with LIMIT.
-                  </p>
-                  {searchEnabled && orderKind === "LIMIT" ? (
-                    <Field
-                      label="Limit Offset (Pips)"
-                      value={searchPips}
-                      inputMode="decimal"
-                      onChange={(e) =>
-                        setSearchPips(signedDecimalInput(e.target.value))
-                      }
-                    />
-                  ) : null}
-                </div>
-              ) : null}
-              {panelTab === "autoclose" ? (
-                <div className="space-y-3">
-                  <SectionHeader
-                    title="Auto Close All Positions"
-                    tags={[["amber", "Closes every position opened"]]}
-                    checked={autoCloseEnabled}
-                    onChange={setAutoCloseEnabled}
-                  />
-                  <p className="text-xs font-semibold text-slate-600">
-                    Closes every open position on the master and linked accounts
-                    at the end time you set.
-                  </p>
-                  {autoCloseEnabled ? (
-                    <>
-                      <Field
-                        label="End Time"
-                        value={autoCloseAt}
-                        type="datetime-local"
-                        onChange={(e) => setAutoCloseAt(e.target.value)}
-                      />
-                      {scheduledAutoCloseAt ? (
-                        <p className="text-xs font-semibold text-slate-600">
-                          Scheduled auto close:{" "}
-                          {fmtDateTime(scheduledAutoCloseAt)}
-                        </p>
-                      ) : null}
-                    </>
-                  ) : null}
-                </div>
-              ) : null}
-              {panelTab === "advanced" ? (
-                <div className="space-y-3">
-                  <SectionHeader
-                    title="Advanced Risk / Multi-TP"
-                    tags={[["blue", "Up to 3 take profits targets"]]}
-                    checked={multiTp}
-                    onChange={setMultiTp}
-                  />
-                  <p className="text-xs font-semibold text-slate-600">
-                    Takes the stop from a price instead of pips and exits in up
-                    to three stages, each at its own risk ratio and share of the
-                    remaining volume.
-                  </p>
-                  {multiTp ? (
-                    <>
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <Field
-                          label="Stop Loss Price"
-                          value={slPrice}
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          inputMode="decimal"
-                          onChange={(e) =>
-                            setSlPrice(decimalInput(e.target.value))
-                          }
-                        />
-                        <div>
-                          <span className="block text-xs font-black uppercase tracking-wide text-slate-500">
-                            Total Ratio
-                          </span>
-                          <div className="mt-1.5 flex h-[46px] items-center rounded-xl border border-slate-200 bg-slate-100 px-4 text-sm font-black text-slate-700">
-                            {totalRatio.toFixed(1)}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <Field
-                          label="TP1 Ratio"
-                          value={tp1Ratio}
-                          type="number"
-                          min="0.1"
-                          step="0.1"
-                          onChange={(e) =>
-                            setTp1Ratio(decimalInput(e.target.value))
-                          }
-                        />
-                        <Field
-                          label="TP1 %"
-                          value={tp1Percent}
-                          type="number"
-                          min="1"
-                          max="100"
-                          onChange={(e) => setTp1Percent(e.target.value)}
-                          disabled={!tp2Enabled}
-                        />
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <Field
-                          label="TP2 Ratio"
-                          labelExtra={
-                            <MiniToggle
-                              checked={tp2Enabled}
-                              onChange={setTp2Enabled}
-                            />
-                          }
-                          value={tp2Ratio}
-                          type="number"
-                          min="0.1"
-                          step="0.1"
-                          onChange={(e) =>
-                            setTp2Ratio(decimalInput(e.target.value))
-                          }
-                          disabled={!tp2Enabled}
-                        />
-                        <Field
-                          label="TP2 %"
-                          value={tp2Percent}
-                          type="number"
-                          min="1"
-                          max="100"
-                          onChange={(e) => setTp2Percent(e.target.value)}
-                          disabled={!tp2Enabled || !tp3Enabled}
-                        />
-                      </div>
-                      <Field
-                        label="TP3 Ratio"
-                        labelExtra={
-                          <MiniToggle
-                            checked={tp3Enabled}
-                            onChange={setTp3Enabled}
-                            disabled={!tp2Enabled}
-                          />
-                        }
-                        value={tp3Ratio}
-                        type="number"
-                        min="0.1"
-                        step="0.1"
-                        onChange={(e) =>
-                          setTp3Ratio(decimalInput(e.target.value))
-                        }
-                        disabled={!tp3Enabled}
-                      />
-                    </>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-            <div className="mt-3 shrink-0 border-t border-slate-200 pt-3">
-              <p className="mb-2 text-center text-[13px] font-semibold text-blue-600">
-                {searchEnabled
-                  ? orderKind === "LIMIT"
-                    ? `Search: ${side} limit at next M1 open ${searchOffsetLabel}`
-                    : `Search: ${side} market at next M1 open`
-                  : orderKind === "LIMIT"
-                    ? `${side} limit @ ${limitPrice || "-"}`
-                    : `${side} market execution`}
-              </p>
-              <OpenButton
-                label={
-                  searchArmed
-                    ? `WAITING · ${formatCountdown(secondsToNextCandle)}`
-                    : "OPEN"
-                }
-                busy={submitting}
-                onClick={() =>
-                  searchEnabled ? armSearch() : openPosition(side)
-                }
-              />
-              {searchArmed ? (
-                <p className="mt-2 text-center text-xs font-semibold text-slate-600">
-                  Sends on the next 1 minute candle open. Press again to cancel.
-                </p>
-              ) : null}
-            </div>
-          </Card>
-        </div>
       </div>
 
       <Dialog

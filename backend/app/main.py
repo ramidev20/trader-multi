@@ -232,6 +232,7 @@ class ZoneStrategyStartPayload(BaseModel):
     trigger_zone_type: str
     manual_sl_distance: float
     sl_distance_in_pips: bool = True
+    liquidity_buffer_pips: float | None = None
     order_kind: str = "MARKET"
     lot: float | None = None
     risk_percent: float | None = None
@@ -240,6 +241,10 @@ class ZoneStrategyStartPayload(BaseModel):
     displacement_min_pips: float | None = None
     displacement_avg_multiplier: float | None = None
     base_max_body_ratio: float | None = None
+
+
+class ZoneStrategyStopPayload(BaseModel):
+    side: str | None = None
 
 
 
@@ -1159,8 +1164,11 @@ def start_zone_strategy(payload: ZoneStrategyStartPayload) -> dict[str, Any]:
 
 
 @app.post("/zone-strategy/stop")
-def stop_zone_strategy() -> dict[str, Any]:
-    stop_zone_strategy_system()
+def stop_zone_strategy(payload: ZoneStrategyStopPayload = ZoneStrategyStopPayload()) -> dict[str, Any]:
+    try:
+        stop_zone_strategy_system(payload.side)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "ok", "zone_strategy": state_get("zone_strategy", {})}
 
 

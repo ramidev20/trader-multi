@@ -84,13 +84,19 @@ export default function ChartPage() {
       }
     >
   >(new Map());
-  const zoneOverlayRef = useRef<{
-    triggerLine: any;
-    zoneBand: any;
-    entryLine: any;
-    slLine: any;
-    tpLine: any;
-  } | null>(null);
+  const zoneOverlayRef = useRef<
+    Record<
+      string,
+      {
+        triggerLine: any;
+        m5ZoneBand: any;
+        m1ZoneBand: any;
+        entryLine: any;
+        slLine: any;
+        tpLine: any;
+      }
+    >
+  >({});
   const fittedRef = useRef(false);
   const [timeframe, setTimeframe] = useState("M1");
   const [snapshot, setSnapshot] = useState<ChartSnapshot>({
@@ -189,7 +195,7 @@ export default function ChartPage() {
       chartRef.current = null;
       seriesRef.current = null;
       positionSeriesRef.current.clear();
-      zoneOverlayRef.current = null;
+      zoneOverlayRef.current = {};
     };
   }, []);
 
@@ -367,55 +373,14 @@ export default function ChartPage() {
 
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current || !normalizedCandles.length) return;
-    let overlay = zoneOverlayRef.current;
-    if (!overlay) {
-      overlay = {
-        triggerLine: null,
-        m5ZoneBand: null,
-        m1ZoneBand: null,
-        entryLine: null,
-        slLine: null,
-        tpLine: null,
-      };
-      zoneOverlayRef.current = overlay;
-    }
+    if (!zoneOverlayRef.current) zoneOverlayRef.current = {};
 
     const endTime = normalizedCandles[normalizedCandles.length - 1]?.time;
-    // The chart only ever shows XAUUSD today, same as the strategy's default.
-    const symbolMatches =
-      !zoneStatus?.symbol ||
-      String(zoneStatus.symbol).toUpperCase() === "XAUUSD";
-
-    const triggerPrice = Number(zoneStatus?.trigger_price || 0);
-    const showTrigger =
-      symbolMatches &&
-      triggerPrice > 0 &&
-      ["waiting_trigger", "searching_m5_zone", "searching_m1_zone"].includes(
-        zoneStatus?.phase,
-      );
-    if (showTrigger) {
-      const title = `${String(zoneStatus.trigger_zone_type || "").toUpperCase()} trigger`;
-      if (!overlay.triggerLine) {
-        overlay.triggerLine = seriesRef.current.createPriceLine({
-          price: triggerPrice,
-          color: "#7c3aed",
-          lineWidth: 2,
-          lineStyle: 3,
-          axisLabelVisible: true,
-          title,
-        });
-      } else {
-        overlay.triggerLine.applyOptions({ price: triggerPrice, title });
-      }
-    } else if (overlay.triggerLine) {
-      seriesRef.current.removePriceLine(overlay.triggerLine);
-      overlay.triggerLine = null;
-    }
 
     // Draw a zone rectangle as a BaselineSeries band running from the zone's
     // own base candle to the latest candle -- same trick used for the TP/SL
     // shading around an open position, just anchored to the zone's own edges.
-    function drawZoneBand(zone, refKey, label, fillAlpha) {
+    function drawZoneBand(overlay, zone, refKey, label, fillAlpha) {
       if (!zone) {
         if (overlay[refKey]) {
           chartRef.current.removeSeries(overlay[refKey]);
@@ -465,80 +430,132 @@ export default function ChartPage() {
       ]);
     }
 
-    // The M5 zone is the intermediate trigger for the M1 search -- shade it
-    // lighter than the M1 zone, which is the one the order actually opens
-    // from.
-    drawZoneBand(
-      symbolMatches ? zoneStatus?.m5_zone : null,
-      "m5ZoneBand",
-      "M5 zone",
-      0.1,
-    );
-    drawZoneBand(
-      symbolMatches ? zoneStatus?.m1_zone : null,
-      "m1ZoneBand",
-      "M1 zone",
-      0.22,
-    );
-
-    const order = symbolMatches ? zoneStatus?.placed_order : null;
-    const entryPrice = Number(order?.entry || 0);
-    const slPrice = Number(order?.sl || 0);
-    const tpPrice = Number(order?.tp || 0);
-
-    if (order && entryPrice > 0) {
-      if (!overlay.entryLine) {
-        overlay.entryLine = seriesRef.current.createPriceLine({
-          price: entryPrice,
-          color: "#2563eb",
-          lineWidth: 2,
-          lineStyle: 0,
-          axisLabelVisible: true,
-          title: `Scalp entry #${order.ticket ?? ""}`,
-        });
-      } else {
-        overlay.entryLine.applyOptions({ price: entryPrice });
+    // The demand and supply M15 triggers watch independently, so both get
+    // their own overlay set drawn at once -- a distinct trigger-line color
+    // per side keeps them visually separable.
+    const SIDE_TRIGGER_COLOR = { demand: "#7c3aed", supply: "#ea580c" };
+    ["demand", "supply"].forEach((side) => {
+      const sideStatus = zoneStatus?.[side];
+      let overlay = zoneOverlayRef.current[side];
+      if (!overlay) {
+        overlay = {
+          triggerLine: null,
+          m5ZoneBand: null,
+          m1ZoneBand: null,
+          entryLine: null,
+          slLine: null,
+          tpLine: null,
+        };
+        zoneOverlayRef.current[side] = overlay;
       }
-    } else if (overlay.entryLine) {
-      seriesRef.current.removePriceLine(overlay.entryLine);
-      overlay.entryLine = null;
-    }
 
-    if (order && slPrice > 0) {
-      if (!overlay.slLine) {
-        overlay.slLine = seriesRef.current.createPriceLine({
-          price: slPrice,
-          color: "#e11d48",
-          lineWidth: 2,
-          lineStyle: 2,
-          axisLabelVisible: true,
-          title: "Scalp SL",
-        });
-      } else {
-        overlay.slLine.applyOptions({ price: slPrice });
-      }
-    } else if (overlay.slLine) {
-      seriesRef.current.removePriceLine(overlay.slLine);
-      overlay.slLine = null;
-    }
+      // The chart only ever shows XAUUSD today, same as the strategy's default.
+      const symbolMatches =
+        !sideStatus?.symbol || String(sideStatus.symbol).toUpperCase() === "XAUUSD";
 
-    if (order && tpPrice > 0) {
-      if (!overlay.tpLine) {
-        overlay.tpLine = seriesRef.current.createPriceLine({
-          price: tpPrice,
-          color: "#16a34a",
-          lineWidth: 2,
-          lineStyle: 2,
-          axisLabelVisible: true,
-          title: "Scalp TP",
-        });
-      } else {
-        overlay.tpLine.applyOptions({ price: tpPrice });
+      const triggerPrice = Number(sideStatus?.trigger_price || 0);
+      const showTrigger =
+        symbolMatches &&
+        triggerPrice > 0 &&
+        ["waiting_trigger", "searching_m5_zone", "searching_m1_zone"].includes(
+          sideStatus?.phase,
+        );
+      if (showTrigger) {
+        const title = `${side.toUpperCase()} M15 trigger`;
+        if (!overlay.triggerLine) {
+          overlay.triggerLine = seriesRef.current.createPriceLine({
+            price: triggerPrice,
+            color: SIDE_TRIGGER_COLOR[side],
+            lineWidth: 2,
+            lineStyle: 3,
+            axisLabelVisible: true,
+            title,
+          });
+        } else {
+          overlay.triggerLine.applyOptions({ price: triggerPrice, title });
+        }
+      } else if (overlay.triggerLine) {
+        seriesRef.current.removePriceLine(overlay.triggerLine);
+        overlay.triggerLine = null;
       }
-    } else if (overlay.tpLine) {
-      seriesRef.current.removePriceLine(overlay.tpLine);
-      overlay.tpLine = null;
-    }
+
+      // The M5 zone is the intermediate trigger for the M1 search -- shade it
+      // lighter than the M1 zone, which is the one the order actually opens
+      // from.
+      drawZoneBand(
+        overlay,
+        symbolMatches ? sideStatus?.m5_zone : null,
+        "m5ZoneBand",
+        `${side} M5 zone`,
+        0.1,
+      );
+      drawZoneBand(
+        overlay,
+        symbolMatches ? sideStatus?.m1_zone : null,
+        "m1ZoneBand",
+        `${side} M1 zone`,
+        0.22,
+      );
+
+      const order = symbolMatches ? sideStatus?.placed_order : null;
+      const entryPrice = Number(order?.entry || 0);
+      const slPrice = Number(order?.sl || 0);
+      const tpPrice = Number(order?.tp || 0);
+
+      if (order && entryPrice > 0) {
+        if (!overlay.entryLine) {
+          overlay.entryLine = seriesRef.current.createPriceLine({
+            price: entryPrice,
+            color: "#2563eb",
+            lineWidth: 2,
+            lineStyle: 0,
+            axisLabelVisible: true,
+            title: `${side} scalp entry #${order.ticket ?? ""}`,
+          });
+        } else {
+          overlay.entryLine.applyOptions({ price: entryPrice });
+        }
+      } else if (overlay.entryLine) {
+        seriesRef.current.removePriceLine(overlay.entryLine);
+        overlay.entryLine = null;
+      }
+
+      if (order && slPrice > 0) {
+        if (!overlay.slLine) {
+          overlay.slLine = seriesRef.current.createPriceLine({
+            price: slPrice,
+            color: "#e11d48",
+            lineWidth: 2,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: `${side} scalp SL`,
+          });
+        } else {
+          overlay.slLine.applyOptions({ price: slPrice });
+        }
+      } else if (overlay.slLine) {
+        seriesRef.current.removePriceLine(overlay.slLine);
+        overlay.slLine = null;
+      }
+
+      if (order && tpPrice > 0) {
+        if (!overlay.tpLine) {
+          overlay.tpLine = seriesRef.current.createPriceLine({
+            price: tpPrice,
+            color: "#16a34a",
+            lineWidth: 2,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: `${side} scalp TP`,
+          });
+        } else {
+          overlay.tpLine.applyOptions({ price: tpPrice });
+        }
+      } else if (overlay.tpLine) {
+        seriesRef.current.removePriceLine(overlay.tpLine);
+        overlay.tpLine = null;
+      }
+    });
   }, [normalizedCandles, zoneStatus]);
 
   async function refreshChart() {

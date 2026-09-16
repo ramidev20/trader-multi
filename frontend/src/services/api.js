@@ -62,7 +62,7 @@ export const api = {
   closePositions: () => request("/positions/close", { method: "POST" }),
 
   startZoneStrategy: (payload) => request("/zone-strategy/start", { method: "POST", body: JSON.stringify(payload) }),
-  stopZoneStrategy: () => request("/zone-strategy/stop", { method: "POST" }),
+  stopZoneStrategy: (side) => request("/zone-strategy/stop", { method: "POST", body: JSON.stringify(side ? { side } : {}) }),
   zoneStrategyStatus: () => request("/zone-strategy/status"),
 
 };

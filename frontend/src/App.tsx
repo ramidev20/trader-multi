@@ -394,11 +394,17 @@ export default function App() {
           drifted from the real TopBar height and left a gap under short
           content -- and under the app's own zoom setting, which scales via
           the non-standard CSS `zoom` property and can throw raw vh-based
-          sizing off further). */}
+          sizing off further). The page-content div and the motion.div inside
+          it both need to be real flex items (`flex-1`), not just `min-h-full`:
+          a `min-height` alone never gives a percentage-height descendant (like
+          a page's own `h-full flex-1` root, e.g. the Trade Panel) anything
+          concrete to size against, so its content -- most visibly a log panel
+          -- collapsed to its own shrink-wrapped height whenever it had little
+          or nothing to show instead of filling the remaining viewport. */}
       <main className="app-main flex min-h-screen min-w-0 flex-col lg:min-h-0 lg:flex-1">
         <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-6 lg:px-5" style={styles.pageContent}>
-          <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }} className="flex min-h-full flex-col">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-6 lg:px-5" style={styles.pageContent}>
+          <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }} className="flex min-h-0 flex-1 flex-col">
             {errorText ? <div style={styles.errorBanner}>{errorText}</div> : null}
             {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock MT5 data unless a live backend session is available.</div> : null}
             {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}

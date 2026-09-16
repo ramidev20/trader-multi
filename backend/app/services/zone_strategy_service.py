@@ -26,9 +26,19 @@ from .strategy_service import (
 # forward for the zone *opposite* the M5 one, which is the same side as the
 # original M15 input (demand -> supply -> demand). Zones are detected with a
 # simple base-candle + displacement-candle definition. The M1 zone is what
-# actually places the MARKET/LIMIT order, with the stoploss set to that zone's
-# own base candle high/low, floored at the user's manually entered minimum
-# distance.
+# actually places the MARKET/LIMIT order.
+#
+# The demand side and the supply side are armed independently (two engine
+# instances below) so both can be watching -- and can both fire -- at once.
+#
+# Stoploss is the farther of two distances from entry:
+#   - "SL liquidity": walk backward candle by candle from the M1 zone's own
+#     base candle, extending the stop past each earlier candle's low (buy) /
+#     high (sell) as long as it keeps making a new extreme. This clears the
+#     nearest real swing point instead of resting the stop right on top of it,
+#     where retail liquidity (and stop-hunt wicks) tend to sit.
+#   - "min SL": the user's manually entered minimum stop distance, used as a
+#     floor in case the liquidity swing is too close to entry.
 
 TRIGGER_TASK_NAME = "zone_trigger_watch"
 SEARCH_M5_TASK_NAME = "zone_m5_watch"
@@ -39,6 +49,7 @@ DEFAULT_DISPLACEMENT_AVG_MULTIPLIER = 1.8
 DEFAULT_BASE_MAX_BODY_RATIO = 0.6
 CANDLE_BUFFER_MAXLEN = 12
 AVG_LOOKBACK_CANDLES = 10
+SL_LIQUIDITY_LOOKBACK_CANDLES = 20
 
 
 def _body_pips(candle: Any) -> float:
@@ -92,18 +103,24 @@ def _next_candle(symbol: str, timeframe_label: str) -> Optional[dict[str, Any]]:
 
 
 class ZoneStrategyEngine:
-    def __init__(self) -> None:
+    def __init__(self, side: str) -> None:
+        self.side = side
+        self._trigger_task_name = f"{TRIGGER_TASK_NAME}_{side}"
+        self._search_m5_task_name = f"{SEARCH_M5_TASK_NAME}_{side}"
+        self._search_m1_task_name = f"{SEARCH_M1_TASK_NAME}_{side}"
+        self._state_path = f"zone_strategy.{side}"
         self._lock = threading.Lock()
         self._reset_config()
 
     def _reset_config(self) -> None:
         self.symbol: str = SYMBOL_DEFAULT
         self.trigger_price: float = 0.0
-        self.trigger_zone_type: str = "demand"
-        self.m5_target_zone_type: str = "supply"
-        self.m1_target_zone_type: str = "demand"
+        self.trigger_zone_type: str = self.side
+        self.m5_target_zone_type: str = _opposite_zone_type(self.side)
+        self.m1_target_zone_type: str = self.side
         self.manual_sl_distance: float = 0.0
         self.sl_distance_in_pips: bool = True
+        self.liquidity_buffer_pips: float = 0.0
         self.order_kind: str = "MARKET"
         self.lot: Optional[float] = None
         self.risk_percent: Optional[float] = None
@@ -117,9 +134,6 @@ class ZoneStrategyEngine:
         self.last_mid: Optional[float] = None
 
     def start(self, cfg: dict) -> None:
-        trigger_zone_type = str(cfg.get("trigger_zone_type", "")).lower()
-        if trigger_zone_type not in {"demand", "supply"}:
-            raise RuntimeError("trigger_zone_type must be 'demand' or 'supply'.")
         manual_sl_distance = float(cfg.get("manual_sl_distance", 0) or 0)
         if manual_sl_distance <= 0:
             raise RuntimeError("Enter a manual stoploss distance greater than 0.")
@@ -130,19 +144,17 @@ class ZoneStrategyEngine:
         if order_kind not in {"MARKET", "LIMIT"}:
             raise RuntimeError("Order type must be MARKET or LIMIT.")
 
-        stop_task(TRIGGER_TASK_NAME)
-        stop_task(SEARCH_M5_TASK_NAME)
-        stop_task(SEARCH_M1_TASK_NAME)
+        stop_task(self._trigger_task_name)
+        stop_task(self._search_m5_task_name)
+        stop_task(self._search_m1_task_name)
 
         with self._lock:
             self._reset_config()
             self.symbol = str(cfg.get("symbol") or SYMBOL_DEFAULT).strip().upper()
             self.trigger_price = trigger_price
-            self.trigger_zone_type = trigger_zone_type
-            self.m5_target_zone_type = _opposite_zone_type(trigger_zone_type)
-            self.m1_target_zone_type = _opposite_zone_type(self.m5_target_zone_type)
             self.manual_sl_distance = manual_sl_distance
             self.sl_distance_in_pips = bool(cfg.get("sl_distance_in_pips", True))
+            self.liquidity_buffer_pips = float(cfg.get("liquidity_buffer_pips", 0) or 0)
             self.order_kind = order_kind
             self.lot = cfg.get("lot")
             self.risk_percent = cfg.get("risk_percent")
@@ -154,7 +166,7 @@ class ZoneStrategyEngine:
 
         started_at = datetime.now().isoformat()
         patch_path(
-            "zone_strategy",
+            self._state_path,
             {
                 "running": True,
                 "phase": "waiting_trigger",
@@ -166,6 +178,7 @@ class ZoneStrategyEngine:
                 "order_kind": self.order_kind,
                 "manual_sl_distance": self.manual_sl_distance,
                 "sl_distance_in_pips": self.sl_distance_in_pips,
+                "liquidity_buffer_pips": self.liquidity_buffer_pips,
                 "lot": self.lot,
                 "risk_percent": self.risk_percent,
                 "tp": self.tp,
@@ -174,6 +187,7 @@ class ZoneStrategyEngine:
                 "triggered_at": None,
                 "m5_zone": None,
                 "m1_zone": None,
+                "sl_liquidity_price": None,
                 "placed_order": None,
                 "last_stop_reason": None,
                 "last_error": None,
@@ -185,22 +199,22 @@ class ZoneStrategyEngine:
             f"{self.trigger_price:.2f}; will search M5 for {self.m5_target_zone_type}, then M1 for "
             f"{self.m1_target_zone_type} before opening.",
         )
-        start_task(TRIGGER_TASK_NAME, self._trigger_tick, interval_sec=1)
+        start_task(self._trigger_task_name, self._trigger_tick, interval_sec=1)
 
     def stop(self, reason: str = "Manual stop requested.") -> None:
         was_running = (
-            is_task_running(TRIGGER_TASK_NAME)
-            or is_task_running(SEARCH_M5_TASK_NAME)
-            or is_task_running(SEARCH_M1_TASK_NAME)
+            is_task_running(self._trigger_task_name)
+            or is_task_running(self._search_m5_task_name)
+            or is_task_running(self._search_m1_task_name)
         )
-        stop_task(TRIGGER_TASK_NAME)
-        stop_task(SEARCH_M5_TASK_NAME)
-        stop_task(SEARCH_M1_TASK_NAME)
+        stop_task(self._trigger_task_name)
+        stop_task(self._search_m5_task_name)
+        stop_task(self._search_m1_task_name)
         if was_running:
-            patch_path("zone_strategy", {"running": False, "phase": "stopped", "last_stop_reason": reason})
+            patch_path(self._state_path, {"running": False, "phase": "stopped", "last_stop_reason": reason})
             append_log("search", f"[WARNING] [scalping] {reason}")
         else:
-            patch_path("zone_strategy", {"running": False})
+            patch_path(self._state_path, {"running": False})
 
     def _trigger_tick(self) -> None:
         tick = mt5.symbol_info_tick(self.symbol) if mt5_available() else _tick_for(self.symbol)
@@ -217,18 +231,18 @@ class ZoneStrategyEngine:
         if not crossed:
             return
 
-        stop_task(TRIGGER_TASK_NAME)
+        stop_task(self._trigger_task_name)
         with self._lock:
             self.m5_buffer.clear()
             m5_target_zone_type = self.m5_target_zone_type
         triggered_at = datetime.now().isoformat()
-        patch_path("zone_strategy", {"phase": "searching_m5_zone", "triggered_at": triggered_at})
+        patch_path(self._state_path, {"phase": "searching_m5_zone", "triggered_at": triggered_at})
         append_log(
             "search",
             f"[INFO] [scalping] M15 trigger hit @ {mid:.2f} (level {trigger_price:.2f}); "
             f"searching M5 for {m5_target_zone_type}.",
         )
-        start_task(SEARCH_M5_TASK_NAME, self._search_m5_tick, interval_sec=1)
+        start_task(self._search_m5_task_name, self._search_m5_tick, interval_sec=1)
 
     def _search_m5_tick(self) -> None:
         candle = _next_candle(self.symbol, "M5")
@@ -240,16 +254,16 @@ class ZoneStrategyEngine:
             m1_target_zone_type = self.m1_target_zone_type
         if zone is None:
             return
-        stop_task(SEARCH_M5_TASK_NAME)
+        stop_task(self._search_m5_task_name)
         with self._lock:
             self.m1_buffer.clear()
-        patch_path("zone_strategy", {"phase": "searching_m1_zone", "m5_zone": zone})
+        patch_path(self._state_path, {"phase": "searching_m1_zone", "m5_zone": zone})
         append_log(
             "search",
             f"[SUCCESS] [scalping] M5 {zone['type']} zone found {zone['price_low']:.2f}-{zone['price_high']:.2f}; "
             f"searching M1 for {m1_target_zone_type} before opening.",
         )
-        start_task(SEARCH_M1_TASK_NAME, self._search_m1_tick, interval_sec=1)
+        start_task(self._search_m1_task_name, self._search_m1_tick, interval_sec=1)
 
     def _search_m1_tick(self) -> None:
         candle = _next_candle(self.symbol, "M1")
@@ -260,8 +274,8 @@ class ZoneStrategyEngine:
             zone = self._detect_zone_locked(self.m1_buffer, self.m1_target_zone_type)
         if zone is None:
             return
-        stop_task(SEARCH_M1_TASK_NAME)
-        patch_path("zone_strategy", {"m1_zone": zone})
+        stop_task(self._search_m1_task_name)
+        patch_path(self._state_path, {"m1_zone": zone})
         append_log(
             "search",
             f"[SUCCESS] [scalping] M1 {zone['type']} zone found {zone['price_low']:.2f}-{zone['price_high']:.2f}; placing order.",
@@ -298,6 +312,42 @@ class ZoneStrategyEngine:
             "formed_at": datetime.now().isoformat(),
         }
 
+    def _m1_history_before_base(self) -> list[Any]:
+        """M1 candles immediately preceding the zone's base candle, oldest first.
+
+        At the moment a zone is detected the base candle is 2 bars behind the
+        currently-forming one and the displacement candle is 1 bar behind, so
+        position 3 onward is exactly the history that precedes the base
+        candle. In dev/sim mode there's no historical feed to query, so fall
+        back to whatever the live search buffer happened to collect before
+        the base/displacement pair (best-effort only).
+        """
+        if mt5_available():
+            try:
+                rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 3, SL_LIQUIDITY_LOOKBACK_CANDLES)
+            except Exception:
+                rates = None
+            return list(rates) if rates is not None else []
+        with self._lock:
+            return list(self.m1_buffer)[:-2]
+
+    def _sl_liquidity_price(self, zone: dict[str, Any], is_buy: bool) -> float:
+        history = self._m1_history_before_base()
+        extreme = zone["price_low"] if is_buy else zone["price_high"]
+        for candle in reversed(history):
+            candidate = (
+                _candle_value(candle, 3, "low") if is_buy else _candle_value(candle, 2, "high")
+            )
+            if is_buy:
+                if candidate >= extreme:
+                    break
+                extreme = candidate
+            else:
+                if candidate <= extreme:
+                    break
+                extreme = candidate
+        return round(float(extreme), 2)
+
     def _place_order(self, zone: dict[str, Any]) -> None:
         is_buy = zone["type"] == "demand"
         side = "BUY" if is_buy else "SELL"
@@ -311,11 +361,18 @@ class ZoneStrategyEngine:
                 if self.order_kind == "LIMIT"
                 else market_price
             )
-            base_extreme = zone["price_low"] if is_buy else zone["price_high"]
-            candle_based_distance = abs(entry_price - base_extreme)
-            manual_distance = self.manual_sl_distance / 10.0 if self.sl_distance_in_pips else self.manual_sl_distance
-            final_distance = max(candle_based_distance, manual_distance)
+            sl_liquidity_price = self._sl_liquidity_price(zone, is_buy)
+            liquidity_buffer = self.liquidity_buffer_pips / 10.0
+            sl_liquidity_distance = abs(entry_price - sl_liquidity_price) + liquidity_buffer
+            min_sl_distance = self.manual_sl_distance / 10.0 if self.sl_distance_in_pips else self.manual_sl_distance
+            final_distance = max(sl_liquidity_distance, min_sl_distance)
             sl_price = entry_price - final_distance if is_buy else entry_price + final_distance
+            append_log(
+                "search",
+                f"[INFO] [scalping] SL liquidity @ {sl_liquidity_price:.2f} + {self.liquidity_buffer_pips:.1f} pip buffer "
+                f"(distance {sl_liquidity_distance:.2f}), min SL distance {min_sl_distance:.2f}; "
+                f"using {final_distance:.2f} -> SL {sl_price:.2f}.",
+            )
 
             open_manual_position(
                 side,
@@ -330,17 +387,18 @@ class ZoneStrategyEngine:
                 risk_percent=self.risk_percent,
             )
         except RuntimeError as exc:
-            patch_path("zone_strategy", {"phase": "error", "running": False, "last_error": str(exc)})
+            patch_path(self._state_path, {"phase": "error", "running": False, "last_error": str(exc)})
             append_log("search", f"[ERROR] [scalping] order failed: {exc}")
             return
 
         placed_orders = get("orders", [])
         placed = placed_orders[-1] if placed_orders else {}
         patch_path(
-            "zone_strategy",
+            self._state_path,
             {
                 "phase": "placed",
                 "running": False,
+                "sl_liquidity_price": sl_liquidity_price,
                 "placed_order": {
                     "ticket": placed.get("ticket"),
                     "side": side,
@@ -355,12 +413,24 @@ class ZoneStrategyEngine:
         )
 
 
-zone_manager = ZoneStrategyEngine()
+zone_manager_demand = ZoneStrategyEngine("demand")
+zone_manager_supply = ZoneStrategyEngine("supply")
+_zone_managers = {"demand": zone_manager_demand, "supply": zone_manager_supply}
 
 
 def start_zone_strategy_system(cfg: dict) -> None:
-    zone_manager.start(cfg)
+    side = str(cfg.get("trigger_zone_type", "")).lower()
+    if side not in _zone_managers:
+        raise RuntimeError("trigger_zone_type must be 'demand' or 'supply'.")
+    _zone_managers[side].start(cfg)
 
 
-def stop_zone_strategy_system() -> None:
-    zone_manager.stop()
+def stop_zone_strategy_system(side: Optional[str] = None) -> None:
+    if side:
+        normalized = side.lower()
+        if normalized not in _zone_managers:
+            raise RuntimeError("side must be 'demand' or 'supply'.")
+        _zone_managers[normalized].stop()
+        return
+    for manager in _zone_managers.values():
+        manager.stop()

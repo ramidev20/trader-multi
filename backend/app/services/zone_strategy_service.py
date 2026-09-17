@@ -20,13 +20,13 @@ from .strategy_service import (
 )
 
 # "Scalping" strategy: watch a manually entered M15 demand/supply price level.
-# Once price touches it, watch new M5 candles going forward for the *opposite*
-# zone type (demand input -> search supply, and vice versa). Once that M5 zone
+# Once price touches it, watch new M5 candles going forward for that *same*
+# zone type (demand input -> search demand, and vice versa). Once that M5 zone
 # forms, don't trade off it directly -- instead watch new M1 candles going
-# forward for the zone *opposite* the M5 one, which is the same side as the
-# original M15 input (demand -> supply -> demand). Zones are detected with a
-# simple base-candle + displacement-candle definition. The M1 zone is what
-# actually places the MARKET/LIMIT order.
+# forward for a zone of that same type again, confirming demand -> demand ->
+# demand (or supply -> supply -> supply) before actually opening. Zones are
+# detected with a simple base-candle + displacement-candle definition. The M1
+# zone is what actually places the MARKET/LIMIT order.
 #
 # The demand side and the supply side are armed independently (two engine
 # instances below) so both can be watching -- and can both fire -- at once.
@@ -50,6 +50,8 @@ DEFAULT_BASE_MAX_BODY_RATIO = 0.6
 CANDLE_BUFFER_MAXLEN = 12
 AVG_LOOKBACK_CANDLES = 10
 SL_LIQUIDITY_LOOKBACK_CANDLES = 20
+DEFAULT_TRIGGER_CHECK_CYCLE_SEC = 60.0
+MIN_TRIGGER_CHECK_CYCLE_SEC = 1.0
 
 
 def _body_pips(candle: Any) -> float:
@@ -60,10 +62,6 @@ def _body_pips(candle: Any) -> float:
 
 def _is_bullish(candle: Any) -> bool:
     return _candle_value(candle, 4, "close") > _candle_value(candle, 1, "open")
-
-
-def _opposite_zone_type(zone_type: str) -> str:
-    return "supply" if zone_type == "demand" else "demand"
 
 
 # wait_for_new_candle()'s simulated/dev-mode branch only carries open/close --
@@ -116,8 +114,10 @@ class ZoneStrategyEngine:
         self.symbol: str = SYMBOL_DEFAULT
         self.trigger_price: float = 0.0
         self.trigger_zone_type: str = self.side
-        self.m5_target_zone_type: str = _opposite_zone_type(self.side)
+        self.m5_target_zone_type: str = self.side
         self.m1_target_zone_type: str = self.side
+        self.instant_m5_start: bool = False
+        self.trigger_check_cycle_sec: float = DEFAULT_TRIGGER_CHECK_CYCLE_SEC
         self.manual_sl_distance: float = 0.0
         self.sl_distance_in_pips: bool = True
         self.liquidity_buffer_pips: float = 0.0
@@ -137,9 +137,14 @@ class ZoneStrategyEngine:
         manual_sl_distance = float(cfg.get("manual_sl_distance", 0) or 0)
         if manual_sl_distance <= 0:
             raise RuntimeError("Enter a manual stoploss distance greater than 0.")
+        instant_m5_start = bool(cfg.get("instant_m5_start", False))
         trigger_price = float(cfg.get("trigger_price", 0) or 0)
-        if trigger_price <= 0:
+        if not instant_m5_start and trigger_price <= 0:
             raise RuntimeError("Enter a valid trigger price.")
+        trigger_check_cycle_sec = max(
+            MIN_TRIGGER_CHECK_CYCLE_SEC,
+            float(cfg.get("trigger_check_cycle_sec") or DEFAULT_TRIGGER_CHECK_CYCLE_SEC),
+        )
         order_kind = str(cfg.get("order_kind") or "MARKET").upper()
         if order_kind not in {"MARKET", "LIMIT"}:
             raise RuntimeError("Order type must be MARKET or LIMIT.")
@@ -152,6 +157,8 @@ class ZoneStrategyEngine:
             self._reset_config()
             self.symbol = str(cfg.get("symbol") or SYMBOL_DEFAULT).strip().upper()
             self.trigger_price = trigger_price
+            self.instant_m5_start = instant_m5_start
+            self.trigger_check_cycle_sec = trigger_check_cycle_sec
             self.manual_sl_distance = manual_sl_distance
             self.sl_distance_in_pips = bool(cfg.get("sl_distance_in_pips", True))
             self.liquidity_buffer_pips = float(cfg.get("liquidity_buffer_pips", 0) or 0)
@@ -165,17 +172,20 @@ class ZoneStrategyEngine:
             self.base_max_body_ratio = float(cfg.get("base_max_body_ratio") or DEFAULT_BASE_MAX_BODY_RATIO)
 
         started_at = datetime.now().isoformat()
+        instant = self.instant_m5_start
         patch_path(
             self._state_path,
             {
                 "running": True,
-                "phase": "waiting_trigger",
+                "phase": "searching_m5_zone" if instant else "waiting_trigger",
                 "symbol": self.symbol,
                 "trigger_price": self.trigger_price,
                 "trigger_zone_type": self.trigger_zone_type,
                 "m5_target_zone_type": self.m5_target_zone_type,
                 "m1_target_zone_type": self.m1_target_zone_type,
                 "order_kind": self.order_kind,
+                "instant_m5_start": instant,
+                "trigger_check_cycle_sec": self.trigger_check_cycle_sec,
                 "manual_sl_distance": self.manual_sl_distance,
                 "sl_distance_in_pips": self.sl_distance_in_pips,
                 "liquidity_buffer_pips": self.liquidity_buffer_pips,
@@ -184,7 +194,7 @@ class ZoneStrategyEngine:
                 "tp": self.tp,
                 "tp_in_pips": self.tp_in_pips,
                 "started_at": started_at,
-                "triggered_at": None,
+                "triggered_at": started_at if instant else None,
                 "m5_zone": None,
                 "m1_zone": None,
                 "sl_liquidity_price": None,
@@ -193,13 +203,24 @@ class ZoneStrategyEngine:
                 "last_error": None,
             },
         )
-        append_log(
-            "search",
-            f"[INFO] [scalping] armed: watching {self.symbol} for {self.trigger_zone_type} trigger @ "
-            f"{self.trigger_price:.2f}; will search M5 for {self.m5_target_zone_type}, then M1 for "
-            f"{self.m1_target_zone_type} before opening.",
-        )
-        start_task(self._trigger_task_name, self._trigger_tick, interval_sec=1)
+        if instant:
+            append_log(
+                "search",
+                f"[INFO] [scalping] armed: instant M5 start for {self.symbol} -- treating M15 "
+                f"{self.trigger_zone_type} as already triggered, searching M5 for "
+                f"{self.m5_target_zone_type} directly, then M1 for {self.m1_target_zone_type} before opening.",
+            )
+            with self._lock:
+                self.m5_buffer.clear()
+            start_task(self._search_m5_task_name, self._search_m5_tick, interval_sec=1)
+        else:
+            append_log(
+                "search",
+                f"[INFO] [scalping] armed: watching {self.symbol} for {self.trigger_zone_type} trigger @ "
+                f"{self.trigger_price:.2f} (checked every {self.trigger_check_cycle_sec:.0f}s); will search M5 "
+                f"for {self.m5_target_zone_type}, then M1 for {self.m1_target_zone_type} before opening.",
+            )
+            start_task(self._trigger_task_name, self._trigger_tick, interval_sec=self.trigger_check_cycle_sec)
 
     def stop(self, reason: str = "Manual stop requested.") -> None:
         was_running = (
@@ -217,6 +238,9 @@ class ZoneStrategyEngine:
             patch_path(self._state_path, {"running": False})
 
     def _trigger_tick(self) -> None:
+        # Runs every `trigger_check_cycle_sec` (not the M5/M1 searches' fixed
+        # 1s) -- only the M15 trigger wait is meant to be checked this
+        # infrequently.
         tick = mt5.symbol_info_tick(self.symbol) if mt5_available() else _tick_for(self.symbol)
         if tick is None:
             return

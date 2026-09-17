@@ -6,30 +6,32 @@ body {
   font-family: "Inter", "Segoe UI", sans-serif;
 }
 
+/* Neutral charcoal palette (VS Code / TradingView dark, not the previous
+   navy-tinted slate colors) so the dark theme reads as gray, not blue. */
 html[data-theme="DARK"] body {
-  background: #0b1220;
-  color: #e2e8f0;
+  background: #1e1e1e;
+  color: #d4d4d4;
 }
 
 html[data-theme="DARK"] .app-shell,
 html[data-theme="DARK"] .app-main {
-  background: #0b1220 !important;
-  color: #e2e8f0 !important;
+  background: #1e1e1e !important;
+  color: #d4d4d4 !important;
 }
 
 html[data-theme="DARK"] input:not([type="checkbox"]):not([type="radio"]),
 html[data-theme="DARK"] select,
 html[data-theme="DARK"] textarea {
-  background: #0f172a !important;
-  border-color: #334155 !important;
-  color: #e2e8f0 !important;
+  background: #2d2d2d !important;
+  border-color: #3c3c3c !important;
+  color: #d4d4d4 !important;
 }
 
 html[data-theme="DARK"] .hover\:bg-white:hover,
 html[data-theme="DARK"] .hover\:bg-slate-50:hover,
 html[data-theme="DARK"] .hover\:bg-slate-100:hover {
-  background: #243047 !important;
-  color: #f8fafc !important;
+  background: #2a2d2e !important;
+  color: #f3f3f3 !important;
 }
 
 /* Tinted accent surfaces (badges, callouts, soft buttons) keep their hue but
@@ -133,37 +135,37 @@ html[data-theme="DARK"] .border-violet-100,
 html[data-theme="DARK"] .border-violet-200 { border-color: #6d28d9 !important; }
 
 /* Dashed empty-state panels and disabled surfaces. */
-html[data-theme="DARK"] .border-dashed.border-slate-300 { border-color: #334155 !important; }
-html[data-theme="DARK"] .bg-slate-950 { background-color: #f8fafc !important; color: #0b1220 !important; }
+html[data-theme="DARK"] .border-dashed.border-slate-300 { border-color: #3c3c3c !important; }
+html[data-theme="DARK"] .bg-slate-950 { background-color: #e8e8e8 !important; color: #1e1e1e !important; }
 
 html[data-theme="DARK"] option {
-  background: #111827;
-  color: #e2e8f0;
+  background: #252526;
+  color: #d4d4d4;
 }
 
 html[data-theme="DARK"] .bg-white,
 html[data-theme="DARK"] .bg-slate-50,
 html[data-theme="DARK"] .bg-slate-100 {
-  background-color: #111827 !important;
+  background-color: #252526 !important;
 }
 
 html[data-theme="DARK"] .text-slate-950,
 html[data-theme="DARK"] .text-slate-900,
 html[data-theme="DARK"] .text-slate-800,
 html[data-theme="DARK"] .text-slate-700 {
-  color: #e2e8f0 !important;
+  color: #e8e8e8 !important;
 }
 
 html[data-theme="DARK"] .text-slate-600,
 html[data-theme="DARK"] .text-slate-500,
 html[data-theme="DARK"] .text-slate-400 {
-  color: #94a3b8 !important;
+  color: #9d9d9d !important;
 }
 
 html[data-theme="DARK"] .border-slate-100,
 html[data-theme="DARK"] .border-slate-200,
 html[data-theme="DARK"] .border-slate-300 {
-  border-color: #334155 !important;
+  border-color: #3c3c3c !important;
 }
 
 .table-frame {
@@ -222,11 +224,22 @@ html[data-theme="DARK"] .border-slate-300 {
   outline: none;
 }
 
+html[data-theme="DARK"] .note-hint {
+  border-color: #3c3c3c;
+  background: #2d2d2d;
+  color: #9d9d9d;
+}
+html[data-theme="DARK"] .note-hint:hover,
+html[data-theme="DARK"] .note-hint:focus-visible {
+  border-color: #569cd6;
+  color: #569cd6;
+}
+
 .topo-line {
   background-image: repeating-linear-gradient(90deg, #cbd5e1 0 6px, transparent 6px 12px);
 }
 html[data-theme="DARK"] .topo-line {
-  background-image: repeating-linear-gradient(90deg, #334155 0 6px, transparent 6px 12px);
+  background-image: repeating-linear-gradient(90deg, #3c3c3c 0 6px, transparent 6px 12px);
 }
 
 @keyframes topo-travel {

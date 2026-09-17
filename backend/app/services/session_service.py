@@ -76,11 +76,23 @@ def submit_adapter_command(login: int, action: str, payload: dict[str, Any], tim
     while time.monotonic() < deadline:
         if result_path.exists():
             try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-                if isinstance(result, dict):
-                    return result
+                raw = result_path.read_text(encoding="utf-8")
+            except OSError:
+                # The adapter's write is a temp-file + rename; on Windows a
+                # reader that lands mid-rename (or gets caught by an AV scan
+                # of the freshly written file) sees a transient sharing
+                # violation here. Leave the file alone and retry instead of
+                # unlinking a result we never actually read.
+                time.sleep(0.01)
+                continue
+            try:
+                result = json.loads(raw)
+            except ValueError:
+                result = None
             finally:
                 result_path.unlink(missing_ok=True)
+            if isinstance(result, dict):
+                return result
         checks += 1
         if checks % 5 == 0 and not _has_active_adapter(login):
             break

@@ -293,8 +293,12 @@ export function TradePage({ runtime, onRefreshRuntime }) {
   // activity was constantly arriving even while nothing changed. Open
   // positions and pending orders already have their own tabs for that.
   const tradeFeedLogs = useMemo(() => {
+    // The scalping engine tags every line (armed, M15/M5/M1 trigger hits,
+    // demand/supply zone finds, order placement, stop/error) with
+    // "[scalping]" -- matching that alone pulls its whole lifecycle into this
+    // feed instead of only the lines that happen to contain a trade keyword.
     const tradeLogPattern =
-      /manual|order|position|limit|close|auto close|tp\d?|take profit|stop loss|trade/i;
+      /manual|order|position|limit|close|auto close|tp\d?|take profit|stop loss|trade|\[scalping\]/i;
     return (runtime?.logs?.search || [])
       .filter((line) => tradeLogPattern.test(String(line)))
       .map(parseSearchLogLine)

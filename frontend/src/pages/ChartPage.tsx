@@ -10,6 +10,7 @@ import {
 import { api } from "../services/api";
 import { AppButton, Card } from "../components/ui/Primitives";
 import { cx } from "../utils/format";
+import { getChartPalette, watchThemeChange } from "../utils/chartTheme";
 
 type CandlePoint = {
   time: number;
@@ -163,34 +164,58 @@ export default function ChartPage() {
 
   useEffect(() => {
     if (!containerRef.current) return undefined;
+    const palette = getChartPalette();
     const chart = createChart(containerRef.current, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: "#f8fafc" },
-        textColor: "#334155",
+        background: { type: ColorType.Solid, color: palette.background },
+        textColor: palette.text,
       },
       grid: {
-        vertLines: { color: "#e2e8f0" },
-        horzLines: { color: "#e2e8f0" },
+        vertLines: { color: palette.grid },
+        horzLines: { color: palette.grid },
       },
       crosshair: { mode: 0 },
-      rightPriceScale: { borderColor: "#cbd5e1" },
+      rightPriceScale: { borderColor: palette.border },
       timeScale: {
-        borderColor: "#cbd5e1",
+        borderColor: palette.border,
         timeVisible: true,
         secondsVisible: false,
       },
     });
     const candles = chart.addSeries(CandlestickSeries, {
-      upColor: "#059669",
-      downColor: "#e11d48",
+      upColor: palette.upColor,
+      downColor: palette.downColor,
       borderVisible: false,
-      wickUpColor: "#059669",
-      wickDownColor: "#e11d48",
+      wickUpColor: palette.upColor,
+      wickDownColor: palette.downColor,
     });
     chartRef.current = chart;
     seriesRef.current = candles;
+
+    const stopWatching = watchThemeChange((nextPalette) => {
+      chart.applyOptions({
+        layout: {
+          background: { type: ColorType.Solid, color: nextPalette.background },
+          textColor: nextPalette.text,
+        },
+        grid: {
+          vertLines: { color: nextPalette.grid },
+          horzLines: { color: nextPalette.grid },
+        },
+        rightPriceScale: { borderColor: nextPalette.border },
+        timeScale: { borderColor: nextPalette.border },
+      });
+      candles.applyOptions({
+        upColor: nextPalette.upColor,
+        downColor: nextPalette.downColor,
+        wickUpColor: nextPalette.upColor,
+        wickDownColor: nextPalette.downColor,
+      });
+    });
+
     return () => {
+      stopWatching();
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
@@ -453,13 +478,17 @@ export default function ChartPage() {
       const symbolMatches =
         !sideStatus?.symbol || String(sideStatus.symbol).toUpperCase() === "XAUUSD";
 
-      const triggerPrice = Number(sideStatus?.trigger_price || 0);
-      const showTrigger =
+      // Once the side's trade is placed (buy for demand, sell for supply),
+      // stop drawing its zone boxes/trigger line -- the position is open, so
+      // there's nothing left to search for.
+      const searchActive =
         symbolMatches &&
-        triggerPrice > 0 &&
         ["waiting_trigger", "searching_m5_zone", "searching_m1_zone"].includes(
           sideStatus?.phase,
         );
+
+      const triggerPrice = Number(sideStatus?.trigger_price || 0);
+      const showTrigger = searchActive && triggerPrice > 0;
       if (showTrigger) {
         const title = `${side.toUpperCase()} M15 trigger`;
         if (!overlay.triggerLine) {
@@ -484,14 +513,14 @@ export default function ChartPage() {
       // from.
       drawZoneBand(
         overlay,
-        symbolMatches ? sideStatus?.m5_zone : null,
+        searchActive ? sideStatus?.m5_zone : null,
         "m5ZoneBand",
         `${side} M5 zone`,
         0.1,
       );
       drawZoneBand(
         overlay,
-        symbolMatches ? sideStatus?.m1_zone : null,
+        searchActive ? sideStatus?.m1_zone : null,
         "m1ZoneBand",
         `${side} M1 zone`,
         0.22,

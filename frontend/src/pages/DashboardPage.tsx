@@ -16,24 +16,26 @@ import { AppButton, Card } from "../components/ui/Primitives";
 import { TableFrame } from "../components/ui/TableFrame";
 import { ColorType, createChart, LineSeries } from "lightweight-charts";
 import { useEffect, useRef } from "react";
+import { getChartPalette, watchThemeChange } from "../utils/chartTheme";
 
 function TradingViewProgressChart({ data }) {
   const containerRef = useRef(null);
 
   useEffect(() => {
     if (!containerRef.current) return undefined;
+    const palette = getChartPalette();
     const chart = createChart(containerRef.current, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: "#f8fafc" },
-        textColor: "#64748b",
+        background: { type: ColorType.Solid, color: palette.background },
+        textColor: palette.text,
       },
       grid: {
-        vertLines: { color: "#e2e8f0" },
-        horzLines: { color: "#e2e8f0" },
+        vertLines: { color: palette.grid },
+        horzLines: { color: palette.grid },
       },
-      rightPriceScale: { borderColor: "#cbd5e1", autoScale: true },
-      timeScale: { borderColor: "#cbd5e1", timeVisible: false, rightOffset: 6 },
+      rightPriceScale: { borderColor: palette.border, autoScale: true },
+      timeScale: { borderColor: palette.border, timeVisible: false, rightOffset: 6 },
       crosshair: { mode: 0 },
     });
     const balance = chart.addSeries(LineSeries, {
@@ -51,7 +53,26 @@ function TradingViewProgressChart({ data }) {
       data.map((point) => ({ time: point.time, value: point.equity })),
     );
     chart.timeScale().fitContent();
-    return () => chart.remove();
+
+    const stopWatching = watchThemeChange((nextPalette) => {
+      chart.applyOptions({
+        layout: {
+          background: { type: ColorType.Solid, color: nextPalette.background },
+          textColor: nextPalette.text,
+        },
+        grid: {
+          vertLines: { color: nextPalette.grid },
+          horzLines: { color: nextPalette.grid },
+        },
+        rightPriceScale: { borderColor: nextPalette.border },
+        timeScale: { borderColor: nextPalette.border },
+      });
+    });
+
+    return () => {
+      stopWatching();
+      chart.remove();
+    };
   }, [data]);
 
   return (

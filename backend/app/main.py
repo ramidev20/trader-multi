@@ -241,6 +241,8 @@ class ZoneStrategyStartPayload(BaseModel):
     displacement_min_pips: float | None = None
     displacement_avg_multiplier: float | None = None
     base_max_body_ratio: float | None = None
+    instant_m5_start: bool = False
+    trigger_check_cycle_sec: float | None = None
 
 
 class ZoneStrategyStopPayload(BaseModel):

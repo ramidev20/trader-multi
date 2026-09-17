@@ -4,7 +4,7 @@ import random
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from .mt5_compat import mt5, mt5_available
@@ -216,13 +216,25 @@ class ZoneStrategyEngine:
                 self.m5_buffer.clear()
             start_task(self._search_m5_task_name, self._search_m5_tick, interval_sec=1)
         else:
+            # Anchor the first check to the next M1 candle open instead of
+            # "now" -- starting immediately on click would offset every
+            # future poll by however many seconds were left in the current
+            # minute, so checks would keep landing mid-candle instead of
+            # right as each fresh M1 bar opens.
+            next_candle_open = datetime.now().replace(second=0, microsecond=0) + timedelta(minutes=1)
             append_log(
                 "search",
                 f"[INFO] [scalping] armed: watching {self.symbol} for {self.trigger_zone_type} trigger @ "
-                f"{self.trigger_price:.2f} (checked every {self.trigger_check_cycle_sec:.0f}s); will search M5 "
+                f"{self.trigger_price:.2f} (checked every {self.trigger_check_cycle_sec:.0f}s, starting "
+                f"{next_candle_open.strftime('%H:%M:%S')} on the next M1 candle open); will search M5 "
                 f"for {self.m5_target_zone_type}, then M1 for {self.m1_target_zone_type} before opening.",
             )
-            start_task(self._trigger_task_name, self._trigger_tick, interval_sec=self.trigger_check_cycle_sec)
+            start_task(
+                self._trigger_task_name,
+                self._trigger_tick,
+                interval_sec=self.trigger_check_cycle_sec,
+                start_time=next_candle_open,
+            )
 
     def stop(self, reason: str = "Manual stop requested.") -> None:
         was_running = (
@@ -240,26 +252,28 @@ class ZoneStrategyEngine:
             patch_path(self._state_path, {"running": False})
 
     def _m15_amount_touched(self, trigger_price: float) -> bool:
-        """Has the still-forming M15 candle's range reached the typed amount?
+        """Has price reached the typed amount at any point since the last check?
 
-        Reading the candle's high/low (not a single live tick) means a touch
-        that happens and reverses between two check-cycle polls still gets
-        caught, instead of only counting when a poll happens to land on the
-        exact instant price is at the level.
+        This reads a window of M1 candles wide enough to cover the gap since
+        the previous poll (sized off `trigger_check_cycle_sec`), not the
+        currently-forming M15 candle -- an M15 bar resets every 15 minutes,
+        so a touch just before that boundary would otherwise be forgotten the
+        moment a fresh M15 candle opens, even though price never actually
+        moved back to it. Checking a rolling M1 window has no such reset.
         """
         if mt5_available():
+            lookback = max(2, int(self.trigger_check_cycle_sec // 60) + 2)
             try:
-                rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M15"], 0, 1)
+                rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 0, lookback)
             except Exception:
                 rates = None
             if rates is None or len(rates) == 0:
                 return False
-            candle = rates[0]
-            high = float(_candle_value(candle, 2, "high"))
-            low = float(_candle_value(candle, 3, "low"))
-            return low <= trigger_price <= high
+            highs = [float(_candle_value(c, 2, "high")) for c in rates]
+            lows = [float(_candle_value(c, 3, "low")) for c in rates]
+            return min(lows) <= trigger_price <= max(highs)
 
-        # No real M15 feed in dev/sim mode -- fall back to the live simulated
+        # No real M1 feed in dev/sim mode -- fall back to the live simulated
         # tick crossing the level between polls.
         tick = _tick_for(self.symbol)
         if tick is None:

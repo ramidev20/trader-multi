@@ -68,6 +68,7 @@ function ZoneSideCard({
   onCheckCycleChange,
   phase,
   isActive,
+  confirmationLevel,
   lastError,
   disabled,
   onStop,
@@ -120,6 +121,12 @@ function ZoneSideCard({
             ? `Skips the M15 wait -- arms straight into the M5 ${meta.label.toLowerCase()} search.`
             : "Waits for price to touch this M15 level before searching M5."}
         </p>
+        {!instantM5 && phase === "waiting_trigger" && Number(confirmationLevel) > 0 ? (
+          <p className="mt-1 text-[11px] font-semibold leading-4 text-blue-600">
+            Amount reached -- confirming against M1 {side === "supply" ? "high" : "low"}{" "}
+            {Number(confirmationLevel).toFixed(2)} before firing.
+          </p>
+        ) : null}
       </div>
       {!instantM5 ? (
         <div className="mt-2">
@@ -359,6 +366,7 @@ export default function ScalpingPage() {
           onCheckCycleChange={setDemandCheckCycleSec}
           phase={demandPhase}
           isActive={demandActive}
+          confirmationLevel={status.demand?.confirmation_level}
           lastError={status.demand?.last_error}
           disabled={submitting}
           onStop={() => handleStop("demand")}
@@ -374,6 +382,7 @@ export default function ScalpingPage() {
           onCheckCycleChange={setSupplyCheckCycleSec}
           phase={supplyPhase}
           isActive={supplyActive}
+          confirmationLevel={status.supply?.confirmation_level}
           lastError={status.supply?.last_error}
           disabled={submitting}
           onStop={() => handleStop("supply")}

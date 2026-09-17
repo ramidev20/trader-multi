@@ -132,6 +132,7 @@ class ZoneStrategyEngine:
         self.m5_buffer: deque = deque(maxlen=CANDLE_BUFFER_MAXLEN)
         self.m1_buffer: deque = deque(maxlen=CANDLE_BUFFER_MAXLEN)
         self.last_mid: Optional[float] = None
+        self.confirmation_level: Optional[float] = None
 
     def start(self, cfg: dict) -> None:
         manual_sl_distance = float(cfg.get("manual_sl_distance", 0) or 0)
@@ -195,6 +196,7 @@ class ZoneStrategyEngine:
                 "tp_in_pips": self.tp_in_pips,
                 "started_at": started_at,
                 "triggered_at": started_at if instant else None,
+                "confirmation_level": None,
                 "m5_zone": None,
                 "m1_zone": None,
                 "sl_liquidity_price": None,
@@ -237,22 +239,96 @@ class ZoneStrategyEngine:
         else:
             patch_path(self._state_path, {"running": False})
 
-    def _trigger_tick(self) -> None:
-        # Runs every `trigger_check_cycle_sec` (not the M5/M1 searches' fixed
-        # 1s) -- only the M15 trigger wait is meant to be checked this
-        # infrequently.
-        tick = mt5.symbol_info_tick(self.symbol) if mt5_available() else _tick_for(self.symbol)
+    def _m15_amount_touched(self, trigger_price: float) -> bool:
+        """Has the still-forming M15 candle's range reached the typed amount?
+
+        Reading the candle's high/low (not a single live tick) means a touch
+        that happens and reverses between two check-cycle polls still gets
+        caught, instead of only counting when a poll happens to land on the
+        exact instant price is at the level.
+        """
+        if mt5_available():
+            try:
+                rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M15"], 0, 1)
+            except Exception:
+                rates = None
+            if rates is None or len(rates) == 0:
+                return False
+            candle = rates[0]
+            high = float(_candle_value(candle, 2, "high"))
+            low = float(_candle_value(candle, 3, "low"))
+            return low <= trigger_price <= high
+
+        # No real M15 feed in dev/sim mode -- fall back to the live simulated
+        # tick crossing the level between polls.
+        tick = _tick_for(self.symbol)
         if tick is None:
-            return
+            return False
         mid = (float(tick.ask) + float(tick.bid)) / 2.0
         with self._lock:
             last_mid = self.last_mid
             self.last_mid = mid
+        return last_mid is not None and (last_mid - trigger_price) * (mid - trigger_price) <= 0
+
+    def _capture_m1_confirmation_level(self, is_supply: bool) -> Optional[float]:
+        """Last *closed* M1 candle's high (supply) / low (demand).
+
+        Fetched once, right when the M15 amount is first reached, and then
+        held fixed -- it's the fakeout filter the amount touch has to clear,
+        not a level that keeps sliding with the newest candle.
+        """
+        if mt5_available():
+            try:
+                rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 1, 1)
+            except Exception:
+                rates = None
+            if rates is None or len(rates) == 0:
+                return None
+            candle = rates[0]
+        else:
+            candle = _sim_next_candle(self.symbol, "M1")
+            if candle is None:
+                return None
+        return float(_candle_value(candle, 2, "high")) if is_supply else float(_candle_value(candle, 3, "low"))
+
+    def _current_price(self) -> Optional[float]:
+        tick = mt5.symbol_info_tick(self.symbol) if mt5_available() else _tick_for(self.symbol)
+        if tick is None:
+            return None
+        return (float(tick.ask) + float(tick.bid)) / 2.0
+
+    def _trigger_tick(self) -> None:
+        # Runs every `trigger_check_cycle_sec` (not the M5/M1 searches' fixed
+        # 1s). Two-step gate: first wait for the typed M15 amount to actually
+        # be touched, then capture the M1 confirmation level and only fire
+        # once live price breaks past *that* level on a later cycle.
+        with self._lock:
             trigger_price = self.trigger_price
-        if last_mid is None:
+            confirmation_level = self.confirmation_level
+            side = self.side
+
+        if confirmation_level is None:
+            if not self._m15_amount_touched(trigger_price):
+                return
+            confirmation_level = self._capture_m1_confirmation_level(side == "supply")
+            if confirmation_level is None:
+                return
+            with self._lock:
+                self.confirmation_level = confirmation_level
+            patch_path(self._state_path, {"confirmation_level": confirmation_level})
+            append_log(
+                "search",
+                f"[INFO] [scalping] M15 {side} amount {trigger_price:.2f} reached; confirming "
+                f"against M1 {'high' if side == 'supply' else 'low'} {confirmation_level:.2f} "
+                f"before firing.",
+            )
             return
-        crossed = (last_mid - trigger_price) * (mid - trigger_price) <= 0
-        if not crossed:
+
+        price = self._current_price()
+        if price is None:
+            return
+        broke = price > confirmation_level if side == "supply" else price < confirmation_level
+        if not broke:
             return
 
         stop_task(self._trigger_task_name)
@@ -263,8 +339,8 @@ class ZoneStrategyEngine:
         patch_path(self._state_path, {"phase": "searching_m5_zone", "triggered_at": triggered_at})
         append_log(
             "search",
-            f"[INFO] [scalping] M15 trigger hit @ {mid:.2f} (level {trigger_price:.2f}); "
-            f"searching M5 for {m5_target_zone_type}.",
+            f"[INFO] [scalping] M15 trigger confirmed @ {price:.2f} (amount {trigger_price:.2f}, "
+            f"M1 confirmation {confirmation_level:.2f}); searching M5 for {m5_target_zone_type}.",
         )
         start_task(self._search_m5_task_name, self._search_m5_tick, interval_sec=1)
 

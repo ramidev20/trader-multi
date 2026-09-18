@@ -3,7 +3,7 @@ import { RefreshCcw, StopCircle } from "lucide-react";
 import { AppButton, Field } from "../components/ui/Primitives";
 import { ORDER_KIND_OPTIONS, IconSelect } from "./shared/IconSelect";
 import { cx, decimalInput } from "../utils/format";
-import { showBanner } from "../utils/banner";
+import { clearBanner, showBanner } from "../utils/banner";
 import { api } from "../services/api";
 
 const STORAGE_KEY = "trader.scalping.form";
@@ -213,11 +213,12 @@ export default function ScalpingPage() {
   const [status, setStatus] = useState({ demand: null, supply: null });
   const [submitting, setSubmitting] = useState(false);
   const [stoppingSide, setStoppingSide] = useState(null);
-  const [errorText, setErrorText] = useState("");
-  // Surfaced in the TopBar's banner slot instead of an inline div here.
-  useEffect(() => {
-    if (errorText) showBanner(errorText, "error");
-  }, [errorText]);
+  // Surfaces in the TopBar's banner slot instead of an inline div here.
+  // reportError takes the actual Error object so its `.code` (an HTTP status
+  // or "NETWORK", attached by services/api.js) survives into the banner.
+  function reportError(error) {
+    showBanner(error?.message || String(error), "error", error?.code);
+  }
 
   useEffect(() => {
     const form = {
@@ -301,9 +302,9 @@ export default function ScalpingPage() {
   }
 
   async function handleStart() {
-    setErrorText("");
+    clearBanner();
     if (!(Number(minSlPips) > 0)) {
-      setErrorText("Enter a min SL (pips) amount greater than 0.");
+      showBanner("Enter a min SL (pips) amount greater than 0.", "error");
       return;
     }
     const candidates = [
@@ -328,8 +329,15 @@ export default function ScalpingPage() {
     );
 
     if (!candidates.length) {
-      setErrorText(
-        "Enter a valid demand and/or supply M15 amount (or enable Instant M5 start) to arm a search.",
+      // Distinguish "both sides are already running, there's nothing left
+      // to arm" from "you haven't actually filled anything in" -- the old
+      // single message here fired for both, which was misleading right
+      // after arming (the amounts you'd typed were already fine).
+      showBanner(
+        demandActive && supplyActive
+          ? "Demand and supply are both already armed. Stop one first to re-arm it."
+          : "Enter a valid demand and/or supply M15 amount (or enable Instant M5 start) to arm a search.",
+        "error",
       );
       return;
     }
@@ -347,13 +355,14 @@ export default function ScalpingPage() {
         .map((result, index) => ({ result, side: candidates[index].side }))
         .filter(({ result }) => result.status === "rejected");
       if (failures.length) {
-        setErrorText(
+        showBanner(
           failures
             .map(
               ({ result, side }) =>
                 `${side}: ${String(result.reason?.message || result.reason)}`,
             )
             .join(" | "),
+          "error",
         );
       }
       const result = await api.zoneStrategyStatus();
@@ -374,9 +383,9 @@ export default function ScalpingPage() {
         demand: result?.zone_strategy?.demand || null,
         supply: result?.zone_strategy?.supply || null,
       });
-      setErrorText("");
+      clearBanner();
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     } finally {
       setStoppingSide(null);
     }
@@ -392,7 +401,7 @@ export default function ScalpingPage() {
           variant="blue"
           className="shrink-0"
           onClick={handleStart}
-          disabled={submitting}
+          disabled={submitting || (demandActive && supplyActive)}
         >
           {anyActive ? (
             <>

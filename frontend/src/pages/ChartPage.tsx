@@ -9,7 +9,7 @@ import {
 } from "lightweight-charts";
 import { api } from "../services/api";
 import { cx } from "../utils/format";
-import { showBanner } from "../utils/banner";
+import { clearBanner, showBanner } from "../utils/banner";
 import { getChartPalette, watchThemeChange } from "../utils/chartTheme";
 
 type CandlePoint = {
@@ -117,6 +117,9 @@ export default function ChartPage() {
         m1ZoneFill: any;
         m1ZoneBottom: any;
         m1ZoneEdges: any;
+        breachedZoneFill: any;
+        breachedZoneBottom: any;
+        breachedZoneEdges: any;
         entryLine: any;
         slLine: any;
         tpLine: any;
@@ -141,27 +144,50 @@ export default function ChartPage() {
   });
   const [zoneStatus, setZoneStatus] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [errorText, setErrorText] = useState("");
-  // One-way: once cleared, both drawing effects below keep actually removing
-  // (chartRef.current.removeSeries(...), not a CSS hide) every overlay they'd
-  // normally maintain, permanently -- there's no restore. Clicking Clear
-  // again does nothing new since there's nothing left to remove.
-  const [drawingsCleared, setDrawingsCleared] = useState(false);
   // Brief flash over the chart pane on the Clear click, purely visual
   // feedback that it happened.
   const [clearPulse, setClearPulse] = useState(false);
+  // Identities (not a blanket flag) of the specific items visible at the
+  // moment Clear was clicked -- a plain boolean here previously suppressed
+  // *every* future redraw too, so a brand new zone found or order placed
+  // after clicking Clear would never appear again until the page reloaded.
+  // "No restore" only means what was on screen at that moment stays gone;
+  // anything new discovered afterwards (different formed_at/ticket, so a
+  // different key) still draws normally.
+  const clearedKeysRef = useRef<Set<string>>(new Set());
+  const [clearNonce, setClearNonce] = useState(0);
   function clearDrawings() {
-    if (drawingsCleared) return;
-    setDrawingsCleared(true);
     setClearPulse(true);
     window.setTimeout(() => setClearPulse(false), 350);
+    const keys = clearedKeysRef.current;
+    ["demand", "supply"].forEach((side) => {
+      const sideStatus = zoneStatus?.[side];
+      if (!sideStatus) return;
+      if (Number(sideStatus.trigger_price) > 0) {
+        keys.add(`${side}:trigger:${sideStatus.started_at}`);
+      }
+      if (sideStatus.m5_zone) keys.add(`${side}:m5:${sideStatus.m5_zone.formed_at}`);
+      if (sideStatus.m1_zone) keys.add(`${side}:m1:${sideStatus.m1_zone.formed_at}`);
+      if (sideStatus.last_breached_m5_zone) {
+        keys.add(`${side}:breached:${sideStatus.last_breached_m5_zone.breached_at}`);
+      }
+      if (sideStatus.placed_order) keys.add(`${side}:order:${sideStatus.placed_order.ticket}`);
+    });
+    (snapshot.orders || []).forEach((order) => {
+      if (order.ticket != null) keys.add(`position:${order.ticket}`);
+    });
+    // Nothing above mutates React state the effects depend on, so bump a
+    // counter to make them re-run immediately against the updated cleared
+    // set instead of waiting for the next 2s poll.
+    setClearNonce((n) => n + 1);
   }
-  // Surfaced in the TopBar's banner slot (see utils/banner.js) instead of an
+  // Surfaces in the TopBar's banner slot (see utils/banner.js) instead of an
   // inline div here, which used to push the chart down every time a fetch
-  // failed.
-  useEffect(() => {
-    if (errorText) showBanner(errorText, "error");
-  }, [errorText]);
+  // failed. Called with the actual Error object so its `.code` (an HTTP
+  // status or "NETWORK") survives into the banner.
+  function reportError(error) {
+    showBanner(error?.message || String(error), "error", error?.code);
+  }
   const spread =
     typeof snapshot.bid === "number" && typeof snapshot.ask === "number"
       ? snapshot.ask - snapshot.bid
@@ -183,9 +209,9 @@ export default function ChartPage() {
         ask: data?.ask,
         updated_at: data?.updated_at,
       });
-      setErrorText("");
+      clearBanner();
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     } finally {
       if (!silent) setLoading(false);
     }
@@ -378,17 +404,17 @@ export default function ChartPage() {
     if (!seriesRef.current || !chartRef.current) return;
     seriesRef.current.setData(normalizedCandles);
 
-    // Candles always render; only the overlays are conditional -- an empty
-    // list here makes the cleanup loop below remove every existing one and
-    // skips the creation loop that would otherwise redraw them.
-    const positions = drawingsCleared
-      ? []
-      : snapshot.orders.filter(
-          (order) =>
-            String(order.status || "").toLowerCase() === "open" &&
-            String(order.order_kind || "").toUpperCase() === "MARKET" &&
-            Number(order.price ?? order.entry ?? 0) > 0,
-        );
+    // Candles always render; only the overlays are conditional -- excluding
+    // a cleared ticket here makes the cleanup loop below remove its existing
+    // overlay and skips recreating it, while a ticket that wasn't on screen
+    // when Clear was clicked (a new position) still draws normally.
+    const positions = snapshot.orders.filter(
+      (order) =>
+        String(order.status || "").toLowerCase() === "open" &&
+        String(order.order_kind || "").toUpperCase() === "MARKET" &&
+        Number(order.price ?? order.entry ?? 0) > 0 &&
+        !clearedKeysRef.current.has(`position:${order.ticket}`),
+    );
     const activeTickets = new Set(
       positions.map((position) => String(position.ticket)),
     );
@@ -526,7 +552,7 @@ export default function ChartPage() {
       chartRef.current?.timeScale().fitContent();
       fittedRef.current = true;
     }
-  }, [snapshot.orders, normalizedCandles, drawingsCleared]);
+  }, [snapshot.orders, normalizedCandles, clearNonce]);
 
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current || !normalizedCandles.length) return;
@@ -542,7 +568,10 @@ export default function ChartPage() {
     // "rectangle" primitive, but a doji's wick is just a vertical line at an
     // exact time/price-range, so one placed at the start time and another at
     // the end time stand in for the box's left/right sides.
-    function drawZoneBorder(overlay, zone, refPrefix, fillAlpha) {
+    // `frozenAt` marks a zone as no longer live (breached): drawn grey
+    // instead of green/red, and its box stops at the breach time instead of
+    // stretching to the latest candle like an active search's zone does.
+    function drawZoneBorder(overlay, zone, refPrefix, fillAlpha, frozenAt) {
       const fillKey = `${refPrefix}Fill`;
       const bottomKey = `${refPrefix}Bottom`;
       const edgesKey = `${refPrefix}Edges`;
@@ -564,12 +593,20 @@ export default function ChartPage() {
       let startTime =
         nearestCandleTime(zone.base_candle_time, normalizedCandles) ??
         normalizedCandles[0].time;
-      if (startTime === endTime && normalizedCandles.length > 1) {
+      const boxEndTime = frozenAt
+        ? (nearestCandleTime(frozenAt, normalizedCandles) ?? endTime)
+        : endTime;
+      if (startTime === boxEndTime && normalizedCandles.length > 1) {
         startTime = normalizedCandles[normalizedCandles.length - 2].time;
       }
-      const zoneColor = zone.type === "demand" ? "#16a34a" : "#e11d48";
-      const zoneFill =
-        zone.type === "demand"
+      const zoneColor = frozenAt
+        ? "#94a3b8"
+        : zone.type === "demand"
+          ? "#16a34a"
+          : "#e11d48";
+      const zoneFill = frozenAt
+        ? `rgba(148, 163, 184, ${fillAlpha})`
+        : zone.type === "demand"
           ? `rgba(22, 163, 74, ${fillAlpha})`
           : `rgba(225, 29, 72, ${fillAlpha})`;
 
@@ -593,7 +630,7 @@ export default function ChartPage() {
       }
       overlay[fillKey].setData([
         { time: startTime, value: zone.price_high },
-        { time: endTime, value: zone.price_high },
+        { time: boxEndTime, value: zone.price_high },
       ]);
 
       const bottomOptions = {
@@ -611,7 +648,7 @@ export default function ChartPage() {
       }
       overlay[bottomKey].setData([
         { time: startTime, value: zone.price_low },
-        { time: endTime, value: zone.price_low },
+        { time: boxEndTime, value: zone.price_low },
       ]);
 
       const edgeOptions = {
@@ -637,9 +674,9 @@ export default function ChartPage() {
         close: zone.price_low,
       });
       overlay[edgesKey].setData(
-        startTime === endTime
+        startTime === boxEndTime
           ? [edgeCandle(startTime)]
-          : [edgeCandle(startTime), edgeCandle(endTime)],
+          : [edgeCandle(startTime), edgeCandle(boxEndTime)],
       );
     }
 
@@ -648,11 +685,8 @@ export default function ChartPage() {
     // per side keeps them visually separable.
     const SIDE_TRIGGER_COLOR = { demand: "#7c3aed", supply: "#ea580c" };
     ["demand", "supply"].forEach((side) => {
-      // Treating status as absent once cleared makes every flag below
-      // (symbolMatches, searchActive, showTrigger, order) fall through to its
-      // existing "remove this overlay" branch, without needing a second copy
-      // of that cleanup logic here.
-      const sideStatus = drawingsCleared ? null : zoneStatus?.[side];
+      const sideStatus = zoneStatus?.[side];
+      const cleared = clearedKeysRef.current;
       let overlay = zoneOverlayRef.current[side];
       if (!overlay) {
         overlay = {
@@ -663,6 +697,9 @@ export default function ChartPage() {
           m1ZoneFill: null,
           m1ZoneBottom: null,
           m1ZoneEdges: null,
+          breachedZoneFill: null,
+          breachedZoneBottom: null,
+          breachedZoneEdges: null,
           entryLine: null,
           slLine: null,
           tpLine: null,
@@ -689,7 +726,10 @@ export default function ChartPage() {
       // of leaving it drawn for the rest of the search.
       const triggerPrice = Number(sideStatus?.trigger_price || 0);
       const showTrigger =
-        symbolMatches && sideStatus?.phase === "waiting_trigger" && triggerPrice > 0;
+        symbolMatches &&
+        sideStatus?.phase === "waiting_trigger" &&
+        triggerPrice > 0 &&
+        !cleared.has(`${side}:trigger:${sideStatus?.started_at}`);
       if (showTrigger) {
         const title = `${side.toUpperCase()} M15 trigger`;
         if (!overlay.triggerLine) {
@@ -717,20 +757,40 @@ export default function ChartPage() {
       // its own timeframe.
       const showM5Zone = TIMEFRAME_MINUTES[timeframe] <= TIMEFRAME_MINUTES.M5;
       const showM1Zone = TIMEFRAME_MINUTES[timeframe] <= TIMEFRAME_MINUTES.M1;
+      const m5Zone =
+        searchActive && showM5Zone && sideStatus?.m5_zone &&
+        !cleared.has(`${side}:m5:${sideStatus.m5_zone.formed_at}`)
+          ? sideStatus.m5_zone
+          : null;
+      drawZoneBorder(overlay, m5Zone, "m5Zone", 0.1);
+      const m1Zone =
+        searchActive && showM1Zone && sideStatus?.m1_zone &&
+        !cleared.has(`${side}:m1:${sideStatus.m1_zone.formed_at}`)
+          ? sideStatus.m1_zone
+          : null;
+      drawZoneBorder(overlay, m1Zone, "m1Zone", 0.22);
+      // A breached M5 zone stays on the chart -- greyed out, frozen at the
+      // moment it broke -- as a record of where the search moved on from,
+      // instead of just disappearing. Shown regardless of the current
+      // phase/searchActive so it survives even once a fresh zone is found.
+      const breachedZone =
+        symbolMatches && showM5Zone && sideStatus?.last_breached_m5_zone &&
+        !cleared.has(`${side}:breached:${sideStatus.last_breached_m5_zone.breached_at}`)
+          ? sideStatus.last_breached_m5_zone
+          : null;
       drawZoneBorder(
         overlay,
-        searchActive && showM5Zone ? sideStatus?.m5_zone : null,
-        "m5Zone",
+        breachedZone,
+        "breachedZone",
         0.1,
-      );
-      drawZoneBorder(
-        overlay,
-        searchActive && showM1Zone ? sideStatus?.m1_zone : null,
-        "m1Zone",
-        0.22,
+        breachedZone?.breached_at,
       );
 
-      const order = symbolMatches ? sideStatus?.placed_order : null;
+      const order =
+        symbolMatches && sideStatus?.placed_order &&
+        !cleared.has(`${side}:order:${sideStatus.placed_order.ticket}`)
+          ? sideStatus.placed_order
+          : null;
       const entryPrice = Number(order?.entry || 0);
       const slPrice = Number(order?.sl || 0);
       const tpPrice = Number(order?.tp || 0);
@@ -789,7 +849,7 @@ export default function ChartPage() {
         overlay.tpLine = null;
       }
     });
-  }, [normalizedCandles, zoneStatus, timeframe, drawingsCleared]);
+  }, [normalizedCandles, zoneStatus, timeframe, clearNonce]);
 
   return (
     // No surrounding Card -- the chart fills the tab directly, like an
@@ -839,17 +899,11 @@ export default function ChartPage() {
         <button
           type="button"
           onClick={clearDrawings}
-          disabled={drawingsCleared}
-          title={drawingsCleared ? "Drawings cleared" : "Clear drawings"}
-          className={cx(
-            "flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-bold shadow-sm backdrop-blur-sm transition active:scale-95",
-            drawingsCleared
-              ? "cursor-not-allowed border-slate-200 bg-slate-100/90 text-slate-400"
-              : "border-slate-200 bg-white/90 text-slate-700 hover:bg-slate-50",
-          )}
+          title="Clear drawings"
+          className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white/90 px-2.5 py-1.5 text-xs font-bold text-slate-700 shadow-sm backdrop-blur-sm transition hover:bg-slate-50 active:scale-95"
         >
           <Eraser className="h-3.5 w-3.5" />
-          {drawingsCleared ? "Cleared" : "Clear"}
+          Clear
         </button>
       </div>
       {!snapshot.candles.length && !loading ? (

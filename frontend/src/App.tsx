@@ -14,7 +14,7 @@ import TradeHistoryPage from "./pages/TradeHistoryPage";
 import RemoteControlPage from "./pages/RemoteControlPage";
 import { initialAccounts, liquidityLevels, strategyLogs } from "./data/mockData";
 import { cx } from "./utils/format";
-import { showBanner } from "./utils/banner";
+import { clearBanner, showBanner } from "./utils/banner";
 import { api } from "./services/api";
 
 const avatarColorOptions = [
@@ -43,7 +43,6 @@ export default function App() {
   const dismissedNotificationIds = useRef(new Set());
   const [tradeHistory, setTradeHistory] = useState({ history: [], summaries: [] });
   const [loadingBootstrap, setLoadingBootstrap] = useState(true);
-  const [errorText, setErrorText] = useState("");
   const [settingsTabRequest, setSettingsTabRequest] = useState("accounts");
   const [dialogMode, setDialogMode] = useState(null);
   const [selectedAccount, setSelectedAccount] = useState(null);
@@ -75,11 +74,13 @@ export default function App() {
     color: "from-blue-600 to-indigo-600",
   });
 
-  // Surfaced in the TopBar's banner slot instead of an inline div in the
-  // page content -- see utils/banner.js.
-  useEffect(() => {
-    if (errorText) showBanner(errorText, "error");
-  }, [errorText]);
+  // Surfaces in the TopBar's banner slot instead of an inline div in the
+  // page content -- see utils/banner.js. Called with the actual Error object
+  // (not an already-stringified message) so its `.code` (an HTTP status or
+  // "NETWORK", attached by services/api.js) survives into the banner.
+  const reportError = useCallback((error) => {
+    showBanner(error?.message || String(error), "error", error?.code);
+  }, []);
 
   const mergeAccountSnapshots = useCallback((snapshotData) => {
     const snapshots = new Map(
@@ -143,13 +144,13 @@ export default function App() {
         });
       }
       setNotifications(buildNotifications(data, nextNotificationSettings).filter((item) => !dismissedNotificationIds.current.has(item.id)));
-      setErrorText("");
+      clearBanner();
       if (withSnapshots && !devModeEnabled) {
         try {
           const snapshotData = await api.accountSnapshots();
           mergeAccountSnapshots(snapshotData);
         } catch (error) {
-          setErrorText(String(error?.message || error));
+          reportError(error);
         }
       }
       return data;
@@ -162,15 +163,15 @@ export default function App() {
         setSearchLogs(data.logs?.search || []);
         setNotifications(buildNotifications(data, notificationSettings));
         setTradeHistory(buildDeveloperTradeHistory());
-        setErrorText("");
+        clearBanner();
         return data;
       }
-      setErrorText(String(error?.message || error));
+      reportError(error);
       return null;
     } finally {
       if (!silent) setLoadingBootstrap(false);
     }
-  }, [devModeEnabled, mergeAccountSnapshots]);
+  }, [devModeEnabled, mergeAccountSnapshots, reportError]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
@@ -223,8 +224,8 @@ export default function App() {
     if (!masterConnected) return;
     api.tradeHistory()
       .then((data) => setTradeHistory({ history: data.history || [], summaries: data.summaries || [] }))
-      .catch((error) => setErrorText(String(error?.message || error)));
-  }, [activePage, masterConnected]);
+      .catch((error) => reportError(error));
+  }, [activePage, masterConnected, reportError]);
 
   function openAddDialog() {
     setSelectedAccount(null);
@@ -286,9 +287,9 @@ export default function App() {
       await api.disconnectAccount(Number(masterAccount.login));
       setActivePage("dashboard");
       await refreshBootstrap({ silent: true });
-      setErrorText("");
+      clearBanner();
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 
@@ -315,7 +316,7 @@ export default function App() {
       await refreshBootstrap();
       closeDialog();
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 
@@ -326,7 +327,7 @@ export default function App() {
       await refreshBootstrap();
       closeDialog();
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 
@@ -362,7 +363,7 @@ export default function App() {
         await refreshBootstrap({ silent: true });
       }
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 
@@ -373,7 +374,7 @@ export default function App() {
       const snapshotData = await api.accountSnapshots();
       mergeAccountSnapshots(snapshotData);
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
     return data;
   }

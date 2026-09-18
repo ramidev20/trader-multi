@@ -12,7 +12,8 @@ import ChartPage from "./ChartPage";
 import ScalpingPage from "./ScalpingPage";
 import { ORDER_KIND_OPTIONS, IconSelect } from "./shared/IconSelect";
 import { cx, decimalInput, signedDecimalInput } from "../utils/format";
-import { showBanner } from "../utils/banner";
+import { clearBanner, showBanner } from "../utils/banner";
+import { parseSearchLogLine } from "../utils/logFeed";
 import { api } from "../services/api";
 import { listReceivers, sendRemoteCommand } from "../services/remoteControl";
 
@@ -128,19 +129,14 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
   const [autoCloseAt, setAutoCloseAt] = useState(
     () => savedTradeForm.autoCloseAt ?? defaultAutoCloseValue(),
   );
-  const [errorText, setErrorText] = useState("");
-  // Separate from errorText so a close-all result isn't shown in the rose
-  // "something's wrong" banner -- this is a confirmation, not a problem.
-  const [closeSummaryText, setCloseSummaryText] = useState("");
-  // Both surface in the TopBar's banner slot (see utils/banner.js) instead
-  // of an inline div here, which used to push the tabs/table below it down
-  // every time either one appeared.
-  useEffect(() => {
-    if (errorText) showBanner(errorText, "error");
-  }, [errorText]);
-  useEffect(() => {
-    if (closeSummaryText) showBanner(closeSummaryText, "success");
-  }, [closeSummaryText]);
+  // Surface in the TopBar's banner slot (see utils/banner.js) instead of an
+  // inline div here, which used to push the tabs/table below it down every
+  // time one appeared. reportError takes the actual Error object (not an
+  // already-stringified message) so its `.code` (an HTTP status or
+  // "NETWORK", attached by services/api.js) survives into the banner.
+  function reportError(error) {
+    showBanner(error?.message || String(error), "error", error?.code);
+  }
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   // React state updates aren't synchronous: a very fast double-click can fire
@@ -176,27 +172,6 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
       showBanner([...positionsErrors, ...limitOrdersErrors].join(" • "), "warning");
     }
   }, [positionsTab, positionsErrors, limitOrdersErrors]);
-  // Backend search-channel lines are "[HH:MM:SS] [LEVEL] message"; split both
-  // brackets out so the panel can color by the real level instead of guessing.
-  function parseSearchLogLine(line, index) {
-    const text = String(line);
-    const match = text.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*\[(\w+)\]\s*(.*)$/);
-    if (match) {
-      const [, at, levelWord, message] = match;
-      const level = ["error", "warning", "success", "info"].includes(levelWord.toLowerCase())
-        ? levelWord.toLowerCase()
-        : "info";
-      return { id: `search-${index}-${at}-${message}`, level, message, at };
-    }
-    const fallback = text.match(/^\[(.*?)\]\s*(.*)$/);
-    return {
-      id: `search-${index}-${text}`,
-      level: "info",
-      message: fallback?.[2] ?? text,
-      at: fallback?.[1] ?? "--:--:--",
-    };
-  }
-
   // Only real events here, not a restated snapshot of current state: the
   // panel below auto-scrolls to the newest line, and a "current positions"
   // block re-timestamped on every 5s runtime poll would look like new
@@ -579,7 +554,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
       setPositions(Array.isArray(data?.positions) ? data.positions : []);
       setPositionsErrors(Array.isArray(data?.errors) ? data.errors : []);
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 
@@ -591,7 +566,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
       setLimitOrdersErrors(Array.isArray(data?.errors) ? data.errors : []);
     } catch (error) {
       if (!silent) {
-        setErrorText(String(error?.message || error));
+        reportError(error);
       }
     }
   }
@@ -693,8 +668,9 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
         setSearchArmed(false);
         armedMinuteRef.current = null;
         armedCandleRef.current = null;
-        setErrorText(
+        showBanner(
           "The new 1 minute candle did not arrive in time, so no limit order was sent.",
+          "error",
         );
         return;
       }
@@ -810,9 +786,9 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
           );
         }
       }
-      setErrorText("");
+      clearBanner();
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -859,14 +835,15 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
       setSearchArmed(false);
       return;
     }
-    setErrorText("");
+    clearBanner();
     if (orderKind === "LIMIT") {
       // Must be a fresh read: a cached candle from before the last fire is
       // already older than the live one and would trigger immediately.
       const candle = await refreshM1Candle();
       if (!candle) {
-        setErrorText(
+        showBanner(
           "Could not read the current 1 minute candle for XAUUSD, so the search cannot start.",
+          "error",
         );
         return;
       }
@@ -908,31 +885,28 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
       const summary = response?.summary || {};
       const closedCount = Number(summary.closed || 0);
       if (closedCount > 0) {
-        setErrorText("");
         const profit = Number(summary.profit || 0);
         const profitPercent = Number(summary.profit_percent || 0);
         const sign = profit >= 0 ? "+" : "";
-        setCloseSummaryText(
+        showBanner(
           `Closed ${closedCount} position${closedCount === 1 ? "" : "s"}: ${sign}${profit.toFixed(2)} USD (${sign}${profitPercent.toFixed(2)}%).`,
+          "success",
         );
       } else if (Number(summary.attempted || 0) > 0) {
-        setCloseSummaryText("");
-        setErrorText(
+        showBanner(
           "Close-all completed, but no positions were confirmed closed locally. Check backend logs.",
+          "error",
         );
       } else if (!receiversMirrored) {
-        setCloseSummaryText("");
-        setErrorText("No open positions were found to close.");
+        showBanner("No open positions were found to close.", "error");
       } else {
         // Nothing to close on this PC's own accounts, but the close request
         // was sent to and accepted by every enabled receiver above -- not an
         // error condition, just nothing local to report.
-        setErrorText("");
-        setCloseSummaryText("");
+        clearBanner();
       }
     } catch (error) {
-      setCloseSummaryText("");
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 

@@ -24,15 +24,9 @@ import {
   SelectBox,
 } from "../components/ui/Primitives";
 import { api } from "../services/api";
-import { LogList } from "../components/ui/LogList";
-
-function LogPanel({ logs }) {
-  return (
-    <Card className="flex min-h-[520px] flex-col">
-      <LogList logs={logs} emptyMessage="[INFO] No strategy logs yet." />
-    </Card>
-  );
-}
+import { clearBanner, showBanner } from "../utils/banner";
+import { ConsoleLogPanel } from "../components/ui/ConsoleLogPanel";
+import { parseSearchLogLine } from "../utils/logFeed";
 
 function formatTime12(value) {
   const date = new Date(value);
@@ -259,7 +253,6 @@ export default function SearchPage({
   const strategyCommand = useRef(null);
   const [activeTab, setActiveTab] = useState("search");
   const [showDefaultsDialog, setShowDefaultsDialog] = useState(false);
-  const [errorText, setErrorText] = useState("");
   const [strategyRunning, setStrategyRunning] = useState(false);
   const [leqList, setLeqList] = useState([]);
   const [leqPrice, setLeqPrice] = useState("3348.20");
@@ -284,12 +277,19 @@ export default function SearchPage({
   const [maxPositionsValue, setMaxPositionsValue] = useState("1");
   const [openPicker, setOpenPicker] = useState(null);
 
-  const logs = useMemo(
+  // The backend's "search" log channel is shared by several unrelated
+  // features (scalping, manual order/copy-trading, auto-close, ...), so this
+  // page's own feed has to filter those out explicitly -- "[scalping:" is
+  // the zone-strategy engine's own tag (see zone_strategy_service.py), not
+  // anything this page's strategy search produces.
+  const searchFeedLogs = useMemo(
     () =>
-      [...new Set([...(runtime?.logs?.search || []), ...searchLogs])].filter(
-        (line) =>
-          !/Search defaults saved|scheduling task|task scheduled to start|Strategy started in .* mode/i.test(line),
-      ),
+      [...new Set([...(runtime?.logs?.search || []), ...searchLogs])]
+        .filter(
+          (line) =>
+            !/Search defaults saved|scheduling task|task scheduled to start|Strategy started in .* mode|\[scalping/i.test(line),
+        )
+        .map(parseSearchLogLine),
     [runtime, searchLogs],
   );
 
@@ -441,6 +441,13 @@ export default function SearchPage({
     return () => onPickerInteractionChange(false);
   }, [onPickerInteractionChange]);
 
+  // Surfaces in the TopBar's banner slot instead of an inline div here.
+  // Takes the actual Error object so its `.code` (an HTTP status or
+  // "NETWORK", attached by services/api.js) survives into the banner.
+  function reportError(error) {
+    showBanner(error?.message || String(error), "error", error?.code);
+  }
+
   async function addLiquidityLevel() {
     if (!liquidityTrigger) return;
     const priceNum = Number(leqPrice);
@@ -449,9 +456,9 @@ export default function SearchPage({
       await api.addLiquidityLevel({ price: priceNum, side: leqSide });
       await onRefreshRuntime?.({ silent: true });
       setLeqPrice("");
-      setErrorText("");
+      clearBanner();
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 
@@ -459,23 +466,23 @@ export default function SearchPage({
     try {
       await api.removeLiquidityLevel(id);
       await onRefreshRuntime?.({ silent: true });
-      setErrorText("");
+      clearBanner();
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 
   async function startStrategy() {
     try {
       if (!enableBuy && !enableSell) {
-        setErrorText("Enable at least one side before starting strategy.");
+        showBanner("Enable at least one side before starting strategy.", "error");
         return;
       }
 
       const startIso = combineDateTime(startDate, startTime);
       const endIso = endEnabled ? combineDateTime(endDate, endTime) : null;
       if (endIso && new Date(endIso) <= new Date(startIso)) {
-        setErrorText("End time must be later than start time.");
+        showBanner("End time must be later than start time.", "error");
         return;
       }
 
@@ -518,9 +525,9 @@ export default function SearchPage({
       strategyCommand.current = "started";
       setStrategyRunning(true);
       await onRefreshRuntime?.({ silent: true });
-      setErrorText("");
+      clearBanner();
     } catch (error) {
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 
@@ -531,11 +538,11 @@ export default function SearchPage({
       await api.stopStrategy();
       await onRefreshRuntime?.({ silent: true });
       setStrategyRunning(false);
-      setErrorText("");
+      clearBanner();
     } catch (error) {
       strategyCommand.current = null;
       setStrategyRunning(Boolean(runtime?.strategy?.running));
-      setErrorText(String(error?.message || error));
+      reportError(error);
     }
   }
 
@@ -598,18 +605,16 @@ export default function SearchPage({
             <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-blue-600" />
           </button>
         </div>
-        <LogPanel logs={logs} />
+        <ConsoleLogPanel
+          emptyText="No strategy logs yet."
+          entries={searchFeedLogs}
+        />
       </>
     );
   }
 
   return (
     <LocalizationProvider dateAdapter={AdapterDayjs}>
-      {errorText ? (
-        <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
-          {errorText}
-        </div>
-      ) : null}
       <div className="mb-6 flex flex-wrap items-center gap-2 border-b border-slate-200">
         <button className="relative px-3 py-4 text-sm font-bold text-blue-600">
           Search

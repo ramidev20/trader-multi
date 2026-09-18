@@ -68,6 +68,13 @@ AVG_LOOKBACK_CANDLES = 10
 SL_LIQUIDITY_LOOKBACK_CANDLES = 20
 DEFAULT_TRIGGER_CHECK_CYCLE_SEC = 60.0
 MIN_TRIGGER_CHECK_CYCLE_SEC = 1.0
+# Hard floor on the M1 confirmation: even if a base+displacement pattern
+# matches sooner (a fast market can produce a qualifying 15+ pip M1 candle
+# within the very first couple of closes), an order won't actually fire until
+# this many real seconds have passed since the M1 search began -- so "M5 zone
+# found" to "order placed" is never less than a genuine 1 minute, matching
+# what "M1" is supposed to mean here.
+MIN_M1_CONFIRM_SEC = 60.0
 
 
 def _body_pips(candle: Any) -> float:
@@ -154,6 +161,12 @@ class ZoneStrategyEngine:
         self.m1_buffer: deque = deque(maxlen=CANDLE_BUFFER_MAXLEN)
         self.last_mid: Optional[float] = None
         self.confirmation_level: Optional[float] = None
+        # The M5 zone the M1 search is currently confirming against, kept
+        # here (not just in the patched runtime state) so the M1 search loop
+        # can check live price against it every tick.
+        self.m5_zone: Optional[dict[str, Any]] = None
+        # Wall-clock time.time() the M1 search started -- see MIN_M1_CONFIRM_SEC.
+        self.m1_search_started_at: Optional[float] = None
         self._last_symbol_error: Optional[str] = None
 
     def start(self, cfg: dict) -> None:
@@ -221,6 +234,7 @@ class ZoneStrategyEngine:
                 "confirmation_level": None,
                 "m5_zone": None,
                 "m1_zone": None,
+                "last_breached_m5_zone": None,
                 "sl_liquidity_price": None,
                 "placed_order": None,
                 "last_stop_reason": None,
@@ -452,6 +466,8 @@ class ZoneStrategyEngine:
         stop_task(self._search_m5_task_name)
         with self._lock:
             self.m1_buffer.clear()
+            self.m5_zone = zone
+            self.m1_search_started_at = time.time()
         patch_path(self._state_path, {"phase": "searching_m1_zone", "m5_zone": zone})
         append_log(
             "search",
@@ -459,14 +475,94 @@ class ZoneStrategyEngine:
         )
         start_task(self._search_m1_task_name, self._search_m1_tick, interval_sec=1)
 
+    def _m5_zone_breached(self, price: float) -> bool:
+        """Has price traded through the M5 zone while waiting on M1?
+
+        A demand zone is invalidated the moment price closes below its own
+        low (it didn't hold as support); a supply zone the moment price
+        trades above its own high. Once that happens there's nothing left
+        worth confirming with M1 -- the zone itself is no longer a valid
+        demand/supply level.
+        """
+        zone = self.m5_zone
+        if zone is None:
+            return False
+        if self.side == "demand":
+            return price < zone["price_low"]
+        return price > zone["price_high"]
+
+    def _retreat_after_breach(self) -> None:
+        """M5 zone invalidated mid-M1-search: drop back to hunting a fresh
+        M5 zone instead of confirming a level that no longer holds.
+
+        The breached zone is kept (separately from the live `m5_zone`, which
+        gets cleared) as `last_breached_m5_zone` so the chart can still show
+        it -- greyed out, marking where the search moved on from -- instead
+        of it just vanishing.
+        """
+        stop_task(self._search_m1_task_name)
+        with self._lock:
+            zone = self.m5_zone
+            self.m5_zone = None
+            # Same broker-time domain as base_candle_time/displacement_candle_time
+            # (an epoch straight from MT5 candle data), not the backend
+            # process's own wall clock -- that runs on a different clock than
+            # the broker feed the chart's candle times use (seen off by hours
+            # earlier), so the frontend's "nearest loaded candle to this
+            # timestamp" search always landed on the oldest candle in its
+            # sliding window. Since that window keeps sliding forward as new
+            # candles arrive, the "frozen" box kept visibly growing to the
+            # right forever instead of actually freezing.
+            breach_time = int(self.m5_buffer[-1]["time"]) if self.m5_buffer else None
+        breached_zone = (
+            {
+                **zone,
+                "breached_at": breach_time if breach_time is not None else zone["displacement_candle_time"],
+            }
+            if zone
+            else None
+        )
+        self._seed_m5_buffer()
+        patch_path(
+            self._state_path,
+            {
+                "phase": "searching_m5_zone",
+                "m5_zone": None,
+                "m1_zone": None,
+                "last_breached_m5_zone": breached_zone,
+            },
+        )
+        if zone:
+            edge = "low" if self.side == "demand" else "high"
+            append_log(
+                "search",
+                f"[WARNING] [scalping:{self.side}] M5 zone breached (price past {edge} "
+                f"{zone[f'price_{edge}']:.2f}); searching a new M5 zone.",
+            )
+        start_task(self._search_m5_task_name, self._search_m5_tick, interval_sec=1)
+
     def _search_m1_tick(self) -> None:
+        price = self._current_price()
+        if price is not None and self._m5_zone_breached(price):
+            self._retreat_after_breach()
+            return
         candle = _next_candle(self.symbol, "M1")
         if candle is None:
             return
         with self._lock:
             self.m1_buffer.append(candle)
             zone = self._detect_zone_locked(self.m1_buffer, self.m1_target_zone_type)
+            started_at = self.m1_search_started_at
         if zone is None:
+            return
+        elapsed = time.time() - started_at if started_at else MIN_M1_CONFIRM_SEC
+        if elapsed < MIN_M1_CONFIRM_SEC:
+            # A fast market can produce a qualifying base+displacement pair
+            # within the very first couple of M1 closes -- that's a real
+            # pattern, just too soon to act on. Don't stop the task or place
+            # an order yet; the rolling buffer keeps collecting candles and
+            # gets re-checked (against the next base/displacement pair) on
+            # every future tick until MIN_M1_CONFIRM_SEC has genuinely passed.
             return
         stop_task(self._search_m1_task_name)
         patch_path(self._state_path, {"m1_zone": zone})
@@ -635,6 +731,11 @@ class ZoneStrategyEngine:
                 "phase": "placed",
                 "running": False,
                 "sl_liquidity_price": sl_liquidity_price,
+                # A breached-and-superseded zone from earlier in this run is
+                # no longer relevant once a trade is actually live -- drop it
+                # so the chart isn't left showing a greyed-out box alongside
+                # the live entry/SL/TP lines.
+                "last_breached_m5_zone": None,
                 "placed_order": {
                     "ticket": placed.get("ticket"),
                     "side": side,

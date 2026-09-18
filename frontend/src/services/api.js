@@ -9,7 +9,11 @@ async function request(path, options = {}) {
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Network error: could not reach ${API_BASE}${path}. ${reason}`);
+    const networkError = new Error(`Network error: could not reach ${API_BASE}${path}. ${reason}`);
+    // Lets the TopBar banner show a short "NETWORK" tag instead of this whole
+    // sentence -- see utils/banner.js.
+    networkError.code = "NETWORK";
+    throw networkError;
   }
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
@@ -19,7 +23,11 @@ async function request(path, options = {}) {
     } catch {
       // ignore
     }
-    throw new Error(detail);
+    const httpError = new Error(detail);
+    // The status is attached even when `detail` is the backend's own message
+    // (the common case) and doesn't literally contain the number itself.
+    httpError.code = response.status;
+    throw httpError;
   }
   return response.json();
 }

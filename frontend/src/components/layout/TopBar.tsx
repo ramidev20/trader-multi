@@ -73,7 +73,7 @@ export default function TopBar({
   // scrollable page content and shove everything below it down every time
   // one appeared. This slot lives in the sticky header instead, so it never
   // shifts the page.
-  const [banner, setBanner] = useState<{ id: number; tone: string; text: string } | null>(null);
+  const [banner, setBanner] = useState<{ id: number; tone: string; text: string; code: string | null } | null>(null);
 
   useEffect(() => {
     function closeAccountMenu(event: MouseEvent) {
@@ -97,10 +97,36 @@ export default function TopBar({
     <header className="app-topbar sticky top-0 z-10 border-b border-slate-200 bg-white px-5 py-2.5 lg:px-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
+          <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
             <span>MT5 Trader</span>
             <span>/</span>
             <span className="text-slate-950">{pageTitle}</span>
+            {/* Same row as the breadcrumb, not a block below it -- a short
+                code (an HTTP status or "NETWORK", or the tone itself when
+                no code applies) instead of the full description, which the
+                title attribute still carries for a hover tooltip. */}
+            {banner ? (
+              <span
+                title={banner.text}
+                className={cx(
+                  "flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-wide",
+                  bannerTone[banner.tone] || bannerTone.error,
+                )}
+              >
+                {banner.code || banner.tone}
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    clearBanner();
+                  }}
+                  className="opacity-70 transition hover:opacity-100"
+                  aria-label="Dismiss"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -218,24 +244,6 @@ export default function TopBar({
           </div>
         </div>
       </div>
-      {banner ? (
-        <div
-          className={cx(
-            "mt-4 flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm font-semibold",
-            bannerTone[banner.tone] || bannerTone.error,
-          )}
-        >
-          <span className="min-w-0 break-words">{banner.text}</span>
-          <button
-            type="button"
-            onClick={clearBanner}
-            className="shrink-0 rounded-full p-1 opacity-70 transition hover:opacity-100"
-            aria-label="Dismiss"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      ) : null}
       <div className="mt-4 grid grid-cols-2 gap-2 lg:hidden">
         {mobileNavItems.map(({ key, label, icon: Icon }) => (
           <button

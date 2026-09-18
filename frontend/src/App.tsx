@@ -6,11 +6,15 @@ import TopBar from "./components/layout/TopBar";
 import { AppButton, Dialog, Field, SelectBox } from "./components/ui/Primitives";
 import DashboardPage from "./pages/DashboardPage";
 import SearchPage from "./pages/SearchPage";
-import { NotificationsPage, ProfilePage, SettingsPlaceholder, TradePage } from "./pages/Placeholders";
+import { ManualTradePage } from "./pages/ManualTradePage";
+import { ProfilePage } from "./pages/ProfilePage";
+import { NotificationsPage } from "./pages/NotificationsPage";
+import { SettingsPlaceholder } from "./pages/SettingsPage";
 import TradeHistoryPage from "./pages/TradeHistoryPage";
 import RemoteControlPage from "./pages/RemoteControlPage";
 import { initialAccounts, liquidityLevels, strategyLogs } from "./data/mockData";
 import { cx } from "./utils/format";
+import { showBanner } from "./utils/banner";
 import { api } from "./services/api";
 
 const avatarColorOptions = [
@@ -70,6 +74,12 @@ export default function App() {
     latency: "",
     color: "from-blue-600 to-indigo-600",
   });
+
+  // Surfaced in the TopBar's banner slot instead of an inline div in the
+  // page content -- see utils/banner.js.
+  useEffect(() => {
+    if (errorText) showBanner(errorText, "error");
+  }, [errorText]);
 
   const mergeAccountSnapshots = useCallback((snapshotData) => {
     const snapshots = new Map(
@@ -397,26 +407,44 @@ export default function App() {
           sizing off further). The page-content div and the motion.div inside
           it both need to be real flex items (`flex-1`), not just `min-h-full`:
           a `min-height` alone never gives a percentage-height descendant (like
-          a page's own `h-full flex-1` root, e.g. the Trade Panel) anything
+          a page's own `h-full flex-1` root, e.g. the Manual Trade page) anything
           concrete to size against, so its content -- most visibly a log panel
           -- collapsed to its own shrink-wrapped height whenever it had little
           or nothing to show instead of filling the remaining viewport. */}
       <main className="app-main flex min-h-screen min-w-0 flex-col lg:min-h-0 lg:flex-1">
         <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-6 lg:px-5" style={styles.pageContent}>
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-6 lg:px-5" style={styles.pageContent}>
           <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }} className="flex min-h-0 flex-1 flex-col">
-            {errorText ? <div style={styles.errorBanner}>{errorText}</div> : null}
             {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock MT5 data unless a live backend session is available.</div> : null}
             {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}
             {activePage === "dashboard" && <DashboardPage totals={totals} accountsData={accountList} onAdd={openAddDialog} onEdit={openEditDialog} onDelete={openDeleteDialog} onConnect={connectAccountAndSync} onRefresh={refreshDashboard} />}
             {activePage === "search" && (masterConnected ? <SearchPage runtime={runtime} searchLogs={searchLogs} onRefreshRuntime={refreshBootstrap} timeRange={searchTimeRange} onTimeRangeChange={setSearchTimeRange} /> : <MasterConnectionRequiredPage />)}
-            {activePage === "trade" && (masterConnected ? <TradePage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />)}
             {activePage === "history" && (masterConnected ? <TradeHistoryPage runtime={runtime} historyRows={tradeHistory.history} /> : <MasterConnectionRequiredPage />)}
             {activePage === "remote" && <RemoteControlPage />}
             {activePage === "settings" && <SettingsPlaceholder initialTab={settingsTabRequest} accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} notificationSettings={notificationSettings} onNotificationSettingsChange={setNotificationSettings} themeMode={themeMode} onThemeModeChange={setThemeMode} uiZoomPercent={uiZoomPercent} onUiZoomPercentChange={setUiZoomPercent} />}
             {activePage === "profile" && <ProfilePage accountsData={accountList} runtime={runtime} historyRows={tradeHistory.history} summaries={tradeHistory.summaries} />}
             {activePage === "notifications" && <NotificationsPage notifications={notifications} />}
           </motion.div>
+          {/* Rendered as an always-mounted sibling (absolutely positioned over
+              the animated container above, not inside it) instead of behind
+              `activePage === "trade" &&` like every other page -- that ternary
+              would unmount ManualTradePage (and the chart inside it) on every page
+              switch, wiping the chart's zoom/pan and its own timeframe state.
+              Hidden with `hidden` instead of removed, so switching away and
+              back preserves all of it. It only loses state if the master
+              account actually disconnects, which is a real reset, not a
+              navigation side effect. */}
+          <div
+            className={cx(
+              // Matches the px-3 py-6 lg:px-5 padding on the scroll container
+              // itself (an inset-0 absolute child would otherwise sit flush
+              // against its edges, ignoring that padding).
+              "absolute left-3 right-3 top-6 bottom-6 flex min-h-0 flex-col lg:left-5 lg:right-5",
+              activePage === "trade" ? "flex" : "hidden",
+            )}
+          >
+            {masterConnected ? <ManualTradePage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />}
+          </div>
         </div>
       </main>
 
@@ -432,7 +460,7 @@ export default function App() {
             <select
               value={formState.color}
               onChange={(e) => setFormState((s) => ({ ...s, color: e.target.value }))}
-              className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
             >
               {avatarColorOptions.map((c) => (
                 <option key={c.value} value={c.value}>
@@ -527,9 +555,9 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
 
 function MasterConnectionRequiredPage() {
   return (
-    <div className="flex min-h-[420px] items-center justify-center rounded-3xl border border-slate-200 bg-white px-6 py-16 shadow-sm">
+    <div className="flex min-h-[420px] items-center justify-center rounded-xl border border-slate-200 bg-white px-6 py-16 shadow-sm">
       <div className="max-w-md text-center">
-        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-50 text-amber-600">
+        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-lg bg-amber-50 text-amber-600">
           <WifiOff className="h-8 w-8" strokeWidth={2.5} />
         </div>
         <h3 className="mt-5 text-xl font-black text-slate-950">Master account is not connected</h3>

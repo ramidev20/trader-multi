@@ -115,7 +115,7 @@ function TimeWheelDialog({ value, title, onCancel, onConfirm }) {
         if (event.target === event.currentTarget) onCancel();
       }}
     >
-      <div className="w-full max-w-[430px] overflow-hidden rounded-2xl bg-white shadow-2xl">
+      <div className="w-full max-w-[430px] overflow-hidden rounded-lg bg-white shadow-2xl">
         <div className="border-b-2 border-blue-600 px-6 py-5 text-3xl font-light text-blue-600">
           {title}
         </div>
@@ -223,7 +223,7 @@ function DateTimeField({ fieldKey, label, picker, value, onChange, openPicker, s
             <button
               type="button"
               onClick={() => setPickerOpenState(pickerKey, true)}
-              className="flex h-[46px] w-full items-center justify-between rounded-2xl border border-slate-300 bg-white px-3 text-left text-sm font-semibold leading-none text-slate-900 outline-none transition hover:border-blue-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+              className="flex h-[46px] w-full items-center justify-between rounded-lg border border-slate-300 bg-white px-3 text-left text-sm font-semibold leading-none text-slate-900 outline-none transition hover:border-blue-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
             >
               <span>{formatTime12(value)}</span>
               <Clock3 className="h-4 w-4 text-slate-400" />
@@ -606,7 +606,7 @@ export default function SearchPage({
   return (
     <LocalizationProvider dateAdapter={AdapterDayjs}>
       {errorText ? (
-        <div className="mb-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
+        <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-semibold text-rose-700">
           {errorText}
         </div>
       ) : null}
@@ -650,7 +650,7 @@ export default function SearchPage({
                 Search Configuration
               </h3>
             </div>
-            <div className="rounded-2xl bg-blue-50 p-2 text-blue-700">
+            <div className="rounded-lg bg-blue-50 p-2 text-blue-700">
               <Zap className="h-5 w-5" />
             </div>
           </div>
@@ -764,7 +764,7 @@ export default function SearchPage({
           </div>
 
           <div className="mt-5 grid gap-4 lg:grid-cols-2">
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-2.5">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
               <h4 className="font-black text-slate-950">Start Time</h4>
               <div className="mt-2.5 grid gap-2.5 md:grid-cols-2">
                 <DateTimeField
@@ -787,7 +787,7 @@ export default function SearchPage({
                 />
               </div>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-2.5">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
               <div className="flex items-center justify-between">
                 <h4 className="font-black text-slate-950">End Time</h4>
                 <button
@@ -834,7 +834,7 @@ export default function SearchPage({
               <ShieldCheck className="h-5 w-5 text-emerald-600" />
             </div>
             {!liquidityTrigger && (
-              <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-700">
+              <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-700">
                 Liquidity trigger is disabled. Enable it in Search Configuration
                 to edit or add LEQ levels.
               </div>
@@ -872,7 +872,7 @@ export default function SearchPage({
               {leqList.map((level) => (
                 <div
                   key={level.id}
-                  className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-3"
+                  className="flex items-center justify-between rounded-lg bg-slate-50 px-4 py-3"
                 >
                   <div>
                     <p className="font-bold text-slate-900">

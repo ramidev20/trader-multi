@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import { RefreshCcw, StopCircle } from "lucide-react";
 import { AppButton, Field } from "../components/ui/Primitives";
-import { ORDER_KIND_OPTIONS, IconSelect } from "./Placeholders";
+import { ORDER_KIND_OPTIONS, IconSelect } from "./shared/IconSelect";
 import { cx, decimalInput } from "../utils/format";
+import { showBanner } from "../utils/banner";
 import { api } from "../services/api";
 
 const STORAGE_KEY = "trader.scalping.form";
@@ -20,8 +21,14 @@ const PHASE_LABELS = {
 };
 
 const SIDE_META = {
-  demand: { label: "Demand", activeClassName: "bg-emerald-600 text-white shadow-sm" },
-  supply: { label: "Supply", activeClassName: "bg-rose-600 text-white shadow-sm" },
+  demand: {
+    label: "Demand",
+    activeClassName: "bg-emerald-600 text-white shadow-sm",
+  },
+  supply: {
+    label: "Supply",
+    activeClassName: "bg-rose-600 text-white shadow-sm",
+  },
 };
 
 const DEFAULT_CHECK_CYCLE_SEC = "60";
@@ -76,9 +83,14 @@ function ZoneSideCard({
 }) {
   const meta = SIDE_META[side];
   return (
-    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
       <div className="flex items-center justify-between gap-2">
-        <span className={cx("rounded-lg px-2.5 py-1 text-xs font-black uppercase tracking-wide", meta.activeClassName)}>
+        <span
+          className={cx(
+            "rounded-lg px-2.5 py-1 text-xs font-black uppercase tracking-wide",
+            meta.activeClassName,
+          )}
+        >
           {meta.label}
         </span>
         <span
@@ -101,7 +113,9 @@ function ZoneSideCard({
           label={`${meta.label} Amount (M15)`}
           labelExtra={
             <span className="flex items-center gap-1.5 normal-case tracking-normal">
-              <span className="text-[11px] font-semibold text-slate-500">Instant M5 start</span>
+              <span className="text-[11px] font-semibold text-slate-500">
+                Instant M5 start
+              </span>
               <SwitchToggle
                 checked={instantM5}
                 onChange={onInstantM5Change}
@@ -114,16 +128,23 @@ function ZoneSideCard({
           value={price}
           onChange={(event) => onPriceChange(decimalInput(event.target.value))}
           disabled={disabled || isActive || instantM5}
-          placeholder={instantM5 ? "Not needed -- M15 treated as already triggered" : "e.g. 3352.40"}
+          placeholder={
+            instantM5
+              ? "Not needed -- M15 treated as already triggered"
+              : "e.g. 3352.40"
+          }
         />
         <p className="mt-1 text-[11px] leading-4 text-slate-400">
           {instantM5
             ? `Skips the M15 wait -- arms straight into the M5 ${meta.label.toLowerCase()} search.`
             : "Waits for price to touch this M15 level before searching M5."}
         </p>
-        {!instantM5 && phase === "waiting_trigger" && Number(confirmationLevel) > 0 ? (
+        {!instantM5 &&
+        phase === "waiting_trigger" &&
+        Number(confirmationLevel) > 0 ? (
           <p className="mt-1 text-[11px] font-semibold leading-4 text-blue-600">
-            Amount reached -- confirming against M1 {side === "supply" ? "high" : "low"}{" "}
+            Amount reached -- confirming against M1{" "}
+            {side === "supply" ? "high" : "low"}{" "}
             {Number(confirmationLevel).toFixed(2)} before firing.
           </p>
         ) : null}
@@ -135,13 +156,15 @@ function ZoneSideCard({
             type="text"
             inputMode="decimal"
             value={checkCycleSec}
-            onChange={(event) => onCheckCycleChange(decimalInput(event.target.value))}
+            onChange={(event) =>
+              onCheckCycleChange(decimalInput(event.target.value))
+            }
             disabled={disabled || isActive}
             placeholder="e.g. 60"
           />
           <p className="mt-1 text-[11px] leading-4 text-slate-400">
-            How often (1 min or less) to check whether price has hit the M15 amount. Only applies
-            to this M15 search.
+            How often (1 min or less) to check whether price has hit the M15
+            amount. Only applies to this M15 search.
           </p>
         </div>
       ) : null}
@@ -168,8 +191,12 @@ export default function ScalpingPage() {
   const saved = useRef(loadSavedForm()).current;
   const [demandPrice, setDemandPrice] = useState(saved.demandPrice ?? "");
   const [supplyPrice, setSupplyPrice] = useState(saved.supplyPrice ?? "");
-  const [demandInstantM5, setDemandInstantM5] = useState(saved.demandInstantM5 ?? false);
-  const [supplyInstantM5, setSupplyInstantM5] = useState(saved.supplyInstantM5 ?? false);
+  const [demandInstantM5, setDemandInstantM5] = useState(
+    saved.demandInstantM5 ?? false,
+  );
+  const [supplyInstantM5, setSupplyInstantM5] = useState(
+    saved.supplyInstantM5 ?? false,
+  );
   const [demandCheckCycleSec, setDemandCheckCycleSec] = useState(
     saved.demandCheckCycleSec ?? DEFAULT_CHECK_CYCLE_SEC,
   );
@@ -177,7 +204,9 @@ export default function ScalpingPage() {
     saved.supplyCheckCycleSec ?? DEFAULT_CHECK_CYCLE_SEC,
   );
   const [minSlPips, setMinSlPips] = useState(saved.minSlPips ?? "");
-  const [liquiditySlPips, setLiquiditySlPips] = useState(saved.liquiditySlPips ?? "0");
+  const [liquiditySlPips, setLiquiditySlPips] = useState(
+    saved.liquiditySlPips ?? "0",
+  );
   const [orderKind, setOrderKind] = useState(saved.orderKind ?? "MARKET");
   const [riskPercent, setRiskPercent] = useState(saved.riskPercent ?? "1");
 
@@ -185,6 +214,10 @@ export default function ScalpingPage() {
   const [submitting, setSubmitting] = useState(false);
   const [stoppingSide, setStoppingSide] = useState(null);
   const [errorText, setErrorText] = useState("");
+  // Surfaced in the TopBar's banner slot instead of an inline div here.
+  useEffect(() => {
+    if (errorText) showBanner(errorText, "error");
+  }, [errorText]);
 
   useEffect(() => {
     const form = {
@@ -240,7 +273,11 @@ export default function ScalpingPage() {
     };
   }, []);
 
-  const ACTIVE_PHASES = ["waiting_trigger", "searching_m5_zone", "searching_m1_zone"];
+  const ACTIVE_PHASES = [
+    "waiting_trigger",
+    "searching_m5_zone",
+    "searching_m1_zone",
+  ];
   const demandPhase = status.demand?.phase ?? "idle";
   const supplyPhase = status.supply?.phase ?? "idle";
   const demandActive = ACTIVE_PHASES.includes(demandPhase);
@@ -284,7 +321,11 @@ export default function ScalpingPage() {
         instantM5: supplyInstantM5,
         checkCycleSec: supplyCheckCycleSec,
       },
-    ].filter((candidate) => !candidate.active && (candidate.instantM5 || Number(candidate.price) > 0));
+    ].filter(
+      (candidate) =>
+        !candidate.active &&
+        (candidate.instantM5 || Number(candidate.price) > 0),
+    );
 
     if (!candidates.length) {
       setErrorText(
@@ -297,7 +338,9 @@ export default function ScalpingPage() {
     try {
       const results = await Promise.allSettled(
         candidates.map(({ side, price, instantM5, checkCycleSec }) =>
-          api.startZoneStrategy(buildPayload(side, price, instantM5, checkCycleSec)),
+          api.startZoneStrategy(
+            buildPayload(side, price, instantM5, checkCycleSec),
+          ),
         ),
       );
       const failures = results
@@ -306,7 +349,10 @@ export default function ScalpingPage() {
       if (failures.length) {
         setErrorText(
           failures
-            .map(({ result, side }) => `${side}: ${String(result.reason?.message || result.reason)}`)
+            .map(
+              ({ result, side }) =>
+                `${side}: ${String(result.reason?.message || result.reason)}`,
+            )
             .join(" | "),
         );
       }
@@ -338,24 +384,33 @@ export default function ScalpingPage() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <div>
-        <h3 className="m-0 text-lg font-black text-slate-950">Scalping</h3>
-        <p className="mt-1 text-sm text-slate-500">
-          Enter a manually spotted M15 demand and/or supply level. Once price touches
-          either one, the engine watches new M5 candles for a matching zone (same
-          side), then new M1 candles for another matching zone, before opening that
-          trade. The demand and supply searches run independently, so both can be
-          armed and both can fire. Lines draw live on the Chart tab.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="m-0 text-lg font-black text-slate-950">Scalping</h3>
+        </div>
+        <AppButton
+          variant="blue"
+          className="shrink-0"
+          onClick={handleStart}
+          disabled={submitting}
+        >
+          {anyActive ? (
+            <>
+              <RefreshCcw className="h-4 w-4" />
+              Arm remaining
+            </>
+          ) : (
+            "Start"
+          )}
+        </AppButton>
       </div>
 
-      {errorText ? (
-        <div className="shrink-0 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
-          {errorText}
-        </div>
-      ) : null}
-
-      <div className="grid gap-3 md:grid-cols-2">
+      {/* Demand, Supply, and Settings side by side on a wide screen (like the
+          other tabs' full-width tables/grids) instead of a single centered
+          column -- Settings drops onto its own full-width row on medium
+          screens where three columns would get cramped, and only sits in a
+          narrow third column once xl has the room for it. */}
+      <div className="grid flex-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <ZoneSideCard
           side="demand"
           price={demandPrice}
@@ -388,58 +443,56 @@ export default function ScalpingPage() {
           onStop={() => handleStop("supply")}
           stopping={stoppingSide === "supply"}
         />
-      </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
-        <IconSelect
-          label="Order Type"
-          value={orderKind}
-          options={ORDER_KIND_OPTIONS}
-          onChange={setOrderKind}
-          disabled={submitting}
-        />
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 md:col-span-2 xl:col-span-1">
+          <span className="text-xs font-black uppercase tracking-wide text-slate-500">
+            Order Settings
+          </span>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+            <IconSelect
+              label="Order Type"
+              value={orderKind}
+              options={ORDER_KIND_OPTIONS}
+              onChange={setOrderKind}
+              disabled={submitting}
+            />
 
-        <Field
-          label="Risk %"
-          type="text"
-          inputMode="decimal"
-          value={riskPercent}
-          onChange={(event) => setRiskPercent(decimalInput(event.target.value))}
-          disabled={submitting}
-        />
+            <Field
+              label="Risk %"
+              type="text"
+              inputMode="decimal"
+              value={riskPercent}
+              onChange={(event) =>
+                setRiskPercent(decimalInput(event.target.value))
+              }
+              disabled={submitting}
+            />
 
-        <Field
-          label="Min SL (pips)"
-          type="text"
-          inputMode="decimal"
-          value={minSlPips}
-          onChange={(event) => setMinSlPips(decimalInput(event.target.value))}
-          disabled={submitting}
-          placeholder="e.g. 50"
-        />
+            <Field
+              label="Min SL (pips)"
+              type="text"
+              inputMode="decimal"
+              value={minSlPips}
+              onChange={(event) =>
+                setMinSlPips(decimalInput(event.target.value))
+              }
+              disabled={submitting}
+              placeholder="e.g. 50"
+            />
 
-        <Field
-          label="Liquidity SL (pips)"
-          type="text"
-          inputMode="decimal"
-          value={liquiditySlPips}
-          onChange={(event) => setLiquiditySlPips(decimalInput(event.target.value))}
-          disabled={submitting}
-          placeholder="e.g. 5"
-        />
-      </div>
-
-      <div className="flex items-center gap-2">
-        <AppButton variant="blue" onClick={handleStart} disabled={submitting}>
-          {anyActive ? (
-            <>
-              <RefreshCcw className="h-4 w-4" />
-              Arm remaining
-            </>
-          ) : (
-            "Start"
-          )}
-        </AppButton>
+            <Field
+              label="Liquidity SL (pips)"
+              type="text"
+              inputMode="decimal"
+              value={liquiditySlPips}
+              onChange={(event) =>
+                setLiquiditySlPips(decimalInput(event.target.value))
+              }
+              disabled={submitting}
+              placeholder="e.g. 5"
+            />
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -128,71 +128,84 @@ export function ConsoleLogPanel({
   }
 
   return (
-    <div className={fill ? "flex h-full min-h-0 flex-col gap-3" : "space-y-3"}>
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-        {showTagFilter && tagNames.length ? (
-          <select
-            value={tagFilter}
-            onChange={(event) => setTagFilter(event.target.value)}
-            className="h-[26px] rounded-full border border-slate-200 bg-white px-2.5 text-[11px] font-black text-slate-600 outline-none focus:border-blue-400"
-            aria-label="Filter logs"
-          >
-            <option value="all">{tagFilterLabel}</option>
-            {tagNames.map((name) => (
-              <option key={name} value={name}>{name}</option>
-            ))}
-          </select>
-        ) : null}
-        <div className="relative ml-auto">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search logs..."
-            className="h-[26px] w-[160px] rounded-full border border-slate-200 bg-white pl-8 pr-2.5 text-[11px] font-semibold text-slate-700 outline-none transition focus:w-[200px] focus:border-blue-400 sm:w-[180px]"
-          />
+    <div className={fill ? "flex h-full min-h-0 flex-col gap-2" : "space-y-2"}>
+      {/* One bordered box, header strip on top like the trade table's own
+          thead, instead of a separate floating row of controls above a
+          second bordered box underneath it. */}
+      <div className={fill ? "relative flex min-h-0 flex-1 flex-col rounded-lg border border-slate-200 bg-white" : "relative flex min-h-[380px] flex-col rounded-lg border border-slate-200 bg-white"}>
+        {/* Column headers and the toolbar controls share one row instead of
+            stacking in two -- the controls just live in the same cell as the
+            "Description" label, pushed to its right. */}
+        <div className="grid shrink-0 grid-cols-[92px_92px_1fr] items-center gap-x-3 rounded-t-lg border-b border-slate-200 bg-slate-50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+          <span>Time</span>
+          <span>Type</span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span>Description</span>
+            {showTagFilter && tagNames.length ? (
+              <select
+                value={tagFilter}
+                onChange={(event) => setTagFilter(event.target.value)}
+                className="h-[26px] rounded-full border border-slate-200 bg-white px-2.5 text-[11px] font-black normal-case tracking-normal text-slate-600 outline-none focus:border-blue-400"
+                aria-label="Filter logs"
+              >
+                <option value="all">{tagFilterLabel}</option>
+                {tagNames.map((name) => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            ) : null}
+            <div className="relative ml-auto">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search logs..."
+                className="h-[26px] w-[160px] rounded-full border border-slate-200 bg-white pl-8 pr-2.5 text-[11px] font-semibold normal-case tracking-normal text-slate-700 outline-none transition focus:w-[200px] focus:border-blue-400 sm:w-[180px]"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleCopy}
+              disabled={!visible.length}
+              title="Copy visible lines"
+              className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-teal-600" /> : <Copy className="h-3.5 w-3.5" />}
+            </button>
+            <button
+              type="button"
+              onClick={handleClear}
+              disabled={!entries.length}
+              title={onClear ? "Clear this log" : "Hide everything shown so far"}
+              className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-rose-200 bg-white text-rose-500 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
-        <button
-          type="button"
-          onClick={handleCopy}
-          disabled={!visible.length}
-          title="Copy visible lines"
-          className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {copied ? <Check className="h-3.5 w-3.5 text-teal-600" /> : <Copy className="h-3.5 w-3.5" />}
-        </button>
-        <button
-          type="button"
-          onClick={handleClear}
-          disabled={!entries.length}
-          title={onClear ? "Clear this log" : "Hide everything shown so far"}
-          className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-rose-200 bg-white text-rose-500 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
-      </div>
-
-      <div className={fill ? "relative min-h-0 flex-1 rounded-2xl border border-slate-200 bg-white" : "relative min-h-[380px] rounded-2xl border border-slate-200 bg-white"}>
         <div
           ref={scrollRef}
           onScroll={handleScroll}
-          className={fill ? "h-full divide-y divide-slate-100 overflow-y-auto" : "max-h-[380px] divide-y divide-slate-100 overflow-y-auto"}
+          className={fill ? "min-h-0 flex-1 divide-y divide-slate-100 overflow-y-auto" : "max-h-[380px] divide-y divide-slate-100 overflow-y-auto"}
         >
           {visible.length ? (
             visible.map((entry) => {
               const style = LOG_LEVEL_STYLE[entry.level];
               const LevelIcon = style.icon;
               return (
-                <div key={entry.id} className={`flex items-start gap-2 border-l-[3px] px-3 py-2 text-[12.5px] leading-relaxed ${style.row}`}>
-                  <LevelIcon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${style.iconClass}`} />
+                <div key={entry.id} className={`grid grid-cols-[92px_92px_1fr] items-start gap-x-3 border-l-[3px] px-3 py-2 text-[12.5px] leading-relaxed ${style.row}`}>
                   <span className="shrink-0 font-mono text-[10.5px] text-slate-400">{entry.at}</span>
-                  {entry.tag ? (
-                    <span className="shrink-0 rounded-full bg-slate-900/5 px-1.5 py-0.5 text-[9.5px] font-black uppercase tracking-wide text-slate-600">
-                      {entry.tag}
-                    </span>
-                  ) : null}
-                  <span className={`min-w-0 flex-1 break-words font-semibold ${style.textClass}`}>
-                    <span className="font-mono font-black">[{style.label}]</span> {entry.message}
+                  <span className={`flex min-w-0 items-center gap-1 font-mono text-[10.5px] font-black ${style.textClass}`}>
+                    <LevelIcon className={`h-3.5 w-3.5 shrink-0 ${style.iconClass}`} />
+                    {style.label}
+                  </span>
+                  <span className="min-w-0 break-words font-semibold text-slate-700">
+                    {entry.tag ? (
+                      <span className="mr-1.5 inline-block shrink-0 rounded-full bg-slate-900/5 px-1.5 py-0.5 text-[9.5px] font-black uppercase tracking-wide text-slate-600">
+                        {entry.tag}
+                      </span>
+                    ) : null}
+                    {entry.message}
                   </span>
                 </div>
               );

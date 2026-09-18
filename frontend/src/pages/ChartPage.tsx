@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { RefreshCcw } from "lucide-react";
+import { Eraser } from "lucide-react";
 import {
   BaselineSeries,
   CandlestickSeries,
@@ -8,8 +8,8 @@ import {
   createChart,
 } from "lightweight-charts";
 import { api } from "../services/api";
-import { AppButton, Card } from "../components/ui/Primitives";
 import { cx } from "../utils/format";
+import { showBanner } from "../utils/banner";
 import { getChartPalette, watchThemeChange } from "../utils/chartTheme";
 
 type CandlePoint = {
@@ -53,6 +53,27 @@ function toUnix(value?: string | number | null) {
   return Math.floor(dt.getTime() / 1000);
 }
 
+const TIMEFRAME_SECONDS: Record<string, number> = {
+  M1: 60,
+  M3: 180,
+  M5: 300,
+  M15: 900,
+};
+
+const TIMEFRAME_MINUTES: Record<string, number> = {
+  M1: 1,
+  M3: 3,
+  M5: 5,
+  M15: 15,
+};
+
+function formatCountdown(totalSeconds: number) {
+  const clamped = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(clamped / 60);
+  const seconds = clamped % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 function nearestCandleTime(
   value: string | number | undefined,
   candles: CandlePoint[],
@@ -90,8 +111,12 @@ export default function ChartPage() {
       string,
       {
         triggerLine: any;
-        m5ZoneBand: any;
-        m1ZoneBand: any;
+        m5ZoneFill: any;
+        m5ZoneBottom: any;
+        m5ZoneEdges: any;
+        m1ZoneFill: any;
+        m1ZoneBottom: any;
+        m1ZoneEdges: any;
         entryLine: any;
         slLine: any;
         tpLine: any;
@@ -99,6 +124,16 @@ export default function ChartPage() {
     >
   >({});
   const fittedRef = useRef(false);
+  // Broker (MT5) time vs. this browser's clock, so the per-timeframe
+  // countdowns line up with when candles actually close on the server
+  // rather than the client's clock -- captured from the currently-forming
+  // candle's open time each time a new one appears, and reused for every
+  // timeframe's countdown (the offset between the two clocks is the same
+  // regardless of which timeframe is selected).
+  const brokerOffsetRef = useRef<number | null>(null);
+  const lastAnchorCandleTimeRef = useRef<number | null>(null);
+  const countdownLineRef = useRef<any>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [timeframe, setTimeframe] = useState("M1");
   const [snapshot, setSnapshot] = useState<ChartSnapshot>({
     candles: [],
@@ -106,8 +141,27 @@ export default function ChartPage() {
   });
   const [zoneStatus, setZoneStatus] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   const [errorText, setErrorText] = useState("");
+  // One-way: once cleared, both drawing effects below keep actually removing
+  // (chartRef.current.removeSeries(...), not a CSS hide) every overlay they'd
+  // normally maintain, permanently -- there's no restore. Clicking Clear
+  // again does nothing new since there's nothing left to remove.
+  const [drawingsCleared, setDrawingsCleared] = useState(false);
+  // Brief flash over the chart pane on the Clear click, purely visual
+  // feedback that it happened.
+  const [clearPulse, setClearPulse] = useState(false);
+  function clearDrawings() {
+    if (drawingsCleared) return;
+    setDrawingsCleared(true);
+    setClearPulse(true);
+    window.setTimeout(() => setClearPulse(false), 350);
+  }
+  // Surfaced in the TopBar's banner slot (see utils/banner.js) instead of an
+  // inline div here, which used to push the chart down every time a fetch
+  // failed.
+  useEffect(() => {
+    if (errorText) showBanner(errorText, "error");
+  }, [errorText]);
   const spread =
     typeof snapshot.bid === "number" && typeof snapshot.ask === "number"
       ? snapshot.ask - snapshot.bid
@@ -189,6 +243,10 @@ export default function ChartPage() {
       borderVisible: false,
       wickUpColor: palette.upColor,
       wickDownColor: palette.downColor,
+      // The built-in last-value tag is replaced by our own price line below
+      // (price + candle-close countdown combined into one tag), so the
+      // default one is turned off instead of showing two side by side.
+      lastValueVisible: false,
     });
     chartRef.current = chart;
     seriesRef.current = candles;
@@ -221,6 +279,7 @@ export default function ChartPage() {
       seriesRef.current = null;
       positionSeriesRef.current.clear();
       zoneOverlayRef.current = {};
+      countdownLineRef.current = null;
     };
   }, []);
 
@@ -247,16 +306,89 @@ export default function ChartPage() {
     [snapshot.candles],
   );
 
+  // Recalibrate the broker/client clock offset whenever a fresh candle opens
+  // (its time changes from the last one we saw) -- the currently-forming
+  // candle's open time is always an exact multiple of that timeframe's
+  // length in broker time, so it's a reliable anchor.
+  useEffect(() => {
+    const formingCandle = normalizedCandles[normalizedCandles.length - 1];
+    if (!formingCandle) return;
+    if (lastAnchorCandleTimeRef.current !== formingCandle.time) {
+      lastAnchorCandleTimeRef.current = formingCandle.time;
+      brokerOffsetRef.current = formingCandle.time - Date.now() / 1000;
+    }
+  }, [normalizedCandles]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Seconds left until the *current* timeframe's candle closes, derived from
+  // the broker-time estimate above so it lines up with the server's actual
+  // candle boundaries rather than this browser's clock.
+  const countdownSeconds = useMemo(() => {
+    if (brokerOffsetRef.current == null) return null;
+    const seconds = TIMEFRAME_SECONDS[timeframe] || 60;
+    const brokerNow = nowTick / 1000 + brokerOffsetRef.current;
+    const intoCandle = ((brokerNow % seconds) + seconds) % seconds;
+    return seconds - intoCandle;
+  }, [nowTick, timeframe]);
+
+  // Replaces the series' own last-value tag (turned off above) with one that
+  // folds the countdown into the same tag: "0:41 4396.59", colored like the
+  // current candle (green/red) so it reads as the same price tag, just with
+  // the time-to-close prepended -- switching timeframe just changes what
+  // TIMEFRAME_SECONDS[timeframe] resolves to, so the ticking number updates
+  // to the new frame's boundary automatically.
+  useEffect(() => {
+    if (!seriesRef.current || !chartRef.current) return;
+    if (countdownSeconds == null) return;
+    const lastCandle = normalizedCandles[normalizedCandles.length - 1];
+    const currentPrice =
+      typeof snapshot.bid === "number" && typeof snapshot.ask === "number"
+        ? (snapshot.bid + snapshot.ask) / 2
+        : lastCandle?.close;
+    if (typeof currentPrice !== "number" || !Number.isFinite(currentPrice)) return;
+
+    const palette = getChartPalette();
+    const isUp = lastCandle ? lastCandle.close >= lastCandle.open : true;
+    const color = isUp ? palette.upColor : palette.downColor;
+    // The price line's axis tag renders as "{title} {formatted price}" --
+    // the title here is just the countdown, so the single resulting tag
+    // reads e.g. "0:41 4396.59" instead of a second box next to the price.
+    const title = formatCountdown(countdownSeconds);
+
+    if (!countdownLineRef.current) {
+      countdownLineRef.current = seriesRef.current.createPriceLine({
+        price: currentPrice,
+        color,
+        lineWidth: 1,
+        lineStyle: 2,
+        lineVisible: false,
+        axisLabelVisible: true,
+        title,
+      });
+    } else {
+      countdownLineRef.current.applyOptions({ price: currentPrice, color, title });
+    }
+  }, [countdownSeconds, normalizedCandles, snapshot.bid, snapshot.ask]);
+
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
     seriesRef.current.setData(normalizedCandles);
 
-    const positions = snapshot.orders.filter(
-      (order) =>
-        String(order.status || "").toLowerCase() === "open" &&
-        String(order.order_kind || "").toUpperCase() === "MARKET" &&
-        Number(order.price ?? order.entry ?? 0) > 0,
-    );
+    // Candles always render; only the overlays are conditional -- an empty
+    // list here makes the cleanup loop below remove every existing one and
+    // skips the creation loop that would otherwise redraw them.
+    const positions = drawingsCleared
+      ? []
+      : snapshot.orders.filter(
+          (order) =>
+            String(order.status || "").toLowerCase() === "open" &&
+            String(order.order_kind || "").toUpperCase() === "MARKET" &&
+            Number(order.price ?? order.entry ?? 0) > 0,
+        );
     const activeTickets = new Set(
       positions.map((position) => String(position.ticket)),
     );
@@ -394,7 +526,7 @@ export default function ChartPage() {
       chartRef.current?.timeScale().fitContent();
       fittedRef.current = true;
     }
-  }, [snapshot.orders, normalizedCandles]);
+  }, [snapshot.orders, normalizedCandles, drawingsCleared]);
 
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current || !normalizedCandles.length) return;
@@ -402,14 +534,30 @@ export default function ChartPage() {
 
     const endTime = normalizedCandles[normalizedCandles.length - 1]?.time;
 
-    // Draw a zone rectangle as a BaselineSeries band running from the zone's
-    // own base candle to the latest candle -- same trick used for the TP/SL
-    // shading around an open position, just anchored to the zone's own edges.
-    function drawZoneBand(overlay, zone, refKey, label, fillAlpha) {
+    // Draw a zone as a filled, fully bordered box: a BaselineSeries gives the
+    // fill plus the top edge (its own line, drawn at price_high against a
+    // price_low baseline), a flat LineSeries gives the bottom edge, and a
+    // zero-height CandlestickSeries (open == close, so only the wick shows)
+    // gives the two vertical edges -- lightweight-charts has no native
+    // "rectangle" primitive, but a doji's wick is just a vertical line at an
+    // exact time/price-range, so one placed at the start time and another at
+    // the end time stand in for the box's left/right sides.
+    function drawZoneBorder(overlay, zone, refPrefix, fillAlpha) {
+      const fillKey = `${refPrefix}Fill`;
+      const bottomKey = `${refPrefix}Bottom`;
+      const edgesKey = `${refPrefix}Edges`;
       if (!zone) {
-        if (overlay[refKey]) {
-          chartRef.current.removeSeries(overlay[refKey]);
-          overlay[refKey] = null;
+        if (overlay[fillKey]) {
+          chartRef.current.removeSeries(overlay[fillKey]);
+          overlay[fillKey] = null;
+        }
+        if (overlay[bottomKey]) {
+          chartRef.current.removeSeries(overlay[bottomKey]);
+          overlay[bottomKey] = null;
+        }
+        if (overlay[edgesKey]) {
+          chartRef.current.removeSeries(overlay[edgesKey]);
+          overlay[edgesKey] = null;
         }
         return;
       }
@@ -424,35 +572,75 @@ export default function ChartPage() {
         zone.type === "demand"
           ? `rgba(22, 163, 74, ${fillAlpha})`
           : `rgba(225, 29, 72, ${fillAlpha})`;
-      const title = `${zone.type.toUpperCase()} ${label}`;
-      if (!overlay[refKey]) {
-        overlay[refKey] = chartRef.current.addSeries(BaselineSeries, {
-          baseValue: { type: "price", price: zone.price_low },
-          topLineColor: zoneColor,
-          topFillColor1: zoneFill,
-          topFillColor2: zoneFill,
-          bottomLineColor: zoneColor,
-          bottomFillColor1: "rgba(0, 0, 0, 0)",
-          bottomFillColor2: "rgba(0, 0, 0, 0)",
-          lineVisible: false,
-          priceLineVisible: false,
-          lastValueVisible: false,
-          title,
-        });
+
+      const fillOptions = {
+        baseValue: { type: "price", price: zone.price_low },
+        topLineColor: zoneColor,
+        topFillColor1: zoneFill,
+        topFillColor2: zoneFill,
+        bottomLineColor: zoneColor,
+        bottomFillColor1: "rgba(0, 0, 0, 0)",
+        bottomFillColor2: "rgba(0, 0, 0, 0)",
+        lineWidth: 1,
+        lineVisible: true,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      };
+      if (!overlay[fillKey]) {
+        overlay[fillKey] = chartRef.current.addSeries(BaselineSeries, fillOptions);
       } else {
-        overlay[refKey].applyOptions({
-          baseValue: { type: "price", price: zone.price_low },
-          topLineColor: zoneColor,
-          topFillColor1: zoneFill,
-          topFillColor2: zoneFill,
-          bottomLineColor: zoneColor,
-          title,
-        });
+        overlay[fillKey].applyOptions(fillOptions);
       }
-      overlay[refKey].setData([
+      overlay[fillKey].setData([
         { time: startTime, value: zone.price_high },
         { time: endTime, value: zone.price_high },
       ]);
+
+      const bottomOptions = {
+        color: zoneColor,
+        lineWidth: 1,
+        lineStyle: 0,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      };
+      if (!overlay[bottomKey]) {
+        overlay[bottomKey] = chartRef.current.addSeries(LineSeries, bottomOptions);
+      } else {
+        overlay[bottomKey].applyOptions(bottomOptions);
+      }
+      overlay[bottomKey].setData([
+        { time: startTime, value: zone.price_low },
+        { time: endTime, value: zone.price_low },
+      ]);
+
+      const edgeOptions = {
+        upColor: "rgba(0, 0, 0, 0)",
+        downColor: "rgba(0, 0, 0, 0)",
+        borderVisible: false,
+        wickUpColor: zoneColor,
+        wickDownColor: zoneColor,
+        wickVisible: true,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      };
+      if (!overlay[edgesKey]) {
+        overlay[edgesKey] = chartRef.current.addSeries(CandlestickSeries, edgeOptions);
+      } else {
+        overlay[edgesKey].applyOptions(edgeOptions);
+      }
+      const edgeCandle = (time) => ({
+        time,
+        open: zone.price_low,
+        high: zone.price_high,
+        low: zone.price_low,
+        close: zone.price_low,
+      });
+      overlay[edgesKey].setData(
+        startTime === endTime
+          ? [edgeCandle(startTime)]
+          : [edgeCandle(startTime), edgeCandle(endTime)],
+      );
     }
 
     // The demand and supply M15 triggers watch independently, so both get
@@ -460,13 +648,21 @@ export default function ChartPage() {
     // per side keeps them visually separable.
     const SIDE_TRIGGER_COLOR = { demand: "#7c3aed", supply: "#ea580c" };
     ["demand", "supply"].forEach((side) => {
-      const sideStatus = zoneStatus?.[side];
+      // Treating status as absent once cleared makes every flag below
+      // (symbolMatches, searchActive, showTrigger, order) fall through to its
+      // existing "remove this overlay" branch, without needing a second copy
+      // of that cleanup logic here.
+      const sideStatus = drawingsCleared ? null : zoneStatus?.[side];
       let overlay = zoneOverlayRef.current[side];
       if (!overlay) {
         overlay = {
           triggerLine: null,
-          m5ZoneBand: null,
-          m1ZoneBand: null,
+          m5ZoneFill: null,
+          m5ZoneBottom: null,
+          m5ZoneEdges: null,
+          m1ZoneFill: null,
+          m1ZoneBottom: null,
+          m1ZoneEdges: null,
           entryLine: null,
           slLine: null,
           tpLine: null,
@@ -487,8 +683,13 @@ export default function ChartPage() {
           sideStatus?.phase,
         );
 
+      // The M15 trigger line only makes sense while still waiting for that
+      // trigger -- once it fires (phase moves on to searching the M5/M1
+      // zones), the level has already done its job, so drop the line instead
+      // of leaving it drawn for the rest of the search.
       const triggerPrice = Number(sideStatus?.trigger_price || 0);
-      const showTrigger = searchActive && triggerPrice > 0;
+      const showTrigger =
+        symbolMatches && sideStatus?.phase === "waiting_trigger" && triggerPrice > 0;
       if (showTrigger) {
         const title = `${side.toUpperCase()} M15 trigger`;
         if (!overlay.triggerLine) {
@@ -508,21 +709,24 @@ export default function ChartPage() {
         overlay.triggerLine = null;
       }
 
-      // The M5 zone is the intermediate trigger for the M1 search -- shade it
-      // lighter than the M1 zone, which is the one the order actually opens
-      // from.
-      drawZoneBand(
+      // A higher-timeframe zone still means something on a lower-timeframe
+      // chart (e.g. the M5 zone is still relevant while looking at M1), so
+      // it stays visible there -- but a lower-timeframe zone (M1) drawn on a
+      // higher-timeframe chart (M5/M15) would just be clutter relative to
+      // that chart's own candle size, so it's hidden once you zoom out past
+      // its own timeframe.
+      const showM5Zone = TIMEFRAME_MINUTES[timeframe] <= TIMEFRAME_MINUTES.M5;
+      const showM1Zone = TIMEFRAME_MINUTES[timeframe] <= TIMEFRAME_MINUTES.M1;
+      drawZoneBorder(
         overlay,
-        searchActive ? sideStatus?.m5_zone : null,
-        "m5ZoneBand",
-        `${side} M5 zone`,
+        searchActive && showM5Zone ? sideStatus?.m5_zone : null,
+        "m5Zone",
         0.1,
       );
-      drawZoneBand(
+      drawZoneBorder(
         overlay,
-        searchActive ? sideStatus?.m1_zone : null,
-        "m1ZoneBand",
-        `${side} M1 zone`,
+        searchActive && showM1Zone ? sideStatus?.m1_zone : null,
+        "m1Zone",
         0.22,
       );
 
@@ -585,97 +789,76 @@ export default function ChartPage() {
         overlay.tpLine = null;
       }
     });
-  }, [normalizedCandles, zoneStatus]);
-
-  async function refreshChart() {
-    setRefreshing(true);
-    try {
-      await loadChart(true);
-    } finally {
-      setRefreshing(false);
-    }
-  }
+  }, [normalizedCandles, zoneStatus, timeframe, drawingsCleared]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
-      {errorText ? (
-        <div className="shrink-0 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
-          {errorText}
+    // No surrounding Card -- the chart fills the tab directly, like an
+    // embedded TradingView widget, instead of sitting inside its own boxed
+    // header (which just duplicated the "Chart" tab label above it).
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={containerRef}
+        className="absolute inset-0 rounded-xl border border-slate-200 bg-slate-50"
+      />
+      {/* Flash feedback for the Clear/Restore click -- purely cosmetic, the
+          actual removal already happened synchronously via removeSeries in
+          the drawing effects by the time this is visible. */}
+      <div
+        className={cx(
+          "pointer-events-none absolute inset-0 z-20 rounded-xl bg-white transition-opacity duration-300",
+          clearPulse ? "opacity-40" : "opacity-0",
+        )}
+      />
+      {/* TradingView-style overlay toolbar, floated on the chart pane itself
+          instead of a card header above it. */}
+      <div className="absolute left-3 top-3 z-10 flex flex-wrap items-center gap-2">
+        <span
+          className={cx(
+            "rounded-lg px-2.5 py-1.5 text-[10px] font-black tracking-wider shadow-sm backdrop-blur-sm",
+            snapshot.source === "live"
+              ? "bg-emerald-100/90 text-emerald-700"
+              : "bg-amber-100/90 text-amber-700",
+          )}
+        >
+          {snapshot.source === "live" ? "LIVE MT5" : "SIMULATED"}
+        </span>
+        <div className="rounded-lg border border-slate-200 bg-white/90 px-2.5 py-1.5 text-xs font-bold text-slate-700 shadow-sm backdrop-blur-sm">
+          Spread {spread == null ? "-" : (spread * 10).toFixed(1)}
+        </div>
+        <select
+          value={timeframe}
+          onChange={(e) => setTimeframe(e.target.value)}
+          className="rounded-lg border border-slate-200 bg-white/90 px-2.5 py-1.5 text-xs font-bold text-slate-700 shadow-sm outline-none backdrop-blur-sm focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+        >
+          {["M1", "M3", "M5", "M15"].map((value) => (
+            <option key={value} value={value}>
+              {value}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={clearDrawings}
+          disabled={drawingsCleared}
+          title={drawingsCleared ? "Drawings cleared" : "Clear drawings"}
+          className={cx(
+            "flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-bold shadow-sm backdrop-blur-sm transition active:scale-95",
+            drawingsCleared
+              ? "cursor-not-allowed border-slate-200 bg-slate-100/90 text-slate-400"
+              : "border-slate-200 bg-white/90 text-slate-700 hover:bg-slate-50",
+          )}
+        >
+          <Eraser className="h-3.5 w-3.5" />
+          {drawingsCleared ? "Cleared" : "Clear"}
+        </button>
+      </div>
+      {!snapshot.candles.length && !loading ? (
+        <div className="absolute inset-0 flex items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white/60 backdrop-blur-[1px]">
+          <p className="text-sm font-semibold text-slate-500">
+            No candle data loaded yet.
+          </p>
         </div>
       ) : null}
-
-      <Card className="flex min-h-0 flex-1 flex-col">
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <h3 className="text-lg font-black text-slate-950">
-                Live Order Chart
-              </h3>
-              <span
-                className={cx(
-                  "rounded-full px-2.5 py-1 text-[10px] font-black tracking-wider",
-                  snapshot.source === "live"
-                    ? "bg-emerald-100 text-emerald-700"
-                    : "bg-amber-100 text-amber-700",
-                )}
-              >
-                {snapshot.source === "live" ? "LIVE MT5" : "SIMULATED"}
-              </span>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">
-              Spread {spread == null ? "-" : (spread * 10).toFixed(1)}
-            </div>
-            <select
-              value={timeframe}
-              onChange={(e) => setTimeframe(e.target.value)}
-              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-700 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-            >
-              {["M1", "M3", "M5", "M15"].map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-            <AppButton
-              variant="soft"
-              onClick={refreshChart}
-              disabled={refreshing || loading}
-            >
-              <RefreshCcw
-                className={cx(
-                  "h-4 w-4",
-                  (refreshing || loading) && "animate-spin",
-                )}
-              />
-              {loading
-                ? "Loading..."
-                : refreshing
-                  ? "Refreshing..."
-                  : "Refresh"}
-            </AppButton>
-          </div>
-        </div>
-        <div className="relative mt-4 min-h-0 flex-1">
-          <div
-            ref={containerRef}
-            className="absolute inset-0 rounded-3xl border border-slate-200 bg-slate-50"
-          />
-          {!snapshot.candles.length && !loading ? (
-            <div className="absolute inset-0 flex items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-white/60 backdrop-blur-[1px]">
-              <p className="text-sm font-semibold text-slate-500">
-                No candle data loaded yet.
-              </p>
-            </div>
-          ) : null}
-        </div>
-        <p className="mt-3 shrink-0 text-xs font-semibold text-slate-500">
-          {snapshot.updated_at
-            ? `Updated ${new Date(snapshot.updated_at).toLocaleString()}`
-            : "Waiting for chart data..."}
-        </p>
-      </Card>
     </div>
   );
 }

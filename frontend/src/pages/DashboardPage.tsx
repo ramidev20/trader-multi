@@ -78,7 +78,7 @@ function TradingViewProgressChart({ data }) {
   return (
     <div
       ref={containerRef}
-      className="h-[400px] w-full rounded-2xl bg-slate-50"
+      className="h-[400px] w-full rounded-lg bg-slate-50"
     />
   );
 }
@@ -103,7 +103,7 @@ function MetricCard({
     <Card className="p-4">
       <div className="flex items-center justify-between">
         <p className="text-sm font-bold text-slate-500">{label}</p>
-        <div className={cx("rounded-2xl p-2.5", toneStyle[tone])}>
+        <div className={cx("rounded-lg p-2.5", toneStyle[tone])}>
           <Icon className="h-6 w-6" />
         </div>
       </div>
@@ -138,10 +138,10 @@ function AccountHierarchy({ accountsData }) {
             {account.role === "SUB" && (
               <span className="absolute -left-[5px] top-5 h-2 w-2 rounded-full bg-slate-300" />
             )}
-            <div className="flex items-center gap-3 rounded-2xl bg-slate-50 p-3">
+            <div className="flex items-center gap-3 rounded-lg bg-slate-50 p-3">
               <div
                 className={cx(
-                  "grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br text-xs font-black text-white shadow-sm",
+                  "grid h-10 w-10 place-items-center rounded-lg bg-gradient-to-br text-xs font-black text-white shadow-sm",
                   account.color,
                 )}
               >
@@ -287,7 +287,7 @@ function AccountProgressTab({ accountsData }) {
                 key={a.id}
                 onClick={() => setSelectedIndex(i)}
                 className={cx(
-                  "flex items-center gap-3 rounded-2xl border px-3 py-2 text-left transition",
+                  "flex items-center gap-3 rounded-lg border px-3 py-2 text-left transition",
                   i === selectedIndex
                     ? "border-blue-600 bg-white text-slate-900 shadow-sm shadow-blue-200"
                     : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
@@ -534,7 +534,7 @@ export default function DashboardPage({
                           <div className="flex min-w-0 items-center gap-3">
                             <div
                               className={cx(
-                                "grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-gradient-to-br text-xs font-black text-white shadow-sm",
+                                "grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-gradient-to-br text-xs font-black text-white shadow-sm",
                                 account.color,
                               )}
                             >

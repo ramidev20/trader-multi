@@ -198,6 +198,11 @@ html[data-theme="DARK"] .border-slate-300 {
 .log-list__line {
   padding: 4px 8px;
   color: #94a3b8;
+  /* Every entry is one log line -- long messages (e.g. the 15min trigger
+     "armed" line) scroll horizontally instead of wrapping onto a second
+     visual line. */
+  white-space: pre;
+  overflow-x: auto;
 }
 
 .log-list__line--success { color: #34d399; }

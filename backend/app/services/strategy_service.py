@@ -119,8 +119,21 @@ def _resolve_master_account(cfg: dict) -> dict | None:
 
 def _copy_targets(cfg: dict, master_login: int) -> list[tuple[dict, float]]:
     accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
-    by_login = {_safe_int(a.get("user")): a for a in accounts}
     targets: list[tuple[dict, float]] = []
+
+    # A sub account only merely *configured* here (added on the Dashboard but
+    # never actually connected) must not get logged into and traded on just
+    # because the master placed an order -- copying only ever makes sense for
+    # accounts the user has actively connected, same gate every other
+    # account-touching action (close_all, live positions/orders) already
+    # applies via list_sessions(). Without this, `_initialize_mt5_for_account`
+    # below would silently auto-login a sub account and place a real order on
+    # it the first time the master traded, with no connect step in between.
+    connected_logins = {
+        _safe_int(session.get("login"))
+        for session in list_sessions(accounts)
+        if str(session.get("state", "")).lower() == "connected"
+    }
 
     for acc in accounts:
         try:
@@ -128,6 +141,8 @@ def _copy_targets(cfg: dict, master_login: int) -> list[tuple[dict, float]]:
             if login <= 0 or login == master_login:
                 continue
             if str(acc.get("role", "sub")).lower() != "sub":
+                continue
+            if login not in connected_logins:
                 continue
             targets.append(
                 (

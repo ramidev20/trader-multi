@@ -8,7 +8,7 @@ type CardProps = React.PropsWithChildren<{
 export function Card({ children, className = "", style }: CardProps) {
   return (
     <div
-      className={`app-card rounded-2xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-950/[0.03] ${className}`}
+      className={`app-card rounded-lg border border-slate-200 bg-white p-5 shadow-sm shadow-slate-950/[0.03] ${className}`}
       style={style}
     >
       {children}
@@ -123,7 +123,7 @@ export function Dialog({ open, title, children, onClose }) {
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/40 p-4 backdrop-blur-sm">
-      <div className="app-dialog mx-auto mt-12 w-full max-w-xl rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl shadow-slate-950/20">
+      <div className="app-dialog mx-auto mt-12 w-full max-w-xl rounded-xl border border-slate-200 bg-white p-5 shadow-2xl shadow-slate-950/20">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="m-0 text-lg font-black text-slate-950">{title}</h3>
           <button

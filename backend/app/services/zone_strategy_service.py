@@ -14,6 +14,8 @@ from .strategy_service import (
     SYMBOL_DEFAULT,
     TIMEFRAME_MAP,
     _candle_value,
+    _ensure_master_session,
+    _ensure_symbol_ready,
     _tick_for,
     open_manual_position,
     wait_for_new_candle,
@@ -24,9 +26,23 @@ from .strategy_service import (
 # zone type (demand input -> search demand, and vice versa). Once that M5 zone
 # forms, don't trade off it directly -- instead watch new M1 candles going
 # forward for a zone of that same type again, confirming demand -> demand ->
-# demand (or supply -> supply -> supply) before actually opening. Zones are
-# detected with a simple base-candle + displacement-candle definition. The M1
-# zone is what actually places the MARKET/LIMIT order.
+# demand (or supply -> supply -> supply) before actually opening. The M1 zone
+# is what actually places the MARKET/LIMIT order.
+#
+# M5 zone definition (a 3-candle imbalance/gap, checked one newly-closed M5
+# candle at a time -- c1 is the candle that just closed, c2 is the one before
+# it, c3 is two before that):
+#   - demand: c1's low is above c3's close (price gapped up through c2 and
+#     held above where c3 last traded).
+#   - supply: c1's high is below c3's open (mirrored: gapped down through c2
+#     and held below where c3 started).
+# The M5 buffer is cleared the moment the M15 trigger fires, so the earliest
+# possible c3 is exactly the M5 candle that was still forming at that
+# instant -- i.e. the search only starts evaluating once *that* candle has
+# closed, not mid-candle.
+#
+# The M1 zone (the confirming zone that actually places the order) keeps the
+# original base-candle + displacement-candle definition.
 #
 # The demand side and the supply side are armed independently (two engine
 # instances below) so both can be watching -- and can both fire -- at once.
@@ -96,6 +112,11 @@ def _sim_next_candle(symbol: str, timeframe_label: str) -> Optional[dict[str, An
 
 def _next_candle(symbol: str, timeframe_label: str) -> Optional[dict[str, Any]]:
     if mt5_available():
+        # Same lazy in-process connect the trigger check needs -- without it,
+        # a search armed straight into M5 (instant start) or entered before
+        # anything else this process has touched MT5 with would just poll
+        # None forever.
+        _ensure_master_session()
         return wait_for_new_candle(TIMEFRAME_MAP[timeframe_label], symbol=symbol)
     return _sim_next_candle(symbol, timeframe_label)
 
@@ -133,6 +154,7 @@ class ZoneStrategyEngine:
         self.m1_buffer: deque = deque(maxlen=CANDLE_BUFFER_MAXLEN)
         self.last_mid: Optional[float] = None
         self.confirmation_level: Optional[float] = None
+        self._last_symbol_error: Optional[str] = None
 
     def start(self, cfg: dict) -> None:
         manual_sl_distance = float(cfg.get("manual_sl_distance", 0) or 0)
@@ -208,12 +230,10 @@ class ZoneStrategyEngine:
         if instant:
             append_log(
                 "search",
-                f"[INFO] [scalping] armed: instant M5 start for {self.symbol} -- treating M15 "
-                f"{self.trigger_zone_type} as already triggered, searching M5 for "
-                f"{self.m5_target_zone_type} directly, then M1 for {self.m1_target_zone_type} before opening.",
+                f"[INFO] [scalping:{self.side}] armed on {self.symbol} -- instant M5 start, "
+                f"skipping the M15 trigger.",
             )
-            with self._lock:
-                self.m5_buffer.clear()
+            self._seed_m5_buffer()
             start_task(self._search_m5_task_name, self._search_m5_tick, interval_sec=1)
         else:
             # Anchor the first check to the next M1 candle open instead of
@@ -224,10 +244,8 @@ class ZoneStrategyEngine:
             next_candle_open = datetime.now().replace(second=0, microsecond=0) + timedelta(minutes=1)
             append_log(
                 "search",
-                f"[INFO] [scalping] armed: watching {self.symbol} for {self.trigger_zone_type} trigger @ "
-                f"{self.trigger_price:.2f} (checked every {self.trigger_check_cycle_sec:.0f}s, starting "
-                f"{next_candle_open.strftime('%H:%M:%S')} on the next M1 candle open); will search M5 "
-                f"for {self.m5_target_zone_type}, then M1 for {self.m1_target_zone_type} before opening.",
+                f"[INFO] [scalping:{self.side}] armed on {self.symbol} @ {self.trigger_price:.2f}, "
+                f"checking every {self.trigger_check_cycle_sec:.0f}s from {next_candle_open.strftime('%H:%M:%S')}.",
             )
             start_task(
                 self._trigger_task_name,
@@ -247,9 +265,42 @@ class ZoneStrategyEngine:
         stop_task(self._search_m1_task_name)
         if was_running:
             patch_path(self._state_path, {"running": False, "phase": "stopped", "last_stop_reason": reason})
-            append_log("search", f"[WARNING] [scalping] {reason}")
+            append_log("search", f"[WARNING] [scalping:{self.side}] {reason}")
         else:
             patch_path(self._state_path, {"running": False})
+
+    def _ensure_symbol_or_log(self) -> bool:
+        """Guard every MT5 rates/tick call the way open_manual_position() does.
+
+        The main API process's MT5 module starts out disconnected -- only
+        _ensure_master_session() (mt5.initialize() with the master account's
+        saved credentials) brings it up *in this process*, separately from
+        the adapter subprocess used for chart data. Skipping that call means
+        symbol_info()/copy_rates_from_pos() return None with no exception,
+        which _ensure_symbol_ready() alone misreports as "symbol not found"
+        rather than "not connected yet". Report the reason once, not every
+        cycle, so a persistent failure doesn't spam the feed.
+        """
+        session_ok, session_detail, _master, _cfg = _ensure_master_session()
+        if not session_ok:
+            with self._lock:
+                already_reported = self._last_symbol_error == session_detail
+                self._last_symbol_error = session_detail
+            if not already_reported:
+                append_log("search", f"[ERROR] [scalping:{self.side}] {session_detail}")
+            return False
+
+        ok, detail = _ensure_symbol_ready(self.symbol)
+        if ok:
+            with self._lock:
+                self._last_symbol_error = None
+            return True
+        with self._lock:
+            already_reported = self._last_symbol_error == detail
+            self._last_symbol_error = detail
+        if not already_reported:
+            append_log("search", f"[ERROR] [scalping:{self.side}] {detail}")
+        return False
 
     def _m15_amount_touched(self, trigger_price: float) -> bool:
         """Has price reached the typed amount at any point since the last check?
@@ -262,6 +313,8 @@ class ZoneStrategyEngine:
         moved back to it. Checking a rolling M1 window has no such reset.
         """
         if mt5_available():
+            if not self._ensure_symbol_or_log():
+                return False
             lookback = max(2, int(self.trigger_check_cycle_sec // 60) + 2)
             try:
                 rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 0, lookback)
@@ -292,6 +345,8 @@ class ZoneStrategyEngine:
         not a level that keeps sliding with the newest candle.
         """
         if mt5_available():
+            if not self._ensure_symbol_or_log():
+                return None
             try:
                 rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 1, 1)
             except Exception:
@@ -306,6 +361,8 @@ class ZoneStrategyEngine:
         return float(_candle_value(candle, 2, "high")) if is_supply else float(_candle_value(candle, 3, "low"))
 
     def _current_price(self) -> Optional[float]:
+        if mt5_available() and not self._ensure_symbol_or_log():
+            return None
         tick = mt5.symbol_info_tick(self.symbol) if mt5_available() else _tick_for(self.symbol)
         if tick is None:
             return None
@@ -332,9 +389,8 @@ class ZoneStrategyEngine:
             patch_path(self._state_path, {"confirmation_level": confirmation_level})
             append_log(
                 "search",
-                f"[INFO] [scalping] M15 {side} amount {trigger_price:.2f} reached; confirming "
-                f"against M1 {'high' if side == 'supply' else 'low'} {confirmation_level:.2f} "
-                f"before firing.",
+                f"[INFO] [scalping:{side}] {trigger_price:.2f} touched, confirming vs M1 "
+                f"{'high' if side == 'supply' else 'low'} {confirmation_level:.2f}.",
             )
             return
 
@@ -346,17 +402,43 @@ class ZoneStrategyEngine:
             return
 
         stop_task(self._trigger_task_name)
-        with self._lock:
-            self.m5_buffer.clear()
-            m5_target_zone_type = self.m5_target_zone_type
+        self._seed_m5_buffer()
         triggered_at = datetime.now().isoformat()
         patch_path(self._state_path, {"phase": "searching_m5_zone", "triggered_at": triggered_at})
         append_log(
             "search",
-            f"[INFO] [scalping] M15 trigger confirmed @ {price:.2f} (amount {trigger_price:.2f}, "
-            f"M1 confirmation {confirmation_level:.2f}); searching M5 for {m5_target_zone_type}.",
+            f"[INFO] [scalping:{self.side}] M15 confirmed @ {price:.2f}, searching M5.",
         )
         start_task(self._search_m5_task_name, self._search_m5_tick, interval_sec=1)
+
+    def _seed_m5_buffer(self) -> None:
+        """Reset the M5 buffer, pre-loaded with the 2 most recent *already
+        closed* M5 candles so the very next fresh close can immediately serve
+        as c1 in the c1/c3 gap check.
+
+        Without this, clearing to a genuinely empty buffer means the first
+        possible check needs 3 brand-new closes to accumulate one at a time --
+        up to ~15 minutes of watching before the search can even run once,
+        even though "check every 5 min candle" implies a rolling check against
+        recent history, not a from-scratch wait. mt5.copy_rates_from_pos
+        returns oldest-first, which is exactly the order _detect_m5_gap_zone_locked
+        expects (c3, c2 already in the buffer; the next append becomes c1).
+        """
+        history: list[Any] = []
+        if mt5_available():
+            # Same lazy in-process connect every other MT5 call here needs --
+            # see _ensure_symbol_or_log's docstring.
+            _ensure_master_session()
+            try:
+                rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M5"], 1, 2)
+            except Exception:
+                rates = None
+            if rates is not None:
+                history = list(rates)
+        with self._lock:
+            self.m5_buffer.clear()
+            for candle in history:
+                self.m5_buffer.append(candle)
 
     def _search_m5_tick(self) -> None:
         candle = _next_candle(self.symbol, "M5")
@@ -364,8 +446,7 @@ class ZoneStrategyEngine:
             return
         with self._lock:
             self.m5_buffer.append(candle)
-            zone = self._detect_zone_locked(self.m5_buffer, self.m5_target_zone_type)
-            m1_target_zone_type = self.m1_target_zone_type
+            zone = self._detect_m5_gap_zone_locked(self.m5_target_zone_type)
         if zone is None:
             return
         stop_task(self._search_m5_task_name)
@@ -374,8 +455,7 @@ class ZoneStrategyEngine:
         patch_path(self._state_path, {"phase": "searching_m1_zone", "m5_zone": zone})
         append_log(
             "search",
-            f"[SUCCESS] [scalping] M5 {zone['type']} zone found {zone['price_low']:.2f}-{zone['price_high']:.2f}; "
-            f"searching M1 for {m1_target_zone_type} before opening.",
+            f"[SUCCESS] [scalping:{self.side}] M5 zone {zone['price_low']:.2f}-{zone['price_high']:.2f}, searching M1.",
         )
         start_task(self._search_m1_task_name, self._search_m1_tick, interval_sec=1)
 
@@ -392,9 +472,50 @@ class ZoneStrategyEngine:
         patch_path(self._state_path, {"m1_zone": zone})
         append_log(
             "search",
-            f"[SUCCESS] [scalping] M1 {zone['type']} zone found {zone['price_low']:.2f}-{zone['price_high']:.2f}; placing order.",
+            f"[SUCCESS] [scalping:{self.side}] M1 zone {zone['price_low']:.2f}-{zone['price_high']:.2f}, placing order.",
         )
         self._place_order(zone)
+
+    def _detect_m5_gap_zone_locked(self, target_zone_type: str) -> Optional[dict[str, Any]]:
+        """3-candle M5 imbalance check -- see the module docstring for the spec.
+
+        c1 = the M5 candle that just closed (newest), c2 = the one before it,
+        c3 = two candles before c1 (oldest of the three). Needs 3 candles in
+        the buffer, which -- since the buffer is cleared right as the M15
+        trigger fires -- means the first possible c3 is the M5 candle that
+        was still forming at trigger time, so evaluation naturally can't
+        start until that candle has closed.
+        """
+        if len(self.m5_buffer) < 3:
+            return None
+        c3, c2, c1 = list(self.m5_buffer)[-3:]
+
+        if target_zone_type == "demand":
+            c1_low = _candle_value(c1, 3, "low")
+            c3_close = _candle_value(c3, 4, "close")
+            if c1_low <= c3_close:
+                return None
+            # The trigger condition compares c1 against c3, but the zone box
+            # itself is drawn on c3 alone -- its low up to its close.
+            c3_low = _candle_value(c3, 3, "low")
+            price_low, price_high = c3_low, c3_close
+        else:
+            c1_high = _candle_value(c1, 2, "high")
+            c3_open = _candle_value(c3, 1, "open")
+            if c1_high >= c3_open:
+                return None
+            # Zone box drawn on c3 alone -- its open up to its high.
+            c3_high = _candle_value(c3, 2, "high")
+            price_low, price_high = c3_open, c3_high
+
+        return {
+            "type": target_zone_type,
+            "price_high": round(float(price_high), 2),
+            "price_low": round(float(price_low), 2),
+            "base_candle_time": int(c3["time"]),
+            "displacement_candle_time": int(c1["time"]),
+            "formed_at": datetime.now().isoformat(),
+        }
 
     def _detect_zone_locked(self, buffer: deque, target_zone_type: str) -> Optional[dict[str, Any]]:
         if len(buffer) < 2:
@@ -466,6 +587,8 @@ class ZoneStrategyEngine:
         is_buy = zone["type"] == "demand"
         side = "BUY" if is_buy else "SELL"
         try:
+            if mt5_available():
+                _ensure_master_session()
             tick = mt5.symbol_info_tick(self.symbol) if mt5_available() else _tick_for(self.symbol)
             if tick is None:
                 raise RuntimeError("No live tick to price the order.")
@@ -483,9 +606,8 @@ class ZoneStrategyEngine:
             sl_price = entry_price - final_distance if is_buy else entry_price + final_distance
             append_log(
                 "search",
-                f"[INFO] [scalping] SL liquidity @ {sl_liquidity_price:.2f} + {self.liquidity_buffer_pips:.1f} pip buffer "
-                f"(distance {sl_liquidity_distance:.2f}), min SL distance {min_sl_distance:.2f}; "
-                f"using {final_distance:.2f} -> SL {sl_price:.2f}.",
+                f"[INFO] [scalping:{self.side}] {side} @ {entry_price:.2f}, SL {sl_price:.2f} "
+                f"(liquidity {sl_liquidity_price:.2f}).",
             )
 
             open_manual_position(
@@ -502,7 +624,7 @@ class ZoneStrategyEngine:
             )
         except RuntimeError as exc:
             patch_path(self._state_path, {"phase": "error", "running": False, "last_error": str(exc)})
-            append_log("search", f"[ERROR] [scalping] order failed: {exc}")
+            append_log("search", f"[ERROR] [scalping:{self.side}] order failed: {exc}")
             return
 
         placed_orders = get("orders", [])

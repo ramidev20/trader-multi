@@ -28,22 +28,39 @@ html[data-theme="DARK"] textarea {
 }
 
 html[data-theme="DARK"] .hover\:bg-white:hover,
+html[data-theme="DARK"] .hover\:bg-white\/70:hover,
 html[data-theme="DARK"] .hover\:bg-slate-50:hover,
+html[data-theme="DARK"] .hover\:bg-slate-50\/70:hover,
 html[data-theme="DARK"] .hover\:bg-slate-100:hover {
   background: #2a2d2e !important;
   color: #f3f3f3 !important;
 }
 
+/* Tailwind compiles an opacity modifier (e.g. bg-white/90) into its own
+   distinct class, separate from the plain bg-white rule above -- every one
+   actually used in the app needs its own override too, or it falls through
+   to its light-mode color and shows up as a bright patch against the dark
+   chrome (this was the actual bug behind a table row's hover looking like a
+   near-white flash in dark mode: the row used hover:bg-slate-50/70, not
+   hover:bg-slate-50, so the general rule above never matched it). */
+html[data-theme="DARK"] .bg-white\/60,
+html[data-theme="DARK"] .bg-white\/90,
+html[data-theme="DARK"] .bg-white\/95 {
+  background-color: #252526 !important;
+}
+
 /* Tinted accent surfaces (badges, callouts, soft buttons) keep their hue but
    move to a dark-safe fill so text stays readable instead of light-on-light. */
 html[data-theme="DARK"] .bg-blue-50,
+html[data-theme="DARK"] .bg-blue-50\/50,
 html[data-theme="DARK"] .bg-blue-50\/70,
 html[data-theme="DARK"] .bg-blue-100 {
   background-color: #172554 !important;
 }
 html[data-theme="DARK"] .bg-emerald-50,
 html[data-theme="DARK"] .bg-emerald-50\/70,
-html[data-theme="DARK"] .bg-emerald-100 {
+html[data-theme="DARK"] .bg-emerald-100,
+html[data-theme="DARK"] .bg-emerald-100\/90 {
   background-color: #064e3b !important;
 }
 html[data-theme="DARK"] .bg-teal-50,
@@ -58,7 +75,8 @@ html[data-theme="DARK"] .bg-rose-100 {
 }
 html[data-theme="DARK"] .bg-amber-50,
 html[data-theme="DARK"] .bg-amber-50\/70,
-html[data-theme="DARK"] .bg-amber-100 {
+html[data-theme="DARK"] .bg-amber-100,
+html[data-theme="DARK"] .bg-amber-100\/90 {
   background-color: #451a03 !important;
 }
 html[data-theme="DARK"] .bg-cyan-50,
@@ -71,6 +89,15 @@ html[data-theme="DARK"] .bg-violet-50\/70,
 html[data-theme="DARK"] .bg-violet-100 {
   background-color: #2e1065 !important;
 }
+
+/* Solid accent surfaces (primary buttons, "on" toggle switches) -- these
+   don't go through the tinted-50/100 rules above since they're full-
+   saturation Tailwind blue-600, not a soft tint. VS Code's own accent blue
+   (button.background) is a much more muted #0e639c than Tailwind's vivid
+   #2563eb; using it here too keeps buttons and "on" toggles consistent with
+   the rest of the dark theme instead of reading as a neon patch. */
+html[data-theme="DARK"] .bg-blue-600 { background-color: #0e639c !important; }
+html[data-theme="DARK"] .hover\:bg-blue-700:hover { background-color: #1177bb !important; }
 
 html[data-theme="DARK"] .hover\:bg-blue-50:hover { background-color: #1e3a8a !important; }
 html[data-theme="DARK"] .hover\:bg-emerald-50:hover { background-color: #065f46 !important; }
@@ -138,6 +165,55 @@ html[data-theme="DARK"] .border-violet-200 { border-color: #6d28d9 !important; }
 html[data-theme="DARK"] .border-dashed.border-slate-300 { border-color: #3c3c3c !important; }
 html[data-theme="DARK"] .bg-slate-950 { background-color: #e8e8e8 !important; color: #1e1e1e !important; }
 
+/* VS Code's own selected-icon treatment (e.g. the activity bar) is just a
+   neutral, barely-lighter background -- no colored accent bar. The sidebar's
+   active nav item used the generic .bg-blue-50/.text-blue-700 dark
+   overrides above (a dark-navy fill + bright light-blue text), which reads
+   as a much louder "contrast color" against the muted charcoal chrome than
+   VS Code's own selection does. This overrides just that one component
+   (scoped to its own class, not the shared .bg-blue-50 rule, so other
+   blue-tinted surfaces like info banners keep their accent color). */
+html[data-theme="DARK"] .app-nav-button--active {
+  background-color: #2d2d2d !important;
+  color: #e8e8e8 !important;
+}
+
+/* Dashboard metric-card icon badges: keep each tone's icon color (already
+   readable via the .text-*-600/700 overrides above) but drop the deeply
+   saturated tinted background behind it -- a small solid-color square reads
+   as a much louder "badge" than the same tint does spread across a whole
+   card, so it gets a neutral surface instead, same idea as the sidebar
+   selection above. */
+html[data-theme="DARK"] .metric-icon {
+  background-color: #2d2d2d !important;
+}
+
+/* ConsoleLogPanel rows: the colored background tint (bg-amber-50 etc.) was
+   written for a white card, where pastel text alone read washed out -- see
+   that component's own comment. Dark-overridden, the same tint becomes a
+   solid saturated block spanning the whole row width, much louder than the
+   left border + icon + colored label already used to mark severity. Drop
+   just the row tint in dark mode; severity stays legible through those. */
+html[data-theme="DARK"] [data-log-level="warning"],
+html[data-theme="DARK"] [data-log-level="error"],
+html[data-theme="DARK"] [data-log-level="success"] {
+  background-color: transparent !important;
+}
+
+/* DateTimeField (Search page, Scalping page) hardcodes a white MUI date
+   picker input via its own `sx` prop -- that's plain CSS-in-JS, not an
+   inline style attribute, so an !important rule here still wins over it
+   regardless of source order, same as the rest of this file's approach. */
+html[data-theme="DARK"] .MuiPickersInputBase-root {
+  background-color: #2d2d2d !important;
+}
+html[data-theme="DARK"] .MuiPickersOutlinedInput-notchedOutline {
+  border-color: #3c3c3c !important;
+}
+html[data-theme="DARK"] .MuiPickersInputBase-sectionContent {
+  color: #d4d4d4 !important;
+}
+
 html[data-theme="DARK"] option {
   background: #252526;
   color: #d4d4d4;
@@ -165,6 +241,14 @@ html[data-theme="DARK"] .text-slate-400 {
 html[data-theme="DARK"] .border-slate-100,
 html[data-theme="DARK"] .border-slate-200,
 html[data-theme="DARK"] .border-slate-300 {
+  border-color: #3c3c3c !important;
+}
+
+/* .table-frame's border is a literal hex in the plain CSS rule below, not a
+   Tailwind border-slate-200 utility, so the override above never touched
+   it -- it kept its light-mode #e2e8f0 (a light gray) even in dark mode,
+   showing up as a pale mismatched seam around every table. */
+html[data-theme="DARK"] .table-frame {
   border-color: #3c3c3c !important;
 }
 

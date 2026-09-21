@@ -46,7 +46,7 @@ export default function Sidebar({ activePage, onChangePage }: SidebarProps) {
               className={cx(
                 "app-nav-button flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-bold transition",
                 active
-                  ? "bg-blue-50 text-blue-700"
+                  ? "app-nav-button--active bg-blue-50 text-blue-700"
                   : "text-slate-500 hover:bg-slate-100 hover:text-slate-900",
               )}
               aria-current={active ? "page" : undefined}

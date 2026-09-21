@@ -243,12 +243,11 @@ class ZoneStrategyStartPayload(BaseModel):
     tp3_enabled: bool = False
     tp1_percent: float | None = None
     tp2_percent: float | None = None
-    displacement_min_pips: float | None = None
-    displacement_avg_multiplier: float | None = None
-    base_max_body_ratio: float | None = None
     instant_m5_start: bool = False
     dev_m1_start: bool = False
     trigger_check_cycle_sec: float | None = None
+    start_time: str | None = None
+    end_time: str | None = None
 
 
 class ZoneStrategyStopPayload(BaseModel):
@@ -1164,8 +1163,11 @@ def stop_strategy() -> dict[str, Any]:
 @app.post("/zone-strategy/start")
 def start_zone_strategy(payload: ZoneStrategyStartPayload) -> dict[str, Any]:
     _require_master_connected()
+    cfg = payload.model_dump()
+    cfg["start_time"] = _parse_dt(payload.start_time)
+    cfg["end_time"] = _parse_dt(payload.end_time)
     try:
-        start_zone_strategy_system(payload.model_dump())
+        start_zone_strategy_system(cfg)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"status": "ok", "zone_strategy": state_get("zone_strategy", {})}

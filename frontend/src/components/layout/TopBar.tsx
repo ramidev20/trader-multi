@@ -180,7 +180,7 @@ export default function TopBar({
             >
               <div
                 className={cx(
-                  "grid h-10 w-10 shrink-0 place-items-center rounded-full bg-gradient-to-br text-xs font-black text-white shadow-sm",
+                  "grid h-10 w-10 shrink-0 place-items-center rounded-full bg-gradient-to-br text-sm font-black text-white shadow-sm",
                   masterAccount?.color || "from-slate-500 to-slate-700",
                 )}
               >

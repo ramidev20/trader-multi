@@ -193,7 +193,7 @@ export function ConsoleLogPanel({
               const style = LOG_LEVEL_STYLE[entry.level];
               const LevelIcon = style.icon;
               return (
-                <div key={entry.id} className={`grid grid-cols-[92px_92px_1fr] items-start gap-x-3 border-l-[3px] px-3 py-2 text-[12.5px] leading-relaxed ${style.row}`}>
+                <div key={entry.id} data-log-level={entry.level} className={`grid grid-cols-[92px_92px_1fr] items-start gap-x-3 border-l-[3px] px-3 py-2 text-[12.5px] leading-relaxed ${style.row}`}>
                   <span className="shrink-0 font-mono text-[10.5px] text-slate-400">{entry.at}</span>
                   <span className={`flex min-w-0 items-center gap-1 font-mono text-[10.5px] font-black ${style.textClass}`}>
                     <LevelIcon className={`h-3.5 w-3.5 shrink-0 ${style.iconClass}`} />

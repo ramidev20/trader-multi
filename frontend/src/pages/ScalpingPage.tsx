@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCcw, StopCircle, FlaskConical } from "lucide-react";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { AppButton, Field } from "../components/ui/Primitives";
 import { ORDER_KIND_OPTIONS, IconSelect } from "./shared/IconSelect";
+import { DateTimeField } from "./shared/DateTimeField";
 import { cx, decimalInput } from "../utils/format";
 import { clearBanner, showBanner } from "../utils/banner";
 import { api } from "../services/api";
@@ -231,6 +234,22 @@ export default function ScalpingPage() {
   const [tp1Percent, setTp1Percent] = useState(saved.tp1Percent ?? "100");
   const [tp2Percent, setTp2Percent] = useState(saved.tp2Percent ?? "100");
 
+  // Optional schedule, same idea as the Search page's Start/End Time, but
+  // time-of-day only -- this always applies to today, so there's no date
+  // picker. Start delays the M15 trigger watch (or the M5/M1 search
+  // directly when paired with a side's "Instant M5" checkbox); end
+  // auto-stops the search and closes any open position, same as the Search
+  // page's End Time. Times round-trip through localStorage as ISO strings,
+  // so they're rehydrated back into Date objects here rather than used as-is.
+  const [startTime, setStartTime] = useState(
+    () => new Date(saved.startTime || Date.now()),
+  );
+  const [endTime, setEndTime] = useState(
+    () => new Date(saved.endTime || Date.now()),
+  );
+  const [endEnabled, setEndEnabled] = useState(saved.endEnabled ?? false);
+  const [openPicker, setOpenPicker] = useState(null);
+
   const [status, setStatus] = useState({ demand: null, supply: null });
   const [submitting, setSubmitting] = useState(false);
   const [stoppingSide, setStoppingSide] = useState(null);
@@ -259,6 +278,9 @@ export default function ScalpingPage() {
       tp2Enabled,
       tp1Percent,
       tp2Percent,
+      startTime,
+      endTime,
+      endEnabled,
     };
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(form));
@@ -281,6 +303,9 @@ export default function ScalpingPage() {
     tp2Enabled,
     tp1Percent,
     tp2Percent,
+    startTime,
+    endTime,
+    endEnabled,
   ]);
 
   // Mirrors Manual Trade's Advanced Risk normalization: enabling TP2 defaults
@@ -329,7 +354,31 @@ export default function ScalpingPage() {
   const supplyActive = ACTIVE_PHASES.includes(supplyPhase);
   const anyActive = demandActive || supplyActive;
 
+  // Same local-wall-clock ISO format as the Search page's Start/End Time --
+  // avoids converting to UTC, which would make the picker look shifted on
+  // reload. Always combined with today's date, never a stored one -- this
+  // schedule only ever covers "later today", so there's no date to pick.
+  function combineDateTime(timePart) {
+    const d = new Date();
+    d.setHours(
+      timePart.getHours(),
+      timePart.getMinutes(),
+      timePart.getSeconds(),
+      0,
+    );
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function setPickerOpenState(pickerKey, isOpen) {
+    setOpenPicker(isOpen ? pickerKey : null);
+  }
+
   function buildPayload(side, price, instantM5, checkCycleSec, devM1 = false) {
+    // Dev test is a "right now" shortcut -- it never carries the scheduled
+    // start/end window from the main form.
+    const startIso = devM1 ? null : combineDateTime(startTime);
+    const endIso = !devM1 && endEnabled ? combineDateTime(endTime) : null;
     return {
       symbol: SYMBOL,
       trigger_price: instantM5 || devM1 ? 0 : Number(price),
@@ -348,6 +397,8 @@ export default function ScalpingPage() {
       tp2_enabled: tp2Enabled,
       tp1_percent: Number(tp1Percent || 0),
       tp2_percent: Number(tp2Percent || 0),
+      start_time: startIso,
+      end_time: endIso,
     };
   }
 
@@ -360,6 +411,14 @@ export default function ScalpingPage() {
     if (!(Number(tp1Ratio) > 0)) {
       showBanner("Enter a TP1 ratio greater than 0.", "error");
       return;
+    }
+    if (endEnabled) {
+      const startIso = combineDateTime(startTime);
+      const endIso = combineDateTime(endTime);
+      if (new Date(endIso) <= new Date(startIso)) {
+        showBanner("End time must be later than start time.", "error");
+        return;
+      }
     }
     const candidates = [
       {
@@ -474,6 +533,7 @@ export default function ScalpingPage() {
   }
 
   return (
+    <LocalizationProvider dateAdapter={AdapterDayjs}>
     <div className="flex min-h-0 flex-1 flex-col gap-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -591,70 +651,128 @@ export default function ScalpingPage() {
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 md:col-span-2 xl:col-span-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-black uppercase tracking-wide text-slate-500">
-              Take Profit
-            </span>
-            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-black text-slate-600">
-              Total Ratio {totalTpRatio.toFixed(1)}
-            </span>
-          </div>
-          <p className="mt-1 text-[11px] leading-4 text-slate-400">
-            Multi-TP, same as Manual Trade&apos;s Advanced Risk panel -- exits
-            in up to two stages, each at its own risk ratio and share of the
-            remaining volume. No Stop Loss Price here: the ratios are
-            measured against the SL this strategy already computes per trade
-            (liquidity swing vs. Min SL floor above).
-          </p>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <Field
-              label="TP1 Ratio"
-              type="text"
-              inputMode="decimal"
-              value={tp1Ratio}
-              onChange={(event) => setTp1Ratio(decimalInput(event.target.value))}
-              disabled={submitting}
-            />
-            <Field
-              label="TP1 %"
-              type="text"
-              inputMode="decimal"
-              value={tp1Percent}
-              onChange={(event) => setTp1Percent(event.target.value)}
-              disabled={submitting || !tp2Enabled}
-            />
-            <Field
-              label="TP2 Ratio"
-              labelExtra={
-                <span className="flex items-center gap-1.5 normal-case tracking-normal">
-                  <span className="text-[11px] font-semibold text-slate-500">
-                    Enable
+        <div className="grid gap-4 lg:grid-cols-2 md:col-span-2 xl:col-span-3">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-black uppercase tracking-wide text-slate-500">
+                Take Profit
+              </span>
+              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-black text-slate-600">
+                Total Ratio {totalTpRatio.toFixed(1)}
+              </span>
+            </div>
+            <p className="mt-1 text-[11px] leading-4 text-slate-400">
+              Multi-TP, same as Manual Trade&apos;s Advanced Risk panel --
+              exits in up to two stages, each at its own risk ratio and share
+              of the remaining volume. No Stop Loss Price here: the ratios
+              are measured against the SL this strategy already computes per
+              trade (liquidity swing vs. Min SL floor above).
+            </p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <Field
+                label="TP1 Ratio"
+                type="text"
+                inputMode="decimal"
+                value={tp1Ratio}
+                onChange={(event) => setTp1Ratio(decimalInput(event.target.value))}
+                disabled={submitting}
+              />
+              <Field
+                label="TP1 %"
+                type="text"
+                inputMode="decimal"
+                value={tp1Percent}
+                onChange={(event) => setTp1Percent(event.target.value)}
+                disabled={submitting || !tp2Enabled}
+              />
+              <Field
+                label="TP2 Ratio"
+                labelExtra={
+                  <span className="flex items-center gap-1.5 normal-case tracking-normal">
+                    <span className="text-[11px] font-semibold text-slate-500">
+                      Enable
+                    </span>
+                    <SwitchToggle
+                      checked={tp2Enabled}
+                      onChange={setTp2Enabled}
+                      disabled={submitting}
+                    />
                   </span>
-                  <SwitchToggle
-                    checked={tp2Enabled}
-                    onChange={setTp2Enabled}
-                    disabled={submitting}
+                }
+                type="text"
+                inputMode="decimal"
+                value={tp2Ratio}
+                onChange={(event) => setTp2Ratio(decimalInput(event.target.value))}
+                disabled={submitting || !tp2Enabled}
+              />
+              <Field
+                label="TP2 %"
+                type="text"
+                inputMode="decimal"
+                value={tp2Percent}
+                onChange={(event) => setTp2Percent(event.target.value)}
+                disabled={submitting || !tp2Enabled}
+              />
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <span className="text-xs font-black uppercase tracking-wide text-slate-500">
+              Schedule
+            </span>
+            <p className="mt-1 text-[11px] leading-4 text-slate-400">
+              Optional -- same as the Search page, always for today. Start
+              delays the M15 trigger watch (or the M5/M1 search directly, for
+              a side with Instant M5 checked) until this time. End stops the
+              search and closes any open position, whichever side hits it
+              first. Doesn&apos;t apply to the 1 min dev test.
+            </p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-slate-200 bg-white p-2.5">
+                <h4 className="font-black text-slate-950">Start Time</h4>
+                <div className="mt-2.5">
+                  <DateTimeField
+                    fieldKey="scalping-start-time"
+                    label="Time"
+                    picker="time"
+                    value={startTime}
+                    onChange={setStartTime}
+                    openPicker={openPicker}
+                    setPickerOpenState={setPickerOpenState}
                   />
-                </span>
-              }
-              type="text"
-              inputMode="decimal"
-              value={tp2Ratio}
-              onChange={(event) => setTp2Ratio(decimalInput(event.target.value))}
-              disabled={submitting || !tp2Enabled}
-            />
-            <Field
-              label="TP2 %"
-              type="text"
-              inputMode="decimal"
-              value={tp2Percent}
-              onChange={(event) => setTp2Percent(event.target.value)}
-              disabled={submitting || !tp2Enabled}
-            />
+                </div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-white p-2.5">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-black text-slate-950">End Time</h4>
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[11px] font-semibold text-slate-500">
+                      Enabled
+                    </span>
+                    <SwitchToggle
+                      checked={endEnabled}
+                      onChange={setEndEnabled}
+                      disabled={submitting}
+                    />
+                  </span>
+                </div>
+                <div className="mt-2.5">
+                  <DateTimeField
+                    fieldKey="scalping-end-time"
+                    label="Time"
+                    picker="time"
+                    value={endTime}
+                    onChange={setEndTime}
+                    openPicker={openPicker}
+                    setPickerOpenState={setPickerOpenState}
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
+    </LocalizationProvider>
   );
 }

@@ -391,7 +391,7 @@ export function SettingsPlaceholder({
                       <div className="flex items-center gap-3">
                         <div
                           className={cx(
-                            "grid h-11 w-11 place-items-center rounded-lg bg-gradient-to-br text-xs font-black text-white shadow-sm",
+                            "grid h-11 w-11 place-items-center rounded-lg bg-gradient-to-br text-sm font-black text-white shadow-sm",
                             account.color,
                           )}
                         >

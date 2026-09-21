@@ -103,7 +103,7 @@ function MetricCard({
     <Card className="p-4">
       <div className="flex items-center justify-between">
         <p className="text-sm font-bold text-slate-500">{label}</p>
-        <div className={cx("rounded-lg p-2.5", toneStyle[tone])}>
+        <div className={cx("metric-icon rounded-lg p-2.5", toneStyle[tone])}>
           <Icon className="h-6 w-6" />
         </div>
       </div>
@@ -141,7 +141,7 @@ function AccountHierarchy({ accountsData }) {
             <div className="flex items-center gap-3 rounded-lg bg-slate-50 p-3">
               <div
                 className={cx(
-                  "grid h-10 w-10 place-items-center rounded-lg bg-gradient-to-br text-xs font-black text-white shadow-sm",
+                  "grid h-10 w-10 place-items-center rounded-lg bg-gradient-to-br text-sm font-black text-white shadow-sm",
                   account.color,
                 )}
               >
@@ -295,7 +295,7 @@ function AccountProgressTab({ accountsData }) {
               >
                 <div
                   className={cx(
-                    "grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br text-xs font-black text-white",
+                    "grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br text-sm font-black text-white",
                     a.color,
                   )}
                 >
@@ -534,7 +534,7 @@ export default function DashboardPage({
                           <div className="flex min-w-0 items-center gap-3">
                             <div
                               className={cx(
-                                "grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-gradient-to-br text-xs font-black text-white shadow-sm",
+                                "grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-gradient-to-br text-sm font-black text-white shadow-sm",
                                 account.color,
                               )}
                             >

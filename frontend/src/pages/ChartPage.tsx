@@ -98,15 +98,34 @@ export default function ChartPage() {
     Map<
       string,
       {
-        entry: any;
         tpZone: any;
         slZone: any;
-        tpPriceLine: any;
-        slPriceLine: any;
       }
     >
   >(new Map());
   const rememberedPositionsRef = useRef<Map<string, TradeOrder>>(new Map());
+  // Hover hit-test data for the position tooltip -- kept separate from the
+  // chart series themselves (lightweight-charts series aren't queryable for
+  // "what price range does this cover", so the plain numbers are cached here
+  // instead) and rebuilt every time the positions-drawing effect runs.
+  const positionsHoverRef = useRef<
+    Array<{
+      ticket: string;
+      side: string;
+      lot: number;
+      entryPrice: number;
+      tpPrice: number;
+      slPrice: number;
+      startTime: number;
+    }>
+  >([]);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const tooltipTitleRef = useRef<HTMLDivElement | null>(null);
+  const tooltipOpenRef = useRef<HTMLSpanElement | null>(null);
+  const tooltipTpRowRef = useRef<HTMLDivElement | null>(null);
+  const tooltipTpRef = useRef<HTMLSpanElement | null>(null);
+  const tooltipSlRowRef = useRef<HTMLDivElement | null>(null);
+  const tooltipSlRef = useRef<HTMLSpanElement | null>(null);
   const zoneOverlayRef = useRef<
     Record<
       string,
@@ -274,6 +293,63 @@ export default function ChartPage() {
     chartRef.current = chart;
     seriesRef.current = candles;
 
+    // Hover tooltip for open positions -- replaces the dashed TP/SL/entry
+    // price lines that used to sit on the chart permanently. Hit-tested
+    // against positionsHoverRef (rebuilt by the positions-drawing effect)
+    // instead of a series lookup, since lightweight-charts series can't be
+    // queried for "what price range does this cover".
+    function handleCrosshairMove(param: any) {
+      const tooltip = tooltipRef.current;
+      if (!tooltip) return;
+      if (!param?.point || param.time == null || !seriesRef.current) {
+        tooltip.classList.add("hidden");
+        return;
+      }
+      const hoverPrice = seriesRef.current.coordinateToPrice(param.point.y);
+      if (hoverPrice == null) {
+        tooltip.classList.add("hidden");
+        return;
+      }
+      const match = positionsHoverRef.current.find((position) => {
+        const values = [position.entryPrice, position.tpPrice, position.slPrice].filter(
+          (value) => value > 0,
+        );
+        if (!values.length) return false;
+        const lo = Math.min(...values);
+        const hi = Math.max(...values);
+        return (
+          Number(param.time) >= position.startTime &&
+          hoverPrice >= lo &&
+          hoverPrice <= hi
+        );
+      });
+      if (!match) {
+        tooltip.classList.add("hidden");
+        return;
+      }
+      tooltip.classList.remove("hidden");
+      if (tooltipTitleRef.current) {
+        tooltipTitleRef.current.textContent = `${match.side} ${match.lot.toFixed(2)} #${match.ticket}`;
+        tooltipTitleRef.current.style.color = match.side === "LONG" ? "#047857" : "#be123c";
+      }
+      if (tooltipOpenRef.current) {
+        tooltipOpenRef.current.textContent = match.entryPrice.toFixed(2);
+      }
+      if (tooltipTpRowRef.current) {
+        tooltipTpRowRef.current.classList.toggle("hidden", !(match.tpPrice > 0));
+      }
+      if (tooltipTpRef.current) {
+        tooltipTpRef.current.textContent = match.tpPrice > 0 ? match.tpPrice.toFixed(2) : "-";
+      }
+      if (tooltipSlRowRef.current) {
+        tooltipSlRowRef.current.classList.toggle("hidden", !(match.slPrice > 0));
+      }
+      if (tooltipSlRef.current) {
+        tooltipSlRef.current.textContent = match.slPrice > 0 ? match.slPrice.toFixed(2) : "-";
+      }
+    }
+    chart.subscribeCrosshairMove(handleCrosshairMove);
+
     const stopWatching = watchThemeChange((nextPalette) => {
       chart.applyOptions({
         layout: {
@@ -297,10 +373,12 @@ export default function ChartPage() {
 
     return () => {
       stopWatching();
+      chart.unsubscribeCrosshairMove(handleCrosshairMove);
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
       positionSeriesRef.current.clear();
+      positionsHoverRef.current = [];
       zoneOverlayRef.current = {};
       countdownLineRef.current = null;
     };
@@ -428,16 +506,12 @@ export default function ChartPage() {
     );
     positionSeriesRef.current.forEach((series, ticket) => {
       if (activeTickets.has(ticket)) return;
-      chartRef.current.removeSeries(series.entry);
       chartRef.current.removeSeries(series.tpZone);
       chartRef.current.removeSeries(series.slZone);
-      if (series.tpPriceLine)
-        seriesRef.current.removePriceLine(series.tpPriceLine);
-      if (series.slPriceLine)
-        seriesRef.current.removePriceLine(series.slPriceLine);
       positionSeriesRef.current.delete(ticket);
     });
 
+    const hoverEntries: typeof positionsHoverRef.current = [];
     positions.forEach((position) => {
       const ticket = String(position.ticket);
       const entryPrice = Number(position.price ?? position.entry ?? 0);
@@ -453,18 +527,20 @@ export default function ChartPage() {
         startTime = normalizedCandles[normalizedCandles.length - 2].time;
       }
 
+      const isBuy = String(position.side || "").toUpperCase() === "BUY";
+      hoverEntries.push({
+        ticket,
+        side: isBuy ? "LONG" : "SHORT",
+        lot: Number(position.lot || 0),
+        entryPrice,
+        tpPrice,
+        slPrice,
+        startTime,
+      });
+
       let overlay = positionSeriesRef.current.get(ticket);
       if (!overlay) {
-        const isBuy = String(position.side || "").toUpperCase() === "BUY";
         overlay = {
-          entry: chartRef.current.addSeries(LineSeries, {
-            color: isBuy ? "#047857" : "#be123c",
-            lineWidth: 2,
-            lineStyle: 2,
-            priceLineVisible: false,
-            lastValueVisible: true,
-            title: `${isBuy ? "LONG" : "SHORT"} ${Number(position.lot || 0).toFixed(2)}`,
-          }),
           tpZone: chartRef.current.addSeries(BaselineSeries, {
             baseValue: { type: "price", price: entryPrice },
             topLineColor: "#16a34a",
@@ -489,16 +565,10 @@ export default function ChartPage() {
             priceLineVisible: false,
             lastValueVisible: false,
           }),
-          tpPriceLine: null,
-          slPriceLine: null,
         };
         positionSeriesRef.current.set(ticket, overlay);
       }
 
-      overlay.entry.setData([
-        { time: startTime, value: entryPrice },
-        { time: endTime, value: entryPrice },
-      ]);
       overlay.tpZone.applyOptions({
         baseValue: { type: "price", price: entryPrice },
       });
@@ -521,41 +591,8 @@ export default function ChartPage() {
           : [];
       overlay.tpZone.setData(tpData);
       overlay.slZone.setData(slData);
-      if (tpPrice > 0) {
-        if (!overlay.tpPriceLine) {
-          overlay.tpPriceLine = seriesRef.current.createPriceLine({
-            price: tpPrice,
-            color: "#16a34a",
-            lineWidth: 2,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            title: `TP #${ticket}`,
-          });
-        } else {
-          overlay.tpPriceLine.applyOptions({ price: tpPrice });
-        }
-      } else if (overlay.tpPriceLine) {
-        seriesRef.current.removePriceLine(overlay.tpPriceLine);
-        overlay.tpPriceLine = null;
-      }
-      if (slPrice > 0) {
-        if (!overlay.slPriceLine) {
-          overlay.slPriceLine = seriesRef.current.createPriceLine({
-            price: slPrice,
-            color: "#e11d48",
-            lineWidth: 2,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            title: `SL #${ticket}`,
-          });
-        } else {
-          overlay.slPriceLine.applyOptions({ price: slPrice });
-        }
-      } else if (overlay.slPriceLine) {
-        seriesRef.current.removePriceLine(overlay.slPriceLine);
-        overlay.slPriceLine = null;
-      }
     });
+    positionsHoverRef.current = hoverEntries;
     if (normalizedCandles.length && !fittedRef.current) {
       chartRef.current?.timeScale().fitContent();
       fittedRef.current = true;
@@ -716,14 +753,19 @@ export default function ChartPage() {
       const symbolMatches =
         !sideStatus?.symbol || String(sideStatus.symbol).toUpperCase() === "XAUUSD";
 
-      // Once the side's trade is placed (buy for demand, sell for supply),
-      // stop drawing its zone boxes/trigger line -- the position is open, so
-      // there's nothing left to search for.
+      // The zone boxes stay drawn once the side's trade is placed (buy for
+      // demand, sell for supply) too -- the M5/M1 zone that produced the
+      // entry is still meaningful context while the position is open, same
+      // as the entry/TP/SL themselves staying visible. Only a side that's
+      // fully idle (never armed, or stopped/errored out) drops its boxes.
       const searchActive =
         symbolMatches &&
-        ["waiting_trigger", "searching_m5_zone", "searching_m1_zone"].includes(
-          sideStatus?.phase,
-        );
+        [
+          "waiting_trigger",
+          "searching_m5_zone",
+          "searching_m1_zone",
+          "placed",
+        ].includes(sideStatus?.phase);
 
       // The M15 trigger line only makes sense while still waiting for that
       // trigger -- once it fires (phase moves on to searching the M5/M1
@@ -847,6 +889,29 @@ export default function ChartPage() {
           <Eraser className="h-3.5 w-3.5" />
           Clear
         </button>
+      </div>
+      {/* Position tooltip -- shown while hovering over an open position's
+          TP/SL zone fill, in place of permanent dashed price lines. Content
+          is written directly to these nodes in handleCrosshairMove rather
+          than through React state, since it needs to update on every mouse
+          move without re-rendering the whole page. */}
+      <div
+        ref={tooltipRef}
+        className="pointer-events-none absolute right-3 top-3 z-10 hidden min-w-[140px] rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs shadow-sm backdrop-blur-sm"
+      >
+        <div ref={tooltipTitleRef} className="mb-1 text-[11px] font-black" />
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-slate-500">Open</span>
+          <span ref={tooltipOpenRef} className="font-bold text-slate-700" />
+        </div>
+        <div ref={tooltipTpRowRef} className="flex items-center justify-between gap-3">
+          <span className="text-slate-500">TP</span>
+          <span ref={tooltipTpRef} className="font-bold text-emerald-600" />
+        </div>
+        <div ref={tooltipSlRowRef} className="flex items-center justify-between gap-3">
+          <span className="text-slate-500">SL</span>
+          <span ref={tooltipSlRef} className="font-bold text-rose-600" />
+        </div>
       </div>
       {!snapshot.candles.length && !loading ? (
         <div className="absolute inset-0 flex items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white/60 backdrop-blur-[1px]">

@@ -236,12 +236,18 @@ class ZoneStrategyStartPayload(BaseModel):
     order_kind: str = "MARKET"
     lot: float | None = None
     risk_percent: float | None = None
-    tp: float | None = None
-    tp_in_pips: bool = True
+    tp1_ratio: float | None = None
+    tp2_ratio: float | None = None
+    tp3_ratio: float | None = None
+    tp2_enabled: bool = False
+    tp3_enabled: bool = False
+    tp1_percent: float | None = None
+    tp2_percent: float | None = None
     displacement_min_pips: float | None = None
     displacement_avg_multiplier: float | None = None
     base_max_body_ratio: float | None = None
     instant_m5_start: bool = False
+    dev_m1_start: bool = False
     trigger_check_cycle_sec: float | None = None
 
 

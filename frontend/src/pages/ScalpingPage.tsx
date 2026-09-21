@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
-import { RefreshCcw, StopCircle } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCcw, StopCircle, FlaskConical } from "lucide-react";
 import { AppButton, Field } from "../components/ui/Primitives";
 import { ORDER_KIND_OPTIONS, IconSelect } from "./shared/IconSelect";
 import { cx, decimalInput } from "../utils/format";
@@ -80,6 +80,8 @@ function ZoneSideCard({
   disabled,
   onStop,
   stopping,
+  onDevTest,
+  devTesting,
 }) {
   const meta = SIDE_META[side];
   return (
@@ -183,6 +185,15 @@ function ZoneSideCard({
           <StopCircle className="h-4 w-4" /> Stop {meta.label} Search
         </AppButton>
       ) : null}
+      <AppButton
+        variant="soft"
+        className="mt-3 w-full"
+        onClick={onDevTest}
+        disabled={disabled || devTesting || isActive}
+        title="Dev only -- skips the M15 trigger and M5 zone, searching M1 directly so the confirmation + order logic can be tested in about a minute."
+      >
+        <FlaskConical className="h-4 w-4" /> 1 min dev test
+      </AppButton>
     </div>
   );
 }
@@ -210,9 +221,20 @@ export default function ScalpingPage() {
   const [orderKind, setOrderKind] = useState(saved.orderKind ?? "MARKET");
   const [riskPercent, setRiskPercent] = useState(saved.riskPercent ?? "1");
 
+  // Multi-TP (up to 2 stages), same mechanism as Manual Trade's Advanced
+  // Risk panel -- but with no Stop Loss Price field, since the SL here
+  // always comes from the strategy's own liquidity-swing/min-SL calculation,
+  // never a typed price.
+  const [tp1Ratio, setTp1Ratio] = useState(saved.tp1Ratio ?? "1.0");
+  const [tp2Ratio, setTp2Ratio] = useState(saved.tp2Ratio ?? "1.0");
+  const [tp2Enabled, setTp2Enabled] = useState(saved.tp2Enabled ?? false);
+  const [tp1Percent, setTp1Percent] = useState(saved.tp1Percent ?? "100");
+  const [tp2Percent, setTp2Percent] = useState(saved.tp2Percent ?? "100");
+
   const [status, setStatus] = useState({ demand: null, supply: null });
   const [submitting, setSubmitting] = useState(false);
   const [stoppingSide, setStoppingSide] = useState(null);
+  const [devTestingSide, setDevTestingSide] = useState(null);
   // Surfaces in the TopBar's banner slot instead of an inline div here.
   // reportError takes the actual Error object so its `.code` (an HTTP status
   // or "NETWORK", attached by services/api.js) survives into the banner.
@@ -232,6 +254,11 @@ export default function ScalpingPage() {
       liquiditySlPips,
       orderKind,
       riskPercent,
+      tp1Ratio,
+      tp2Ratio,
+      tp2Enabled,
+      tp1Percent,
+      tp2Percent,
     };
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(form));
@@ -249,7 +276,24 @@ export default function ScalpingPage() {
     liquiditySlPips,
     orderKind,
     riskPercent,
+    tp1Ratio,
+    tp2Ratio,
+    tp2Enabled,
+    tp1Percent,
+    tp2Percent,
   ]);
+
+  // Mirrors Manual Trade's Advanced Risk normalization: enabling TP2 defaults
+  // TP1's withdrawal down from 100% so there's actually something left for it.
+  useEffect(() => {
+    if (tp2Enabled && tp1Percent === "100") setTp1Percent("50");
+  }, [tp2Enabled]);
+
+  const totalTpRatio = useMemo(() => {
+    let total = Number(tp1Ratio || 0);
+    if (tp2Enabled) total += Number(tp2Ratio || 0);
+    return total;
+  }, [tp1Ratio, tp2Enabled, tp2Ratio]);
 
   useEffect(() => {
     let cancelled = false;
@@ -285,10 +329,10 @@ export default function ScalpingPage() {
   const supplyActive = ACTIVE_PHASES.includes(supplyPhase);
   const anyActive = demandActive || supplyActive;
 
-  function buildPayload(side, price, instantM5, checkCycleSec) {
+  function buildPayload(side, price, instantM5, checkCycleSec, devM1 = false) {
     return {
       symbol: SYMBOL,
-      trigger_price: instantM5 ? 0 : Number(price),
+      trigger_price: instantM5 || devM1 ? 0 : Number(price),
       trigger_zone_type: side,
       manual_sl_distance: Number(minSlPips),
       sl_distance_in_pips: true,
@@ -296,8 +340,14 @@ export default function ScalpingPage() {
       order_kind: orderKind,
       lot: null,
       risk_percent: Number(riskPercent || 0),
-      instant_m5_start: Boolean(instantM5),
+      instant_m5_start: Boolean(instantM5) && !devM1,
+      dev_m1_start: Boolean(devM1),
       trigger_check_cycle_sec: Number(checkCycleSec || DEFAULT_CHECK_CYCLE_SEC),
+      tp1_ratio: Number(tp1Ratio || 0),
+      tp2_ratio: Number(tp2Ratio || 0),
+      tp2_enabled: tp2Enabled,
+      tp1_percent: Number(tp1Percent || 0),
+      tp2_percent: Number(tp2Percent || 0),
     };
   }
 
@@ -305,6 +355,10 @@ export default function ScalpingPage() {
     clearBanner();
     if (!(Number(minSlPips) > 0)) {
       showBanner("Enter a min SL (pips) amount greater than 0.", "error");
+      return;
+    }
+    if (!(Number(tp1Ratio) > 0)) {
+      showBanner("Enter a TP1 ratio greater than 0.", "error");
       return;
     }
     const candidates = [
@@ -375,6 +429,34 @@ export default function ScalpingPage() {
     }
   }
 
+  async function handleDevM1Start(side) {
+    clearBanner();
+    if (!(Number(minSlPips) > 0)) {
+      showBanner("Enter a min SL (pips) amount greater than 0.", "error");
+      return;
+    }
+    if (!(Number(tp1Ratio) > 0)) {
+      showBanner("Enter a TP1 ratio greater than 0.", "error");
+      return;
+    }
+    setDevTestingSide(side);
+    try {
+      const checkCycleSec =
+        side === "demand" ? demandCheckCycleSec : supplyCheckCycleSec;
+      const result = await api.startZoneStrategy(
+        buildPayload(side, "", false, checkCycleSec, true),
+      );
+      setStatus({
+        demand: result?.zone_strategy?.demand || null,
+        supply: result?.zone_strategy?.supply || null,
+      });
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setDevTestingSide(null);
+    }
+  }
+
   async function handleStop(side) {
     setStoppingSide(side);
     try {
@@ -403,10 +485,12 @@ export default function ScalpingPage() {
           onClick={handleStart}
           disabled={submitting || (demandActive && supplyActive)}
         >
-          {anyActive ? (
+          {demandActive && supplyActive ? (
+            "Start"
+          ) : anyActive ? (
             <>
               <RefreshCcw className="h-4 w-4" />
-              Arm remaining
+              Start {demandActive ? "supply" : "demand"}
             </>
           ) : (
             "Start"
@@ -435,6 +519,8 @@ export default function ScalpingPage() {
           disabled={submitting}
           onStop={() => handleStop("demand")}
           stopping={stoppingSide === "demand"}
+          onDevTest={() => handleDevM1Start("demand")}
+          devTesting={devTestingSide === "demand"}
         />
         <ZoneSideCard
           side="supply"
@@ -451,13 +537,15 @@ export default function ScalpingPage() {
           disabled={submitting}
           onStop={() => handleStop("supply")}
           stopping={stoppingSide === "supply"}
+          onDevTest={() => handleDevM1Start("supply")}
+          devTesting={devTestingSide === "supply"}
         />
 
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 md:col-span-2 xl:col-span-1">
           <span className="text-xs font-black uppercase tracking-wide text-slate-500">
             Order Settings
           </span>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+          <div className="mt-3 grid grid-cols-2 gap-3">
             <IconSelect
               label="Order Type"
               value={orderKind}
@@ -499,6 +587,70 @@ export default function ScalpingPage() {
               }
               disabled={submitting}
               placeholder="e.g. 5"
+            />
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 md:col-span-2 xl:col-span-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-black uppercase tracking-wide text-slate-500">
+              Take Profit
+            </span>
+            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-black text-slate-600">
+              Total Ratio {totalTpRatio.toFixed(1)}
+            </span>
+          </div>
+          <p className="mt-1 text-[11px] leading-4 text-slate-400">
+            Multi-TP, same as Manual Trade&apos;s Advanced Risk panel -- exits
+            in up to two stages, each at its own risk ratio and share of the
+            remaining volume. No Stop Loss Price here: the ratios are
+            measured against the SL this strategy already computes per trade
+            (liquidity swing vs. Min SL floor above).
+          </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <Field
+              label="TP1 Ratio"
+              type="text"
+              inputMode="decimal"
+              value={tp1Ratio}
+              onChange={(event) => setTp1Ratio(decimalInput(event.target.value))}
+              disabled={submitting}
+            />
+            <Field
+              label="TP1 %"
+              type="text"
+              inputMode="decimal"
+              value={tp1Percent}
+              onChange={(event) => setTp1Percent(event.target.value)}
+              disabled={submitting || !tp2Enabled}
+            />
+            <Field
+              label="TP2 Ratio"
+              labelExtra={
+                <span className="flex items-center gap-1.5 normal-case tracking-normal">
+                  <span className="text-[11px] font-semibold text-slate-500">
+                    Enable
+                  </span>
+                  <SwitchToggle
+                    checked={tp2Enabled}
+                    onChange={setTp2Enabled}
+                    disabled={submitting}
+                  />
+                </span>
+              }
+              type="text"
+              inputMode="decimal"
+              value={tp2Ratio}
+              onChange={(event) => setTp2Ratio(decimalInput(event.target.value))}
+              disabled={submitting || !tp2Enabled}
+            />
+            <Field
+              label="TP2 %"
+              type="text"
+              inputMode="decimal"
+              value={tp2Percent}
+              onChange={(event) => setTp2Percent(event.target.value)}
+              disabled={submitting || !tp2Enabled}
             />
           </div>
         </div>

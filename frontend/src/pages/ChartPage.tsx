@@ -106,6 +106,7 @@ export default function ChartPage() {
       }
     >
   >(new Map());
+  const rememberedPositionsRef = useRef<Map<string, TradeOrder>>(new Map());
   const zoneOverlayRef = useRef<
     Record<
       string,
@@ -120,9 +121,6 @@ export default function ChartPage() {
         breachedZoneFill: any;
         breachedZoneBottom: any;
         breachedZoneEdges: any;
-        entryLine: any;
-        slLine: any;
-        tpLine: any;
       }
     >
   >({});
@@ -171,9 +169,8 @@ export default function ChartPage() {
       if (sideStatus.last_breached_m5_zone) {
         keys.add(`${side}:breached:${sideStatus.last_breached_m5_zone.breached_at}`);
       }
-      if (sideStatus.placed_order) keys.add(`${side}:order:${sideStatus.placed_order.ticket}`);
     });
-    (snapshot.orders || []).forEach((order) => {
+    rememberedPositionsRef.current.forEach((order) => {
       if (order.ticket != null) keys.add(`position:${order.ticket}`);
     });
     // Nothing above mutates React state the effects depend on, so bump a
@@ -404,16 +401,27 @@ export default function ChartPage() {
     if (!seriesRef.current || !chartRef.current) return;
     seriesRef.current.setData(normalizedCandles);
 
+    // Remember every open position by ticket instead of only drawing what's
+    // currently "open" -- once MT5 reports a position closed (TP/SL hit) it
+    // drops out of snapshot.orders entirely, but the box should stay on the
+    // chart as a record of the trade rather than vanish. Prices keep
+    // refreshing from live data while still open; once closed, the last
+    // known values stay frozen until the ticket is manually cleared.
+    snapshot.orders.forEach((order) => {
+      if (
+        String(order.status || "").toLowerCase() === "open" &&
+        String(order.order_kind || "").toUpperCase() === "MARKET" &&
+        Number(order.price ?? order.entry ?? 0) > 0
+      ) {
+        rememberedPositionsRef.current.set(String(order.ticket), order);
+      }
+    });
     // Candles always render; only the overlays are conditional -- excluding
     // a cleared ticket here makes the cleanup loop below remove its existing
     // overlay and skips recreating it, while a ticket that wasn't on screen
     // when Clear was clicked (a new position) still draws normally.
-    const positions = snapshot.orders.filter(
-      (order) =>
-        String(order.status || "").toLowerCase() === "open" &&
-        String(order.order_kind || "").toUpperCase() === "MARKET" &&
-        Number(order.price ?? order.entry ?? 0) > 0 &&
-        !clearedKeysRef.current.has(`position:${order.ticket}`),
+    const positions = Array.from(rememberedPositionsRef.current.values()).filter(
+      (order) => !clearedKeysRef.current.has(`position:${order.ticket}`),
     );
     const activeTickets = new Set(
       positions.map((position) => String(position.ticket)),
@@ -700,9 +708,6 @@ export default function ChartPage() {
           breachedZoneFill: null,
           breachedZoneBottom: null,
           breachedZoneEdges: null,
-          entryLine: null,
-          slLine: null,
-          tpLine: null,
         };
         zoneOverlayRef.current[side] = overlay;
       }
@@ -785,69 +790,6 @@ export default function ChartPage() {
         0.1,
         breachedZone?.breached_at,
       );
-
-      const order =
-        symbolMatches && sideStatus?.placed_order &&
-        !cleared.has(`${side}:order:${sideStatus.placed_order.ticket}`)
-          ? sideStatus.placed_order
-          : null;
-      const entryPrice = Number(order?.entry || 0);
-      const slPrice = Number(order?.sl || 0);
-      const tpPrice = Number(order?.tp || 0);
-
-      if (order && entryPrice > 0) {
-        if (!overlay.entryLine) {
-          overlay.entryLine = seriesRef.current.createPriceLine({
-            price: entryPrice,
-            color: "#2563eb",
-            lineWidth: 2,
-            lineStyle: 0,
-            axisLabelVisible: true,
-            title: `${side} scalp entry #${order.ticket ?? ""}`,
-          });
-        } else {
-          overlay.entryLine.applyOptions({ price: entryPrice });
-        }
-      } else if (overlay.entryLine) {
-        seriesRef.current.removePriceLine(overlay.entryLine);
-        overlay.entryLine = null;
-      }
-
-      if (order && slPrice > 0) {
-        if (!overlay.slLine) {
-          overlay.slLine = seriesRef.current.createPriceLine({
-            price: slPrice,
-            color: "#e11d48",
-            lineWidth: 2,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            title: `${side} scalp SL`,
-          });
-        } else {
-          overlay.slLine.applyOptions({ price: slPrice });
-        }
-      } else if (overlay.slLine) {
-        seriesRef.current.removePriceLine(overlay.slLine);
-        overlay.slLine = null;
-      }
-
-      if (order && tpPrice > 0) {
-        if (!overlay.tpLine) {
-          overlay.tpLine = seriesRef.current.createPriceLine({
-            price: tpPrice,
-            color: "#16a34a",
-            lineWidth: 2,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            title: `${side} scalp TP`,
-          });
-        } else {
-          overlay.tpLine.applyOptions({ price: tpPrice });
-        }
-      } else if (overlay.tpLine) {
-        seriesRef.current.removePriceLine(overlay.tpLine);
-        overlay.tpLine = null;
-      }
     });
   }, [normalizedCandles, zoneStatus, timeframe, clearNonce]);
 

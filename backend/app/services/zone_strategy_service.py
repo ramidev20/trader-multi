@@ -145,6 +145,7 @@ class ZoneStrategyEngine:
         self.m5_target_zone_type: str = self.side
         self.m1_target_zone_type: str = self.side
         self.instant_m5_start: bool = False
+        self.dev_m1_start: bool = False
         self.trigger_check_cycle_sec: float = DEFAULT_TRIGGER_CHECK_CYCLE_SEC
         self.manual_sl_distance: float = 0.0
         self.sl_distance_in_pips: bool = True
@@ -152,8 +153,18 @@ class ZoneStrategyEngine:
         self.order_kind: str = "MARKET"
         self.lot: Optional[float] = None
         self.risk_percent: Optional[float] = None
-        self.tp: Optional[float] = None
-        self.tp_in_pips: bool = True
+        # Take-profit is always ratio-based here (same mechanism as manual
+        # trade's Multi-TP), never a flat pip amount -- the stop that the
+        # ratios multiply against is the one this engine itself computes in
+        # _place_order (liquidity swing vs. manual SL floor), not a
+        # separately entered price, since scalping never has a user-typed SL.
+        self.tp1_ratio: float = 1.0
+        self.tp2_ratio: float = 1.0
+        self.tp3_ratio: float = 1.0
+        self.tp2_enabled: bool = False
+        self.tp3_enabled: bool = False
+        self.tp1_percent: float = 100.0
+        self.tp2_percent: float = 100.0
         self.displacement_min_pips: float = DEFAULT_DISPLACEMENT_MIN_PIPS
         self.displacement_avg_multiplier: float = DEFAULT_DISPLACEMENT_AVG_MULTIPLIER
         self.base_max_body_ratio: float = DEFAULT_BASE_MAX_BODY_RATIO
@@ -173,9 +184,24 @@ class ZoneStrategyEngine:
         manual_sl_distance = float(cfg.get("manual_sl_distance", 0) or 0)
         if manual_sl_distance <= 0:
             raise RuntimeError("Enter a manual stoploss distance greater than 0.")
+        if float(cfg.get("tp1_ratio") or 0) <= 0:
+            raise RuntimeError("TP1 ratio must be greater than 0.")
+        if bool(cfg.get("tp2_enabled", False)) and float(cfg.get("tp2_ratio") or 0) <= 0:
+            raise RuntimeError("TP2 ratio must be greater than 0.")
+        if (
+            bool(cfg.get("tp2_enabled", False))
+            and bool(cfg.get("tp3_enabled", False))
+            and float(cfg.get("tp3_ratio") or 0) <= 0
+        ):
+            raise RuntimeError("TP3 ratio must be greater than 0.")
         instant_m5_start = bool(cfg.get("instant_m5_start", False))
+        # Dev-only shortcut: skip the M15 trigger *and* the M5 zone entirely
+        # and drop straight into the M1 search, so the confirmation +
+        # order-placement logic can be tested in ~1 minute instead of
+        # waiting on a real M15 touch and M5 gap to form first.
+        dev_m1_start = bool(cfg.get("dev_m1_start", False))
         trigger_price = float(cfg.get("trigger_price", 0) or 0)
-        if not instant_m5_start and trigger_price <= 0:
+        if not instant_m5_start and not dev_m1_start and trigger_price <= 0:
             raise RuntimeError("Enter a valid trigger price.")
         trigger_check_cycle_sec = max(
             MIN_TRIGGER_CHECK_CYCLE_SEC,
@@ -194,6 +220,7 @@ class ZoneStrategyEngine:
             self.symbol = str(cfg.get("symbol") or SYMBOL_DEFAULT).strip().upper()
             self.trigger_price = trigger_price
             self.instant_m5_start = instant_m5_start
+            self.dev_m1_start = dev_m1_start
             self.trigger_check_cycle_sec = trigger_check_cycle_sec
             self.manual_sl_distance = manual_sl_distance
             self.sl_distance_in_pips = bool(cfg.get("sl_distance_in_pips", True))
@@ -201,19 +228,26 @@ class ZoneStrategyEngine:
             self.order_kind = order_kind
             self.lot = cfg.get("lot")
             self.risk_percent = cfg.get("risk_percent")
-            self.tp = cfg.get("tp")
-            self.tp_in_pips = bool(cfg.get("tp_in_pips", True))
+            self.tp1_ratio = float(cfg.get("tp1_ratio") or 1.0)
+            self.tp2_ratio = float(cfg.get("tp2_ratio") or 1.0)
+            self.tp3_ratio = float(cfg.get("tp3_ratio") or 1.0)
+            self.tp2_enabled = bool(cfg.get("tp2_enabled", False))
+            self.tp3_enabled = bool(cfg.get("tp3_enabled", False)) and self.tp2_enabled
+            self.tp1_percent = float(cfg.get("tp1_percent") or 100.0)
+            self.tp2_percent = float(cfg.get("tp2_percent") or 100.0)
             self.displacement_min_pips = float(cfg.get("displacement_min_pips") or DEFAULT_DISPLACEMENT_MIN_PIPS)
             self.displacement_avg_multiplier = float(cfg.get("displacement_avg_multiplier") or DEFAULT_DISPLACEMENT_AVG_MULTIPLIER)
             self.base_max_body_ratio = float(cfg.get("base_max_body_ratio") or DEFAULT_BASE_MAX_BODY_RATIO)
 
         started_at = datetime.now().isoformat()
         instant = self.instant_m5_start
+        dev_m1 = self.dev_m1_start
+        phase = "searching_m1_zone" if dev_m1 else ("searching_m5_zone" if instant else "waiting_trigger")
         patch_path(
             self._state_path,
             {
                 "running": True,
-                "phase": "searching_m5_zone" if instant else "waiting_trigger",
+                "phase": phase,
                 "symbol": self.symbol,
                 "trigger_price": self.trigger_price,
                 "trigger_zone_type": self.trigger_zone_type,
@@ -221,16 +255,22 @@ class ZoneStrategyEngine:
                 "m1_target_zone_type": self.m1_target_zone_type,
                 "order_kind": self.order_kind,
                 "instant_m5_start": instant,
+                "dev_m1_start": dev_m1,
                 "trigger_check_cycle_sec": self.trigger_check_cycle_sec,
                 "manual_sl_distance": self.manual_sl_distance,
                 "sl_distance_in_pips": self.sl_distance_in_pips,
                 "liquidity_buffer_pips": self.liquidity_buffer_pips,
                 "lot": self.lot,
                 "risk_percent": self.risk_percent,
-                "tp": self.tp,
-                "tp_in_pips": self.tp_in_pips,
+                "tp1_ratio": self.tp1_ratio,
+                "tp2_ratio": self.tp2_ratio,
+                "tp3_ratio": self.tp3_ratio,
+                "tp2_enabled": self.tp2_enabled,
+                "tp3_enabled": self.tp3_enabled,
+                "tp1_percent": self.tp1_percent,
+                "tp2_percent": self.tp2_percent,
                 "started_at": started_at,
-                "triggered_at": started_at if instant else None,
+                "triggered_at": started_at if (instant or dev_m1) else None,
                 "confirmation_level": None,
                 "m5_zone": None,
                 "m1_zone": None,
@@ -241,7 +281,18 @@ class ZoneStrategyEngine:
                 "last_error": None,
             },
         )
-        if instant:
+        if dev_m1:
+            append_log(
+                "search",
+                f"[INFO] [scalping:{self.side}] armed on {self.symbol} -- DEV 1-min test, "
+                f"skipping the M15 trigger and M5 zone, searching M1 directly.",
+            )
+            with self._lock:
+                self.m1_buffer.clear()
+                self.m5_zone = None
+                self.m1_search_started_at = time.time()
+            start_task(self._search_m1_task_name, self._search_m1_tick, interval_sec=1)
+        elif instant:
             append_log(
                 "search",
                 f"[INFO] [scalping:{self.side}] armed on {self.symbol} -- instant M5 start, "
@@ -706,17 +757,27 @@ class ZoneStrategyEngine:
                 f"(liquidity {sl_liquidity_price:.2f}).",
             )
 
+            # Multi-TP, ratio-based against the SL this engine just computed
+            # above -- same mechanism as manual trade's Advanced Risk panel,
+            # but fed the strategy's own stop instead of a manually typed
+            # Stop Loss Price, since scalping never has one of those.
             open_manual_position(
                 side,
                 lot_size=self.lot,
-                tp=self.tp,
-                sl=sl_price,
                 symbol=self.symbol,
                 order_kind=self.order_kind,
                 limit_price=entry_price if self.order_kind == "LIMIT" else None,
-                tp_in_pips=self.tp_in_pips,
-                sl_in_pips=False,
                 risk_percent=self.risk_percent,
+                advanced=True,
+                sl_price=sl_price,
+                ratio=self.tp1_ratio,
+                tp1_ratio=self.tp1_ratio,
+                tp2_ratio=self.tp2_ratio,
+                tp3_ratio=self.tp3_ratio,
+                tp2_enabled=self.tp2_enabled,
+                tp3_enabled=self.tp3_enabled,
+                tp1_percent=self.tp1_percent,
+                tp2_percent=self.tp2_percent,
             )
         except RuntimeError as exc:
             patch_path(self._state_path, {"phase": "error", "running": False, "last_error": str(exc)})

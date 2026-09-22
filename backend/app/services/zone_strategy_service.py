@@ -88,15 +88,6 @@ CANDLE_BUFFER_MAXLEN = 12
 SL_LIQUIDITY_LOOKBACK_CANDLES = 20
 DEFAULT_TRIGGER_CHECK_CYCLE_SEC = 60.0
 MIN_TRIGGER_CHECK_CYCLE_SEC = 1.0
-# Hard floor on the M1 confirmation: even if a gap-zone pattern matches
-# sooner (a fast market can produce a qualifying 3-candle gap within the
-# very first couple of closes), an order won't actually fire until this many
-# real seconds have passed since the M1 search began -- so "M5 zone found" to
-# "order placed" is never less than a genuine 1 minute, matching what "M1" is
-# supposed to mean here.
-MIN_M1_CONFIRM_SEC = 60.0
-
-
 def _is_bullish(candle: Any) -> bool:
     return _candle_value(candle, 4, "close") > _candle_value(candle, 1, "open")
 
@@ -194,8 +185,6 @@ class ZoneStrategyEngine:
         # here (not just in the patched runtime state) so the M1 search loop
         # can check live price against it every tick.
         self.m5_zone: Optional[dict[str, Any]] = None
-        # Wall-clock time.time() the M1 search started -- see MIN_M1_CONFIRM_SEC.
-        self.m1_search_started_at: Optional[float] = None
         self._last_symbol_error: Optional[str] = None
 
     def start(self, cfg: dict) -> None:
@@ -214,9 +203,8 @@ class ZoneStrategyEngine:
             raise RuntimeError("TP3 ratio must be greater than 0.")
         instant_m5_start = bool(cfg.get("instant_m5_start", False))
         # Dev-only shortcut: skip the M15 trigger *and* the M5 zone entirely
-        # and drop straight into the M1 search, so the confirmation +
-        # order-placement logic can be tested in ~1 minute instead of
-        # waiting on a real M15 touch and M5 gap to form first.
+        # and drop straight into the M1 search, so the order-placement logic
+        # can be tested without waiting for the M15 and M5 stages.
         dev_m1_start = bool(cfg.get("dev_m1_start", False))
         trigger_price = float(cfg.get("trigger_price", 0) or 0)
         if not instant_m5_start and not dev_m1_start and trigger_price <= 0:
@@ -317,7 +305,6 @@ class ZoneStrategyEngine:
             self._seed_buffer(self.m1_buffer, "M1")
             with self._lock:
                 self.m5_zone = None
-                self.m1_search_started_at = time.time()
             start_task(
                 self._search_m1_task_name,
                 self._search_m1_tick,
@@ -618,7 +605,6 @@ class ZoneStrategyEngine:
             self._seed_buffer(self.m1_buffer, "M1")
             with self._lock:
                 self.m5_zone = zone
-                self.m1_search_started_at = time.time()
             patch_path(self._state_path, {"phase": "searching_m1_zone", "m5_zone": zone})
             append_log(
                 "search",
@@ -727,7 +713,6 @@ class ZoneStrategyEngine:
             with self._lock:
                 self.m1_buffer.append(candle)
                 zone = self._detect_gap_zone_locked(self.m1_buffer, self.m1_target_zone_type)
-                started_at = self.m1_search_started_at
                 buffer_full = len(self.m1_buffer) >= CANDLE_BUFFER_MAXLEN
             if zone is None:
                 if buffer_full:
@@ -749,15 +734,6 @@ class ZoneStrategyEngine:
             # since `phase` flips to "placed" right after, and a placed side
             # stops drawing its search boxes).
             patch_path(self._state_path, {"m1_zone": zone})
-            elapsed = time.time() - started_at if started_at else MIN_M1_CONFIRM_SEC
-            if elapsed < MIN_M1_CONFIRM_SEC:
-                # A fast market can produce a qualifying 3-candle gap within the
-                # very first couple of M1 closes -- that's a real pattern, just
-                # too soon to act on. Don't stop the task or place an order yet;
-                # the rolling buffer keeps collecting candles and gets re-checked
-                # (against the next c1/c2/c3 window) on every future tick until
-                # MIN_M1_CONFIRM_SEC has genuinely passed.
-                return
             stop_task(self._search_m1_task_name)
             append_log(
                 "search",

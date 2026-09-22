@@ -193,7 +193,7 @@ function ZoneSideCard({
         className="mt-3 w-full"
         onClick={onDevTest}
         disabled={disabled || devTesting || isActive}
-        title="Dev only -- skips the M15 trigger and M5 zone, searching M1 directly so the confirmation + order logic can be tested in about a minute."
+        title="Dev only -- skips the M15 trigger and M5 zone, searching M1 directly and placing an order as soon as a qualifying M1 zone forms."
       >
         <FlaskConical className="h-4 w-4" /> 1 min dev test
       </AppButton>

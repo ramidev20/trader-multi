@@ -179,6 +179,7 @@ class ZoneStrategyEngine:
         self.tp2_percent: float = 100.0
         self.m5_buffer: deque = deque(maxlen=CANDLE_BUFFER_MAXLEN)
         self.m1_buffer: deque = deque(maxlen=CANDLE_BUFFER_MAXLEN)
+        self._last_processed_candle_time: dict[str, int] = {"M1": 0, "M5": 0}
         self.last_mid: Optional[float] = None
         self.confirmation_level: Optional[float] = None
         # The M5 zone the M1 search is currently confirming against, kept
@@ -587,13 +588,44 @@ class ZoneStrategyEngine:
             buffer.clear()
             for candle in history:
                 buffer.append(candle)
+            self._last_processed_candle_time[timeframe_label] = (
+                int(history[-1]["time"]) if history else 0
+            )
+
+    def _next_search_candle(self, timeframe_label: str) -> Optional[Any]:
+        """Return each newly closed candle once, without a blocking wait.
+
+        The generic wait_for_new_candle helper polls for up to two seconds.
+        Calling it from a one-second repeating task made the M1 search spend
+        much of its time waiting and delayed the signal/order after candle
+        close. The search task already polls once per second, so reading the
+        latest closed bar and comparing its broker timestamp is both quicker
+        and prevents duplicate checks.
+        """
+        if not mt5_available():
+            return _next_candle(self.symbol, timeframe_label)
+        if not self._ensure_symbol_or_log():
+            return None
+        try:
+            rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP[timeframe_label], 1, 1)
+        except Exception:
+            return None
+        if rates is None or len(rates) == 0:
+            return None
+        candle = rates[0]
+        candle_time = int(candle["time"])
+        with self._lock:
+            if candle_time <= self._last_processed_candle_time[timeframe_label]:
+                return None
+            self._last_processed_candle_time[timeframe_label] = candle_time
+        return candle
 
     def _search_m5_tick(self) -> None:
         # See _trigger_tick's comment on why this whole tick runs under
         # MT5_LOCK: the demand and supply engines poll on independent
         # threads, and MetaTrader5's API isn't safe for concurrent calls.
         with MT5_LOCK:
-            candle = _next_candle(self.symbol, "M5")
+            candle = self._next_search_candle("M5")
             if candle is None:
                 return
             with self._lock:
@@ -707,7 +739,7 @@ class ZoneStrategyEngine:
             if price is not None and self._m5_zone_breached(price):
                 self._retreat_after_breach()
                 return
-            candle = _next_candle(self.symbol, "M1")
+            candle = self._next_search_candle("M1")
             if candle is None:
                 return
             with self._lock:
@@ -778,6 +810,11 @@ class ZoneStrategyEngine:
         gap_ref, touch_ref = self._c3_reference_prices(c3, target_zone_type)
 
         if target_zone_type == "demand":
+            # The confirming candle must be bullish, as in the chart pattern:
+            # c3 defines the base, c2 retests it, and bullish c1 confirms the
+            # rejection before a demand entry is sent.
+            if not _is_bullish(c1):
+                return None
             c1_low = _candle_value(c1, 3, "low")
             if c1_low <= gap_ref:
                 return None
@@ -788,6 +825,8 @@ class ZoneStrategyEngine:
             c3_low = _candle_value(c3, 3, "low")
             price_low, price_high = c3_low, gap_ref
         else:
+            if _is_bullish(c1):
+                return None
             c1_high = _candle_value(c1, 2, "high")
             if c1_high >= gap_ref:
                 return None
@@ -847,9 +886,18 @@ class ZoneStrategyEngine:
     def _place_order(self, zone: dict[str, Any]) -> None:
         is_buy = zone["type"] == "demand"
         side = "BUY" if is_buy else "SELL"
+        position_candle_time: Optional[int] = None
         try:
             if mt5_available():
                 _ensure_master_session()
+                try:
+                    current_candle = mt5.copy_rates_from_pos(
+                        self.symbol, TIMEFRAME_MAP["M1"], 0, 1
+                    )
+                    if current_candle is not None and len(current_candle) > 0:
+                        position_candle_time = int(current_candle[0]["time"])
+                except Exception:
+                    position_candle_time = None
             tick = mt5.symbol_info_tick(self.symbol) if mt5_available() else _tick_for(self.symbol)
             if tick is None:
                 raise RuntimeError("No live tick to price the order.")
@@ -900,11 +948,14 @@ class ZoneStrategyEngine:
 
         placed_orders = get("orders", [])
         placed = placed_orders[-1] if placed_orders else {}
+        if position_candle_time is not None:
+            zone["position_candle_time"] = position_candle_time
         patch_path(
             self._state_path,
             {
                 "phase": "placed",
                 "running": False,
+                "m1_zone": zone,
                 "sl_liquidity_price": sl_liquidity_price,
                 # A breached-and-superseded zone from earlier in this run is
                 # no longer relevant once a trade is actually live -- drop it

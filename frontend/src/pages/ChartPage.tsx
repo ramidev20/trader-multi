@@ -104,6 +104,8 @@ export default function ChartPage() {
     >
   >(new Map());
   const rememberedPositionsRef = useRef<Map<string, TradeOrder>>(new Map());
+  const lastPlacedOrderRef = useRef<Record<string, string | number | null>>({});
+  const frozenZoneTimesRef = useRef<Map<string, number>>(new Map());
   // Hover hit-test data for the position tooltip -- kept separate from the
   // chart series themselves (lightweight-charts series aren't queryable for
   // "what price range does this cover", so the plain numbers are cached here
@@ -121,6 +123,7 @@ export default function ChartPage() {
   >([]);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const tooltipTitleRef = useRef<HTMLDivElement | null>(null);
+  const tooltipMetaRef = useRef<HTMLSpanElement | null>(null);
   const tooltipOpenRef = useRef<HTMLSpanElement | null>(null);
   const tooltipTpRowRef = useRef<HTMLDivElement | null>(null);
   const tooltipTpRef = useRef<HTMLSpanElement | null>(null);
@@ -144,6 +147,8 @@ export default function ChartPage() {
     >
   >({});
   const fittedRef = useRef(false);
+  const normalizedCandlesRef = useRef<CandlePoint[]>([]);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
   // Broker (MT5) time vs. this browser's clock, so the per-timeframe
   // countdowns line up with when candles actually close on the server
   // rather than the client's clock -- captured from the currently-forming
@@ -235,23 +240,44 @@ export default function ChartPage() {
 
   useEffect(() => {
     fittedRef.current = false;
+    normalizedCandlesRef.current = [];
     loadChart();
-    const timer = window.setInterval(() => loadChart(true), 2000);
+    const timer = window.setInterval(() => loadChart(true), 1000);
     return () => window.clearInterval(timer);
   }, [timeframe]);
 
   useEffect(() => {
     let cancelled = false;
+    let polling = false;
     async function pollZoneStrategy() {
+      if (polling) return;
+      polling = true;
       try {
         const result = await api.zoneStrategyStatus();
-        if (!cancelled) setZoneStatus(result?.zone_strategy || null);
+        if (!cancelled) {
+          const status = result?.zone_strategy || null;
+          setZoneStatus(status);
+          let newOrderPlaced = false;
+          ["demand", "supply"].forEach((side) => {
+            const order = status?.[side]?.placed_order;
+            const ticket = order?.ticket ?? null;
+            if (ticket != null && lastPlacedOrderRef.current[side] !== ticket) {
+              lastPlacedOrderRef.current[side] = ticket;
+              newOrderPlaced = true;
+            }
+          });
+          // Fetch the broker's confirmed position as soon as the strategy
+          // reports placement instead of waiting for the regular chart poll.
+          if (newOrderPlaced) loadChart(true);
+        }
       } catch {
         // transient network errors are fine to skip silently on a poll loop
+      } finally {
+        polling = false;
       }
     }
     pollZoneStrategy();
-    const timer = window.setInterval(pollZoneStrategy, 2000);
+    const timer = window.setInterval(pollZoneStrategy, 500);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -292,6 +318,21 @@ export default function ChartPage() {
     });
     chartRef.current = chart;
     seriesRef.current = candles;
+    const fitWhenVisible = () => {
+      const container = containerRef.current;
+      if (
+        fittedRef.current ||
+        !normalizedCandlesRef.current.length ||
+        !container?.clientWidth ||
+        !container?.clientHeight
+      ) {
+        return;
+      }
+      chart.timeScale().fitContent();
+      fittedRef.current = true;
+    };
+    resizeObserverRef.current = new ResizeObserver(fitWhenVisible);
+    resizeObserverRef.current.observe(containerRef.current);
 
     // Hover tooltip for open positions -- replaces the dashed TP/SL/entry
     // price lines that used to sit on the chart permanently. Hit-tested
@@ -329,8 +370,11 @@ export default function ChartPage() {
       }
       tooltip.classList.remove("hidden");
       if (tooltipTitleRef.current) {
-        tooltipTitleRef.current.textContent = `${match.side} ${match.lot.toFixed(2)} #${match.ticket}`;
-        tooltipTitleRef.current.style.color = match.side === "LONG" ? "#047857" : "#be123c";
+        tooltipTitleRef.current.textContent = `${match.side === "LONG" ? "BUY" : "SELL"} XAUUSD`;
+        tooltipTitleRef.current.style.color = "#334155";
+      }
+      if (tooltipMetaRef.current) {
+        tooltipMetaRef.current.textContent = `${match.lot.toFixed(2)} lot · #${match.ticket}`;
       }
       if (tooltipOpenRef.current) {
         tooltipOpenRef.current.textContent = match.entryPrice.toFixed(2);
@@ -373,6 +417,8 @@ export default function ChartPage() {
 
     return () => {
       stopWatching();
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
       chart.remove();
       chartRef.current = null;
@@ -478,6 +524,7 @@ export default function ChartPage() {
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
     seriesRef.current.setData(normalizedCandles);
+    normalizedCandlesRef.current = normalizedCandles;
 
     // Remember every open position by ticket instead of only drawing what's
     // currently "open" -- once MT5 reports a position closed (TP/SL hit) it
@@ -594,8 +641,11 @@ export default function ChartPage() {
     });
     positionsHoverRef.current = hoverEntries;
     if (normalizedCandles.length && !fittedRef.current) {
-      chartRef.current?.timeScale().fitContent();
-      fittedRef.current = true;
+      const container = containerRef.current;
+      if (container?.clientWidth && container?.clientHeight) {
+        chartRef.current?.timeScale().fitContent();
+        fittedRef.current = true;
+      }
     }
   }, [snapshot.orders, normalizedCandles, clearNonce]);
 
@@ -613,10 +663,9 @@ export default function ChartPage() {
     // "rectangle" primitive, but a doji's wick is just a vertical line at an
     // exact time/price-range, so one placed at the start time and another at
     // the end time stand in for the box's left/right sides.
-    // `frozenAt` marks a zone as no longer live (breached): drawn grey
-    // instead of green/red, and its box stops at the breach time instead of
-    // stretching to the latest candle like an active search's zone does.
-    function drawZoneBorder(overlay, zone, refPrefix, fillAlpha, frozenAt) {
+    // `frozenAt` stops the box at a fixed candle. Breached zones also pass
+    // `greyedOut`; a zone frozen by a successful position keeps its side color.
+    function drawZoneBorder(overlay, zone, refPrefix, fillAlpha, frozenAt, greyedOut = false) {
       const fillKey = `${refPrefix}Fill`;
       const bottomKey = `${refPrefix}Bottom`;
       const edgesKey = `${refPrefix}Edges`;
@@ -644,12 +693,12 @@ export default function ChartPage() {
       if (startTime === boxEndTime && normalizedCandles.length > 1) {
         startTime = normalizedCandles[normalizedCandles.length - 2].time;
       }
-      const zoneColor = frozenAt
+      const zoneColor = greyedOut
         ? "#94a3b8"
         : zone.type === "demand"
           ? "#16a34a"
           : "#e11d48";
-      const zoneFill = frozenAt
+      const zoneFill = greyedOut
         ? `rgba(148, 163, 184, ${fillAlpha})`
         : zone.type === "demand"
           ? `rgba(22, 163, 74, ${fillAlpha})`
@@ -732,6 +781,24 @@ export default function ChartPage() {
     ["demand", "supply"].forEach((side) => {
       const sideStatus = zoneStatus?.[side];
       const cleared = clearedKeysRef.current;
+      const placedOrder = sideStatus?.placed_order;
+      const placedOrderKey = placedOrder?.ticket ?? placedOrder?.created_at;
+      const frozenZoneKey = `${side}:${placedOrderKey ?? sideStatus?.started_at ?? ""}`;
+      const isPlaced = sideStatus?.phase === "placed";
+      if (isPlaced && endTime && !frozenZoneTimesRef.current.has(frozenZoneKey)) {
+        // Prefer the broker's M1 candle timestamp captured when the order was
+        // sent. The chart's latest candle is a fallback for simulated mode.
+        const orderCandleTime = Number(sideStatus?.m1_zone?.position_candle_time);
+        frozenZoneTimesRef.current.set(
+          frozenZoneKey,
+          Number.isFinite(orderCandleTime) && orderCandleTime > 0
+            ? orderCandleTime
+            : endTime,
+        );
+      }
+      const zoneFrozenAt = isPlaced
+        ? frozenZoneTimesRef.current.get(frozenZoneKey)
+        : undefined;
       let overlay = zoneOverlayRef.current[side];
       if (!overlay) {
         overlay = {
@@ -809,13 +876,13 @@ export default function ChartPage() {
         !cleared.has(`${side}:m5:${sideStatus.m5_zone.formed_at}`)
           ? sideStatus.m5_zone
           : null;
-      drawZoneBorder(overlay, m5Zone, "m5Zone", 0.1);
+      drawZoneBorder(overlay, m5Zone, "m5Zone", 0.1, zoneFrozenAt);
       const m1Zone =
-        searchActive && showM1Zone && sideStatus?.m1_zone &&
+        searchActive && isPlaced && showM1Zone && sideStatus?.m1_zone &&
         !cleared.has(`${side}:m1:${sideStatus.m1_zone.formed_at}`)
           ? sideStatus.m1_zone
           : null;
-      drawZoneBorder(overlay, m1Zone, "m1Zone", 0.22);
+      drawZoneBorder(overlay, m1Zone, "m1Zone", 0.22, zoneFrozenAt);
       // A breached M5 zone stays on the chart -- greyed out, frozen at the
       // moment it broke -- as a record of where the search moved on from,
       // instead of just disappearing. Shown regardless of the current
@@ -831,6 +898,7 @@ export default function ChartPage() {
         "breachedZone",
         0.1,
         breachedZone?.breached_at,
+        true,
       );
     });
   }, [normalizedCandles, zoneStatus, timeframe, clearNonce]);
@@ -897,20 +965,25 @@ export default function ChartPage() {
           move without re-rendering the whole page. */}
       <div
         ref={tooltipRef}
-        className="pointer-events-none absolute right-3 top-3 z-10 hidden min-w-[140px] rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs shadow-sm backdrop-blur-sm"
+        className="pointer-events-none absolute right-3 top-3 z-10 hidden min-w-[230px] rounded-xl border border-slate-200 bg-white/95 p-2.5 text-xs shadow-lg shadow-slate-900/10 backdrop-blur-sm"
       >
-        <div ref={tooltipTitleRef} className="mb-1 text-[11px] font-black" />
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-slate-500">Open</span>
-          <span ref={tooltipOpenRef} className="font-bold text-slate-700" />
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div ref={tooltipTitleRef} className="text-[11px] font-black tracking-wide text-slate-700" />
+          <span ref={tooltipMetaRef} className="rounded-md bg-slate-100 px-1.5 py-1 text-[10px] font-bold text-slate-500" />
         </div>
-        <div ref={tooltipTpRowRef} className="flex items-center justify-between gap-3">
-          <span className="text-slate-500">TP</span>
-          <span ref={tooltipTpRef} className="font-bold text-emerald-600" />
-        </div>
-        <div ref={tooltipSlRowRef} className="flex items-center justify-between gap-3">
-          <span className="text-slate-500">SL</span>
-          <span ref={tooltipSlRef} className="font-bold text-rose-600" />
+        <div className="grid grid-cols-3 gap-1.5">
+          <div className="rounded-lg bg-slate-50 px-2 py-1.5">
+            <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Entry</div>
+            <div ref={tooltipOpenRef} className="mt-0.5 text-[11px] font-black tabular-nums text-slate-800" />
+          </div>
+          <div ref={tooltipTpRowRef} className="rounded-lg bg-slate-50 px-2 py-1.5">
+            <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">TP</div>
+            <div ref={tooltipTpRef} className="mt-0.5 text-[11px] font-black tabular-nums text-emerald-700" />
+          </div>
+          <div ref={tooltipSlRowRef} className="rounded-lg bg-slate-50 px-2 py-1.5">
+            <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">SL</div>
+            <div ref={tooltipSlRef} className="mt-0.5 text-[11px] font-black tabular-nums text-rose-700" />
+          </div>
         </div>
       </div>
       {!snapshot.candles.length && !loading ? (

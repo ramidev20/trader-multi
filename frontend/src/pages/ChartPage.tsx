@@ -172,6 +172,9 @@ export default function ChartPage() {
   const countdownLineRef = useRef<any>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [timeframe, setTimeframe] = useState("M1");
+  const timeframeRef = useRef(timeframe);
+  timeframeRef.current = timeframe;
+  const chartRequestRef = useRef(0);
   const [snapshot, setSnapshot] = useState<ChartSnapshot>({
     candles: [],
     orders: [],
@@ -228,13 +231,18 @@ export default function ChartPage() {
       : null;
 
   async function loadChart(silent = false) {
+    const requestId = ++chartRequestRef.current;
+    const requestedTimeframe = timeframeRef.current;
     if (!silent) setLoading(true);
     try {
       const data = await api.chartData({
         symbol: "XAUUSD",
-        timeframe,
+        timeframe: requestedTimeframe,
         count: 180,
       });
+      // A slow response from the previous timeframe must not replace the
+      // snapshot for the currently selected chart frame.
+      if (requestId !== chartRequestRef.current) return;
       setSnapshot({
         candles: Array.isArray(data?.candles) ? data.candles : [],
         orders: Array.isArray(data?.orders) ? data.orders : [],
@@ -245,13 +253,16 @@ export default function ChartPage() {
       });
       clearBanner();
     } catch (error) {
-      reportError(error);
+      if (requestId === chartRequestRef.current) reportError(error);
     } finally {
-      if (!silent) setLoading(false);
+      if (requestId === chartRequestRef.current && !silent) setLoading(false);
     }
   }
 
   useEffect(() => {
+    // Invalidate any in-flight request from the frame we are leaving before
+    // starting the initial fetch and polling for the newly selected frame.
+    chartRequestRef.current += 1;
     fittedRef.current = false;
     normalizedCandlesRef.current = [];
     loadChart();
@@ -681,17 +692,21 @@ export default function ChartPage() {
       });
       const tpData =
         tpPrice > 0
-          ? [
-              { time: startTime, value: tpPrice },
-              { time: endTime, value: tpPrice },
-            ]
+          ? startTime === endTime
+            ? [{ time: startTime, value: tpPrice }]
+            : [
+                { time: startTime, value: tpPrice },
+                { time: endTime, value: tpPrice },
+              ]
           : [];
       const slData =
         slPrice > 0
-          ? [
-              { time: startTime, value: slPrice },
-              { time: endTime, value: slPrice },
-            ]
+          ? startTime === endTime
+            ? [{ time: startTime, value: slPrice }]
+            : [
+                { time: startTime, value: slPrice },
+                { time: endTime, value: slPrice },
+              ]
           : [];
       overlay.tpZone.setData(tpData);
       overlay.slZone.setData(slData);

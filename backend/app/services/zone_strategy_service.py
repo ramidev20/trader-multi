@@ -327,14 +327,7 @@ class ZoneStrategyEngine:
                 f"[INFO] [scalping:{self.side}] armed on {self.symbol} -- instant M5 start, "
                 f"skipping the M15 trigger.",
             )
-            self._seed_buffer(self.m5_buffer, "M5", preload_count=0)
-            start_task(
-                self._search_m5_task_name,
-                self._search_m5_tick,
-                interval_sec=M5_SEARCH_INTERVAL_SEC,
-                start_time=_next_candle_open(5),
-                **self._end_time_kwargs(),
-            )
+            self._start_m5_search()
         else:
             # Anchor the first check to the next M1 candle open instead of
             # "now" (or the user's chosen start_time, whichever is later) --
@@ -554,27 +547,20 @@ class ZoneStrategyEngine:
                 return
 
             stop_task(self._trigger_task_name)
-            self._seed_buffer(self.m5_buffer, "M5", preload_count=0)
             triggered_at = datetime.now().isoformat()
             patch_path(self._state_path, {"phase": "searching_m5_zone", "triggered_at": triggered_at})
             append_log(
                 "search",
                 f"[INFO] [scalping:{self.side}] M15 confirmed @ {price:.2f}, searching M5.",
             )
-            start_task(
-                self._search_m5_task_name,
-                self._search_m5_tick,
-                interval_sec=M5_SEARCH_INTERVAL_SEC,
-                start_time=_next_candle_open(5),
-                **self._end_time_kwargs(),
-            )
+            self._start_m5_search()
 
     def _seed_buffer(self, buffer: deque, timeframe_label: str, preload_count: int = 2) -> None:
         """Reset `buffer` and set its closed-candle timestamp anchor.
 
-        Search stages can preload the last two closed candles, allowing the
-        next close to be checked immediately, or pass preload_count=0 to wait
-        for three newly closed candles before the first c1/c2/c3 check.
+        M5 can preload its last three closed candles and check them immediately
+        when that stage starts. M1 starts empty so its confirmation still
+        requires three newly closed candles.
 
         The timestamp anchor prevents a candle that closed before this search
         stage started from counting as one of its new candles. MT5 rates arrive
@@ -643,15 +629,25 @@ class ZoneStrategyEngine:
             self._last_processed_candle_time[timeframe_label] = candle_time
         return candle
 
-    def _search_m5_tick(self) -> None:
-        candle = self._next_search_candle("M5")
-        if candle is None:
-            return
+    def _start_m5_search(self) -> None:
+        # Evaluate the latest completed M5 pattern as soon as the M15 trigger
+        # starts this stage. Waiting for the next M5 close adds up to five
+        # minutes even though three completed candles are already available.
+        self._seed_buffer(self.m5_buffer, "M5", preload_count=3)
         with self._lock:
-            self.m5_buffer.append(candle)
             zone = self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
-        if zone is None:
+        if zone is not None:
+            self._accept_m5_zone(zone)
             return
+        start_task(
+            self._search_m5_task_name,
+            self._search_m5_tick,
+            interval_sec=M5_SEARCH_INTERVAL_SEC,
+            start_time=_next_candle_open(5),
+            **self._end_time_kwargs(),
+        )
+
+    def _accept_m5_zone(self, zone: dict[str, Any]) -> None:
         stop_task(self._search_m5_task_name)
         self._seed_buffer(self.m1_buffer, "M1", preload_count=0)
         with self._lock:
@@ -668,6 +664,17 @@ class ZoneStrategyEngine:
             start_time=_next_candle_open(1),
             **self._end_time_kwargs(),
         )
+
+    def _search_m5_tick(self) -> None:
+        candle = self._next_search_candle("M5")
+        if candle is None:
+            return
+        with self._lock:
+            self.m5_buffer.append(candle)
+            zone = self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
+        if zone is None:
+            return
+        self._accept_m5_zone(zone)
 
     def _m5_zone_breached(self, price: float) -> bool:
         """Has price traded through the M5 zone while waiting on M1?
@@ -723,7 +730,7 @@ class ZoneStrategyEngine:
             if zone
             else None
         )
-        self._seed_buffer(self.m5_buffer, "M5", preload_count=0)
+        self._seed_buffer(self.m5_buffer, "M5", preload_count=3)
         patch_path(
             self._state_path,
             {
@@ -743,13 +750,7 @@ class ZoneStrategyEngine:
                     f"[WARNING] [scalping:{self.side}] M5 zone breached (price past {edge} "
                     f"{zone[f'price_{edge}']:.2f}); searching a new M5 zone.",
                 )
-        start_task(
-            self._search_m5_task_name,
-            self._search_m5_tick,
-            interval_sec=M5_SEARCH_INTERVAL_SEC,
-            start_time=_next_candle_open(5),
-            **self._end_time_kwargs(),
-        )
+        self._start_m5_search()
 
     def _search_m1_tick(self) -> None:
         price = self._current_price()

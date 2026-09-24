@@ -83,6 +83,9 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
   const [spreadPips, setSpreadPips] = useState(
     () => savedTradeForm.spreadPips ?? "0",
   );
+  const [dailyRiskPercent, setDailyRiskPercent] = useState(
+    () => savedTradeForm.dailyRiskPercent ?? "2",
+  );
   const [searchPips, setSearchPips] = useState(
     () => savedTradeForm.searchPips ?? "10",
   );
@@ -145,6 +148,66 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
   // and to every remote receiver). A ref is read/written immediately, so it
   // closes that gap regardless of render timing.
   const submittingRef = useRef(false);
+  const dailyRiskNoticeRef = useRef("");
+  useEffect(() => {
+    let active = true;
+    api.settings()
+      .then((settings) => {
+        if (active) setDailyRiskPercent(String(settings?.daily_risk_percent ?? 2));
+      })
+      .catch((error) => showBanner(error?.message || String(error), "error", error?.code));
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const risk = runtime?.daily_risk;
+    const hitLogins = Array.isArray(risk?.hit_accounts) ? risk.hit_accounts : [];
+    const noticeKey = `${risk?.day || ""}:${hitLogins.join(",")}`;
+    if (risk?.hit && noticeKey !== dailyRiskNoticeRef.current) {
+      dailyRiskNoticeRef.current = noticeKey;
+      if (risk.master_hit) setSearchArmed(false);
+      const hitNames = (risk.accounts || [])
+        .filter((account) => account.hit)
+        .map((account) => `${account.name} (${account.login})`);
+      showBanner(
+        risk.master_hit
+          ? `Daily risk limit hit on the master account (${Number(risk.loss_percent || 0).toFixed(2)}%). Searches stopped and all open positions are being closed.`
+          : `Daily risk limit hit for ${hitNames.join(", ") || "a subaccount"}. Those accounts are no longer receiving trades and their positions are being closed.`,
+        "warning",
+      );
+      if (risk.master_hit && listReceivers().some((receiver) => receiver.enabled)) {
+        sendRemoteCommand("daily_risk_stop", {})
+          .then(({ results }) => {
+            const failed = results.filter((result) => result.status === "error");
+            if (failed.length) {
+              showBanner(
+                `Daily risk was reached locally, but ${failed.length} remote receiver(s) could not be stopped and closed: ${failed.map((item) => `${item.label} (${item.message})`).join("; ")}`,
+                "error",
+              );
+            }
+          })
+          .catch((error) => showBanner(error?.message || String(error), "error", error?.code));
+      }
+    } else if (!risk?.hit) {
+      dailyRiskNoticeRef.current = "";
+    }
+  }, [runtime?.daily_risk]);
+
+  async function saveDailyRiskPercent() {
+    const value = Number(dailyRiskPercent);
+    if (!Number.isFinite(value) || value < 0 || value > 100) {
+      showBanner("Daily Risk must be between 0 and 100 percent.", "error");
+      return;
+    }
+    try {
+      await api.saveDailyRisk(value);
+      setDailyRiskPercent(String(value));
+    } catch (error) {
+      reportError(error);
+    }
+  }
   // Minute index the search was armed in. The trigger is the wall clock, the
   // same source the countdown uses, so the two can never disagree -- and it does
   // not depend on how the backend stamps candle times.
@@ -245,6 +308,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
           tp,
           sl,
           spreadPips,
+          dailyRiskPercent,
           searchPips,
           searchEnabled,
           searchArmed,
@@ -274,6 +338,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     tp,
     sl,
     spreadPips,
+    dailyRiskPercent,
     searchPips,
     searchEnabled,
     searchArmed,
@@ -304,6 +369,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
             tp,
             sl,
             spreadPips,
+            dailyRiskPercent,
             searchPips,
             searchEnabled,
             searchArmed,
@@ -342,6 +408,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     tp,
     sl,
     spreadPips,
+    dailyRiskPercent,
     searchPips,
     searchEnabled,
     searchArmed,
@@ -717,6 +784,10 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
   async function openPosition(orderSide, options = {}) {
     const { prepare = null } = options;
     if (submittingRef.current) return;
+    if (runtime?.daily_risk?.master_hit) {
+      showBanner("Daily risk limit reached. New trades are blocked until the next day.", "warning");
+      return;
+    }
     submittingRef.current = true;
     setSubmitting(true);
     let placed = false;
@@ -835,6 +906,10 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
       setSearchArmed(false);
       return;
     }
+    if (runtime?.daily_risk?.master_hit) {
+      showBanner("Daily risk limit reached. New searches are blocked until the next day.", "warning");
+      return;
+    }
     clearBanner();
     if (orderKind === "LIMIT") {
       // Must be a fresh read: a cached candle from before the last fire is
@@ -948,6 +1023,20 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
               ))}
             </div>
             <div className="flex items-center gap-2">
+              <label className="flex w-28 flex-col gap-0.5" title="0 disables the daily loss limit">
+                <span className="text-[9px] font-black uppercase leading-3 tracking-wide text-slate-500">Daily Risk (%)</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  inputMode="decimal"
+                  value={dailyRiskPercent}
+                  onChange={(event) => setDailyRiskPercent(decimalInput(event.target.value))}
+                  onBlur={saveDailyRiskPercent}
+                  className="h-7 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900 outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
+                />
+              </label>
               <button
                 type="button"
                 onClick={() => setCloseConfirmOpen(true)}
@@ -1355,8 +1444,8 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
                 </table>
               </TableFrame>
             ) : positionsTab === "scalping" ? (
-              <Card className="flex min-h-0 flex-1 flex-col">
-                <div className="mt-4 min-h-0 flex-1">
+              <Card className="w-full flex-none !p-3">
+                <div className="min-h-max">
                   <ScalpingPage />
                 </div>
               </Card>

@@ -17,6 +17,16 @@ _state: dict[str, Any] = {
         "auto_close_at": None,
         "scheduled_at": None,
     },
+    "daily_risk": {
+        "enabled": False,
+        "hit": False,
+        "verified": False,
+        "limit_percent": 0.0,
+        "day": None,
+        "loss_percent": 0.0,
+        "loss_amount": 0.0,
+        "start_balance": None,
+    },
     "strategy": {
         "running": False,
         "mode": None,

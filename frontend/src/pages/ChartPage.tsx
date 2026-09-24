@@ -33,6 +33,8 @@ type TradeOrder = {
   created_at?: string;
   opened_at?: string | number;
   status?: string;
+  close_reason?: string;
+  close_price?: number;
 };
 
 type ChartSnapshot = {
@@ -118,6 +120,8 @@ export default function ChartPage() {
       entryPrice: number;
       tpPrice: number;
       slPrice: number;
+      closeReason: string;
+      closePrice: number;
       startTime: number;
     }>
   >([]);
@@ -129,6 +133,7 @@ export default function ChartPage() {
   const tooltipTpRef = useRef<HTMLSpanElement | null>(null);
   const tooltipSlRowRef = useRef<HTMLDivElement | null>(null);
   const tooltipSlRef = useRef<HTMLSpanElement | null>(null);
+  const tooltipResultRef = useRef<HTMLDivElement | null>(null);
   const zoneOverlayRef = useRef<
     Record<
       string,
@@ -352,7 +357,7 @@ export default function ChartPage() {
         return;
       }
       const match = positionsHoverRef.current.find((position) => {
-        const values = [position.entryPrice, position.tpPrice, position.slPrice].filter(
+        const values = [position.entryPrice, position.tpPrice, position.slPrice, position.closePrice].filter(
           (value) => value > 0,
         );
         if (!values.length) return false;
@@ -390,6 +395,14 @@ export default function ChartPage() {
       }
       if (tooltipSlRef.current) {
         tooltipSlRef.current.textContent = match.slPrice > 0 ? match.slPrice.toFixed(2) : "-";
+      }
+      if (tooltipResultRef.current) {
+        const hasResult = Boolean(match.closeReason);
+        tooltipResultRef.current.classList.toggle("hidden", !hasResult);
+        tooltipResultRef.current.textContent = hasResult
+          ? `${match.closeReason}${match.closePrice > 0 ? ` @ ${match.closePrice.toFixed(2)}` : ""}`
+          : "";
+        tooltipResultRef.current.className = `mt-1.5 rounded-lg px-2 py-1.5 text-[11px] font-black ${match.closeReason === "TP hit" ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}${hasResult ? "" : " hidden"}`;
       }
     }
     chart.subscribeCrosshairMove(handleCrosshairMove);
@@ -534,11 +547,18 @@ export default function ChartPage() {
     // known values stay frozen until the ticket is manually cleared.
     snapshot.orders.forEach((order) => {
       if (
-        String(order.status || "").toLowerCase() === "open" &&
+        (String(order.status || "").toLowerCase() === "open" || order.close_reason) &&
         String(order.order_kind || "").toUpperCase() === "MARKET" &&
         Number(order.price ?? order.entry ?? 0) > 0
       ) {
-        rememberedPositionsRef.current.set(String(order.ticket), order);
+        const ticket = String(order.ticket);
+        const prior = rememberedPositionsRef.current.get(ticket);
+        rememberedPositionsRef.current.set(ticket, {
+          ...prior,
+          ...order,
+          sl: Number(order.sl) > 0 ? order.sl : prior?.sl,
+          tp: Number(order.tp) > 0 ? order.tp : prior?.tp,
+        });
       }
     });
     // Candles always render; only the overlays are conditional -- excluding
@@ -582,6 +602,8 @@ export default function ChartPage() {
         entryPrice,
         tpPrice,
         slPrice,
+        closeReason: String(position.close_reason || ""),
+        closePrice: Number(position.close_price || 0),
         startTime,
       });
 
@@ -589,6 +611,7 @@ export default function ChartPage() {
       if (!overlay) {
         overlay = {
           tpZone: chartRef.current.addSeries(BaselineSeries, {
+            autoscaleInfoProvider: () => null,
             baseValue: { type: "price", price: entryPrice },
             topLineColor: "#16a34a",
             topFillColor1: "rgba(34, 197, 94, 0.22)",
@@ -601,6 +624,7 @@ export default function ChartPage() {
             lastValueVisible: false,
           }),
           slZone: chartRef.current.addSeries(BaselineSeries, {
+            autoscaleInfoProvider: () => null,
             baseValue: { type: "price", price: entryPrice },
             topLineColor: "#e11d48",
             topFillColor1: "rgba(225, 29, 72, 0.20)",
@@ -705,6 +729,7 @@ export default function ChartPage() {
           : `rgba(225, 29, 72, ${fillAlpha})`;
 
       const fillOptions = {
+        autoscaleInfoProvider: () => null,
         baseValue: { type: "price", price: zone.price_low },
         topLineColor: zoneColor,
         topFillColor1: zoneFill,
@@ -728,6 +753,7 @@ export default function ChartPage() {
       ]);
 
       const bottomOptions = {
+        autoscaleInfoProvider: () => null,
         color: zoneColor,
         lineWidth: 1,
         lineStyle: 0,
@@ -746,6 +772,7 @@ export default function ChartPage() {
       ]);
 
       const edgeOptions = {
+        autoscaleInfoProvider: () => null,
         upColor: "rgba(0, 0, 0, 0)",
         downColor: "rgba(0, 0, 0, 0)",
         borderVisible: false,
@@ -985,6 +1012,7 @@ export default function ChartPage() {
             <div ref={tooltipSlRef} className="mt-0.5 text-[11px] font-black tabular-nums text-rose-700" />
           </div>
         </div>
+        <div ref={tooltipResultRef} className="mt-1.5 hidden rounded-lg px-2 py-1.5 text-[11px] font-black" />
       </div>
       {!snapshot.candles.length && !loading ? (
         <div className="absolute inset-0 flex items-center justify-center rounded-xl border border-dashed border-slate-200 bg-white/60 backdrop-blur-[1px]">

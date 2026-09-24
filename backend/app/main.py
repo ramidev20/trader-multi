@@ -32,7 +32,7 @@ from .services.strategy_service import (
     calculate_manual_lot,
     _tick_for,
 )
-from .services.task_manager import set_runtime_logger
+from .services.task_manager import set_runtime_logger, start_task, stop_task
 from .services.zone_strategy_service import start_zone_strategy_system, stop_zone_strategy_system
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -50,6 +50,7 @@ _remote_command_cache: dict[str, dict[str, Any]] = {}
 # cache and run a second time, opening a second real order.
 _remote_command_inflight: dict[str, asyncio.Event] = {}
 _remote_command_lock = RLock()
+_daily_risk_lock = RLock()
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "trading_accounts": [],
@@ -75,6 +76,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "theme_mode": "LIGHT",
     "ui_zoom_percent": 100,
+    "daily_risk_percent": 2.0,
     "notification_settings": {
         "enabled": True,
         "show_warnings": True,
@@ -90,6 +92,10 @@ class ThemeUpdate(BaseModel):
 
 class ZoomUpdate(BaseModel):
     ui_zoom_percent: int
+
+
+class DailyRiskUpdate(BaseModel):
+    daily_risk_percent: float
 
 
 class SearchConfigUpdate(BaseModel):
@@ -183,6 +189,10 @@ def _execute_remote_command(action_name: str, data: dict[str, Any]) -> dict[str,
         return start_strategy(StrategyStartPayload(**data))
     if action_name == "stop_search":
         return stop_strategy()
+    if action_name == "daily_risk_stop":
+        stop_strategy()
+        stop_zone_strategy(ZoneStrategyStopPayload())
+        return close_positions()
     raise ValueError(f"Unsupported remote action: {action_name}")
 
 
@@ -262,6 +272,7 @@ app = FastAPI(title="MT5 Trader API", version="0.3.0")
 @app.on_event("shutdown")
 def stop_account_adapters_on_backend_shutdown() -> None:
     """Adapters are explicit Dashboard connections, never a backend startup task."""
+    stop_task("daily_risk_guard")
     disconnect_all()
 
 app.add_middleware(
@@ -318,6 +329,10 @@ def _load_config() -> dict[str, Any]:
         "show_info": bool(config["notification_settings"].get("show_info", False)),
     }
     config["ui_zoom_percent"] = min(150, max(70, int(config.get("ui_zoom_percent", 100) or 100)))
+    try:
+        config["daily_risk_percent"] = min(100.0, max(0.0, float(config.get("daily_risk_percent", 0) or 0)))
+    except (TypeError, ValueError):
+        config["daily_risk_percent"] = 0.0
     for unused_key in (
         "time",
         "order_delay",
@@ -349,6 +364,13 @@ def _ensure_config_file() -> None:
 @app.on_event("startup")
 def ensure_config_on_startup() -> None:
     _ensure_config_file()
+    start_task(
+        "daily_risk_guard",
+        _daily_risk_tick,
+        interval_sec=5,
+        start_time=datetime.now(),
+        log_schedule=False,
+    )
 
 
 def _refresh_bootstrap_cache() -> dict[str, Any]:
@@ -846,6 +868,26 @@ def set_ui_zoom(payload: ZoomUpdate) -> dict[str, str | int]:
     return {"status": "ok", "ui_zoom_percent": zoom}
 
 
+@app.patch("/settings/daily-risk")
+def set_daily_risk(payload: DailyRiskUpdate) -> dict[str, Any]:
+    value = float(payload.daily_risk_percent)
+    if not 0 <= value <= 100:
+        raise HTTPException(status_code=400, detail="Daily risk must be between 0 and 100 percent.")
+    config = _load_config()
+    config["daily_risk_percent"] = value
+    _save_config(config)
+    _refresh_bootstrap_cache()
+    current_risk = _daily_risk_state()
+    state_patch("daily_risk", {
+        **current_risk,
+        "enabled": value > 0,
+        "hit": bool(current_risk.get("hit")) if value > 0 else False,
+        "limit_percent": value,
+    })
+    risk = _refresh_master_daily_risk() if value > 0 else _daily_risk_state()
+    return {"status": "ok", "daily_risk_percent": value, "daily_risk": risk}
+
+
 @app.patch("/settings/notifications")
 def set_notification_settings(payload: NotificationSettingsUpdate) -> dict[str, str]:
     config = _load_config()
@@ -943,6 +985,142 @@ def account_sessions() -> dict[str, Any]:
     return {"status": "ok", "sessions": list_sessions(config.get("trading_accounts", []))}
 
 
+def _daily_risk_state() -> dict[str, Any]:
+    current = state_get("daily_risk", {})
+    return current if isinstance(current, dict) else {}
+
+
+def _refresh_master_daily_risk() -> dict[str, Any]:
+    """Fetch only the master account for the daily risk guard."""
+    config = _load_config()
+    master_login = _safe_int(config.get("master_account_login"))
+    if master_login <= 0:
+        master_account = next((a for a in config.get("trading_accounts", []) if str(a.get("role", "")).lower() == "master"), {})
+        master_login = _safe_int(master_account.get("user"))
+    if master_login <= 0:
+        return _apply_daily_risk(config, [])
+    result = submit_adapter_command(master_login, "snapshot", {}, timeout_sec=5.0)
+    account_data = result.get("account", {}) if result.get("status") == "ok" else {}
+    if not isinstance(account_data, dict) or not account_data:
+        return _apply_daily_risk(config, [])
+    master_snapshot = {
+        "login": master_login,
+        "balance": float(account_data.get("balance", 0) or 0),
+        "equity": float(account_data.get("equity", 0) or 0),
+        "realized_today": float(account_data.get("realized_today", 0) or 0),
+        "daily_history_available": bool(account_data.get("daily_history_available", False)),
+    }
+    return _apply_daily_risk(config, [master_snapshot])
+
+
+def _apply_daily_risk(config: dict[str, Any], snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Use the master account as the source of truth for copied-trade risk."""
+    limit_percent = float(config.get("daily_risk_percent", 0) or 0)
+    today = datetime.now().date().isoformat()
+    master_login = _safe_int(config.get("master_account_login"))
+    with _daily_risk_lock:
+        config = _load_config()
+        if master_login <= 0:
+            master_account = next((a for a in config.get("trading_accounts", []) if str(a.get("role", "")).lower() == "master"), {})
+            master_login = _safe_int(master_account.get("user"))
+        limit_percent = float(config.get("daily_risk_percent", 0) or 0)
+        master_hit = str(config.get("daily_risk_hit_day", "") or "") == today
+        if limit_percent <= 0:
+            status = {
+                "enabled": False,
+                "hit": False,
+                "verified": False,
+                "limit_percent": 0.0,
+                "day": today,
+                "loss_percent": 0.0,
+                "loss_amount": 0.0,
+                "start_balance": None,
+                "master_hit": False,
+                "accounts": [],
+                "hit_accounts": [],
+            }
+            state_patch("daily_risk", status)
+            return status
+
+        master_account = next((a for a in config.get("trading_accounts", []) if _safe_int(a.get("user")) == master_login), {})
+        master = next((r for r in snapshots if _safe_int(r.get("login")) == master_login), None)
+        verified = bool(master and master.get("daily_history_available", False))
+        balance = float(master.get("balance", 0) or 0) if master else 0.0
+        equity = float(master.get("equity", balance) or balance) if master else 0.0
+        realized = float(master.get("realized_today", 0) or 0) if master else 0.0
+        start_balance = max(0.0, balance - realized) if verified else None
+        loss_amount = max(0.0, float(start_balance or 0) - equity) if verified else 0.0
+        loss_percent = loss_amount / start_balance * 100.0 if start_balance else 0.0
+        newly_hit = bool(verified and start_balance and loss_percent >= limit_percent and not master_hit)
+        master_hit = master_hit or newly_hit
+        if newly_hit:
+            config["daily_risk_hit_day"] = today
+            _save_config(config)
+            append_log("search", f"[WARNING] [daily-risk] Master account {master_account.get('username') or master_login} hit its {limit_percent:.2f}% daily risk limit ({loss_percent:.2f}%). Searches stopped and connected account positions are being closed.")
+            try:
+                stop_strategy_system()
+                stop_zone_strategy_system()
+                close_all_positions()
+            except Exception as exc:
+                append_log("search", f"[ERROR] [daily-risk] Automatic stop/close failed: {exc}")
+        master_status = {
+            "login": master_login,
+            "name": master_account.get("username") or str(master_login or "Master"),
+            "is_master": True,
+            "verified": verified,
+            "hit": master_hit,
+            "risk_percent": float(master_account.get("risk_percent", 0) or 0),
+            "limit_percent": limit_percent,
+            "loss_percent": loss_percent,
+            "loss_amount": loss_amount,
+            "start_balance": start_balance,
+        }
+        status = {
+            "enabled": True,
+            "hit": master_hit,
+            "master_hit": master_hit,
+            "verified": verified,
+            "limit_percent": limit_percent,
+            "day": today,
+            "loss_percent": loss_percent,
+            "loss_amount": loss_amount,
+            "start_balance": start_balance,
+            "accounts": [master_status],
+            "hit_accounts": [master_login] if master_hit and master_login else [],
+        }
+        state_patch("daily_risk", status)
+        return status
+
+
+def _daily_risk_tick() -> None:
+    config = _load_config()
+    if float(config.get("daily_risk_percent", 0) or 0) <= 0:
+        return
+    try:
+        _refresh_master_daily_risk()
+    except Exception as exc:
+        append_log("search", f"[WARNING] [daily-risk] Account check unavailable: {exc}")
+
+
+def _ensure_daily_risk_allows_activity() -> None:
+    if float(_load_config().get("daily_risk_percent", 0) or 0) <= 0:
+        return
+    risk = _refresh_master_daily_risk()
+    if not risk.get("verified"):
+        raise HTTPException(
+            status_code=409,
+            detail="Daily risk cannot be verified from the connected master account right now. Trading is paused until verification succeeds.",
+        )
+    if risk.get("master_hit"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Master account daily risk limit reached ({float(risk.get('loss_percent', 0) or 0):.2f}% loss). "
+                "New trades and searches are blocked until the next day."
+            ),
+        )
+
+
 @app.get("/accounts/snapshots")
 def account_snapshots() -> dict[str, Any]:
     """Read fresh account values through the process that owns each MT5 session."""
@@ -978,12 +1156,15 @@ def account_snapshots() -> dict[str, Any]:
             "balance": float(account_data.get("balance", 0.0) or 0.0),
             "equity": float(account_data.get("equity", 0.0) or 0.0),
             "floating_pnl": floating_pnl,
+            "realized_today": float(account_data.get("realized_today", 0.0) or 0.0),
+            "daily_history_available": bool(account_data.get("daily_history_available", False)),
             "latency": account_data.get("latency"),
             "algo_enabled": account_data.get("algo_enabled"),
         })
+    daily_risk = _apply_daily_risk(config, snapshots)
     if not snapshots and not errors:
         errors.append("No connected accounts available for snapshots.")
-    return {"status": "ok", "snapshots": snapshots, "errors": errors}
+    return {"status": "ok", "snapshots": snapshots, "errors": errors, "daily_risk": daily_risk}
 
 
 @app.get("/runtime")
@@ -1136,6 +1317,7 @@ def trade_history() -> dict[str, Any]:
 @app.post("/strategy/start")
 def start_strategy(payload: StrategyStartPayload) -> dict[str, Any]:
     _require_master_connected()
+    _ensure_daily_risk_allows_activity()
     config = _load_config()
     search_cfg = dict(config.get("search_config", {}))
     start_dt = _parse_dt(payload.start_time)
@@ -1163,6 +1345,7 @@ def stop_strategy() -> dict[str, Any]:
 @app.post("/zone-strategy/start")
 def start_zone_strategy(payload: ZoneStrategyStartPayload) -> dict[str, Any]:
     _require_master_connected()
+    _ensure_daily_risk_allows_activity()
     cfg = payload.model_dump()
     cfg["start_time"] = _parse_dt(payload.start_time)
     cfg["end_time"] = _parse_dt(payload.end_time)
@@ -1204,6 +1387,7 @@ def remove_liquidity_level(level_id: int) -> dict[str, Any]:
 
 @app.post("/positions/open")
 def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
+    _ensure_daily_risk_allows_activity()
     config = _load_config()
     ready, _detail, master_login = master_adapter_ready(config)
     if not is_dev_mode():

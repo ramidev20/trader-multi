@@ -34,7 +34,6 @@ const SIDE_META = {
   },
 };
 
-const DEFAULT_CHECK_CYCLE_SEC = "60";
 
 function SwitchToggle({ checked, onChange, disabled = false }) {
   return (
@@ -74,8 +73,6 @@ function ZoneSideCard({
   onPriceChange,
   instantM5,
   onInstantM5Change,
-  checkCycleSec,
-  onCheckCycleChange,
   phase,
   isActive,
   confirmationLevel,
@@ -157,19 +154,13 @@ function ZoneSideCard({
       {!instantM5 ? (
         <div className="mt-2">
           <Field
-            label="Check cycle (sec)"
+            label="M15 trigger check (sec)"
             type="text"
-            inputMode="decimal"
-            value={checkCycleSec}
-            onChange={(event) =>
-              onCheckCycleChange(decimalInput(event.target.value))
-            }
-            disabled={disabled || isActive}
-            placeholder="e.g. 60"
+            value="60"
+            disabled
           />
           <p className="mt-1 text-[11px] leading-4 text-slate-400">
-            How often (1 min or less) to check whether price has hit the M15
-            amount. Only applies to this M15 search.
+            Checks for the M15 trigger once every minute.
           </p>
         </div>
       ) : null}
@@ -210,12 +201,6 @@ export default function ScalpingPage() {
   );
   const [supplyInstantM5, setSupplyInstantM5] = useState(
     saved.supplyInstantM5 ?? false,
-  );
-  const [demandCheckCycleSec, setDemandCheckCycleSec] = useState(
-    saved.demandCheckCycleSec ?? DEFAULT_CHECK_CYCLE_SEC,
-  );
-  const [supplyCheckCycleSec, setSupplyCheckCycleSec] = useState(
-    saved.supplyCheckCycleSec ?? DEFAULT_CHECK_CYCLE_SEC,
   );
   const [minSlPips, setMinSlPips] = useState(saved.minSlPips ?? "");
   const [liquiditySlPips, setLiquiditySlPips] = useState(
@@ -267,8 +252,6 @@ export default function ScalpingPage() {
       supplyPrice,
       demandInstantM5,
       supplyInstantM5,
-      demandCheckCycleSec,
-      supplyCheckCycleSec,
       minSlPips,
       liquiditySlPips,
       orderKind,
@@ -292,8 +275,6 @@ export default function ScalpingPage() {
     supplyPrice,
     demandInstantM5,
     supplyInstantM5,
-    demandCheckCycleSec,
-    supplyCheckCycleSec,
     minSlPips,
     liquiditySlPips,
     orderKind,
@@ -374,7 +355,7 @@ export default function ScalpingPage() {
     setOpenPicker(isOpen ? pickerKey : null);
   }
 
-  function buildPayload(side, price, instantM5, checkCycleSec, devM1 = false) {
+  function buildPayload(side, price, instantM5, devM1 = false) {
     // Dev test is a "right now" shortcut -- it never carries the scheduled
     // start/end window from the main form.
     const startIso = devM1 ? null : combineDateTime(startTime);
@@ -391,7 +372,6 @@ export default function ScalpingPage() {
       risk_percent: Number(riskPercent || 0),
       instant_m5_start: Boolean(instantM5) && !devM1,
       dev_m1_start: Boolean(devM1),
-      trigger_check_cycle_sec: Number(checkCycleSec || DEFAULT_CHECK_CYCLE_SEC),
       tp1_ratio: Number(tp1Ratio || 0),
       tp2_ratio: Number(tp2Ratio || 0),
       tp2_enabled: tp2Enabled,
@@ -426,14 +406,12 @@ export default function ScalpingPage() {
         price: demandPrice,
         active: demandActive,
         instantM5: demandInstantM5,
-        checkCycleSec: demandCheckCycleSec,
       },
       {
         side: "supply",
         price: supplyPrice,
         active: supplyActive,
         instantM5: supplyInstantM5,
-        checkCycleSec: supplyCheckCycleSec,
       },
     ].filter(
       (candidate) =>
@@ -458,9 +436,9 @@ export default function ScalpingPage() {
     setSubmitting(true);
     try {
       const results = await Promise.allSettled(
-        candidates.map(({ side, price, instantM5, checkCycleSec }) =>
+        candidates.map(({ side, price, instantM5 }) =>
           api.startZoneStrategy(
-            buildPayload(side, price, instantM5, checkCycleSec),
+            buildPayload(side, price, instantM5),
           ),
         ),
       );
@@ -500,10 +478,8 @@ export default function ScalpingPage() {
     }
     setDevTestingSide(side);
     try {
-      const checkCycleSec =
-        side === "demand" ? demandCheckCycleSec : supplyCheckCycleSec;
       const result = await api.startZoneStrategy(
-        buildPayload(side, "", false, checkCycleSec, true),
+        buildPayload(side, "", false, true),
       );
       setStatus({
         demand: result?.zone_strategy?.demand || null,
@@ -532,18 +508,31 @@ export default function ScalpingPage() {
     }
   }
 
+  async function handleStopAll() {
+    setStoppingSide("all");
+    try {
+      const result = await api.stopZoneStrategy();
+      setStatus({
+        demand: result?.zone_strategy?.demand || null,
+        supply: result?.zone_strategy?.supply || null,
+      });
+      clearBanner();
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setStoppingSide(null);
+    }
+  }
+
   return (
     <LocalizationProvider dateAdapter={AdapterDayjs}>
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h3 className="m-0 text-lg font-black text-slate-950">Scalping</h3>
-        </div>
+    <div className="flex min-h-max flex-none flex-col gap-3">
+      <div className="flex flex-wrap justify-end gap-2">
         <AppButton
           variant="blue"
           className="shrink-0"
           onClick={handleStart}
-          disabled={submitting || (demandActive && supplyActive)}
+          disabled={submitting || Boolean(stoppingSide) || (demandActive && supplyActive)}
         >
           {demandActive && supplyActive ? (
             "Start"
@@ -556,6 +545,15 @@ export default function ScalpingPage() {
             "Start"
           )}
         </AppButton>
+        <AppButton
+          variant="red"
+          className="shrink-0"
+          onClick={handleStopAll}
+          disabled={!anyActive || submitting || Boolean(stoppingSide)}
+        >
+          <StopCircle className="h-4 w-4" />
+          {stoppingSide === "all" ? "Stopping..." : "Stop"}
+        </AppButton>
       </div>
 
       {/* Demand, Supply, and Settings side by side on a wide screen (like the
@@ -563,15 +561,13 @@ export default function ScalpingPage() {
           column -- Settings drops onto its own full-width row on medium
           screens where three columns would get cramped, and only sits in a
           narrow third column once xl has the room for it. */}
-      <div className="grid flex-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         <ZoneSideCard
           side="demand"
           price={demandPrice}
           onPriceChange={setDemandPrice}
           instantM5={demandInstantM5}
           onInstantM5Change={setDemandInstantM5}
-          checkCycleSec={demandCheckCycleSec}
-          onCheckCycleChange={setDemandCheckCycleSec}
           phase={demandPhase}
           isActive={demandActive}
           confirmationLevel={status.demand?.confirmation_level}
@@ -588,8 +584,6 @@ export default function ScalpingPage() {
           onPriceChange={setSupplyPrice}
           instantM5={supplyInstantM5}
           onInstantM5Change={setSupplyInstantM5}
-          checkCycleSec={supplyCheckCycleSec}
-          onCheckCycleChange={setSupplyCheckCycleSec}
           phase={supplyPhase}
           isActive={supplyActive}
           confirmationLevel={status.supply?.confirmation_level}
@@ -651,7 +645,7 @@ export default function ScalpingPage() {
           </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-2 md:col-span-2 xl:col-span-3">
+        <div className="grid gap-3 lg:grid-cols-2 md:col-span-2 xl:col-span-3">
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-black uppercase tracking-wide text-slate-500">

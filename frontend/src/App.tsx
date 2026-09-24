@@ -414,7 +414,7 @@ export default function App() {
           or nothing to show instead of filling the remaining viewport. */}
       <main className="app-main flex min-h-screen min-w-0 flex-col lg:min-h-0 lg:flex-1">
         <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
-        <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-6 lg:px-5" style={styles.pageContent}>
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-6 pt-2 lg:px-5" style={styles.pageContent}>
           <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }} className="flex min-h-0 flex-1 flex-col">
             {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock MT5 data unless a live backend session is available.</div> : null}
             {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}
@@ -437,10 +437,10 @@ export default function App() {
               navigation side effect. */}
           <div
             className={cx(
-              // Matches the px-3 py-6 lg:px-5 padding on the scroll container
+              // Matches the horizontal and vertical padding on the scroll container
               // itself (an inset-0 absolute child would otherwise sit flush
               // against its edges, ignoring that padding).
-              "absolute left-3 right-3 top-6 bottom-6 flex min-h-0 flex-col lg:left-5 lg:right-5",
+              "absolute left-3 right-3 top-2 bottom-6 flex min-h-0 flex-col lg:left-5 lg:right-5",
               activePage === "trade" ? "flex" : "hidden",
             )}
           >
@@ -512,6 +512,7 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
     return 3;
   };
   const priorityForTitle = (title) => {
+    if (title === "Daily risk limit") return 0;
     if (title === "Account disconnected" || title === "Algorithmic trading disabled") return 0;
     if (title === "Trade execution") return 1;
     if (title === "Account connection") return 1;
@@ -529,7 +530,7 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
     if (notifications.some((item) => item.id === id)) return;
     const lower = normalizedMessage.toLowerCase();
     const level = text.includes("[ERROR]") || lower.includes("failed") || lower.includes("blocked") ? "error" : text.includes("[WARNING]") || lower.includes("disabled") || lower.includes("disconnected") ? "warning" : text.includes("[SUCCESS]") ? "success" : "info";
-    const title = lower.includes("algo") || lower.includes("algorithmic") ? "MT5 Algo Trading" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
+    const title = lower.includes("daily risk limit") ? "Daily risk limit" : lower.includes("algo") || lower.includes("algorithmic") ? "MT5 Algo Trading" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
     notifications.push({
       id,
       title,
@@ -693,7 +694,7 @@ const styles = {
     background: "#f1f5f9",
     color: "#020617",
   } satisfies React.CSSProperties,
-  pageContent: { paddingTop: 24, paddingBottom: 24 } satisfies React.CSSProperties,
+  pageContent: { paddingTop: 8, paddingBottom: 24 } satisfies React.CSSProperties,
   errorBanner: {
     marginBottom: 16,
     border: "1px solid #fecdd3",

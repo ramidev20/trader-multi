@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -158,6 +158,70 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                         "status": "open",
                     }
                 )
+            # Closed positions disappear from positions_get(), but the chart
+            # keeps their details so it can show whether SL or TP closed them.
+            history_from = datetime.now() - timedelta(days=30)
+            history_to = datetime.now()
+            try:
+                deals = mt5.history_deals_get(history_from, history_to) or []
+            except Exception:
+                deals = []
+            live_tickets = {int(row["ticket"]) for row in chart_orders}
+            deal_entry_in = int(getattr(mt5, "DEAL_ENTRY_IN", 0))
+            closing_entries = {
+                int(getattr(mt5, "DEAL_ENTRY_OUT", 1)),
+                int(getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)),
+                int(getattr(mt5, "DEAL_ENTRY_INOUT", 2)),
+            }
+            open_deals = {}
+            close_deals = {}
+            for deal in deals:
+                if str(getattr(deal, "symbol", "") or "").upper() != symbol:
+                    continue
+                position_id = int(getattr(deal, "position_id", 0) or 0)
+                if not position_id:
+                    continue
+                entry = int(getattr(deal, "entry", -1))
+                if entry == deal_entry_in:
+                    open_deals.setdefault(position_id, deal)
+                elif entry in closing_entries:
+                    close_deals[position_id] = deal
+            opening_orders = {}
+            try:
+                for historical_order in mt5.history_orders_get(history_from, history_to) or []:
+                    opening_orders[int(getattr(historical_order, "ticket", 0) or 0)] = historical_order
+            except Exception:
+                opening_orders = {}
+            reason_labels = {
+                int(getattr(mt5, "DEAL_REASON_SL", 4)): "SL hit",
+                int(getattr(mt5, "DEAL_REASON_TP", 5)): "TP hit",
+            }
+            for position_id, closing_deal in close_deals.items():
+                reason = reason_labels.get(int(getattr(closing_deal, "reason", -1)))
+                if not reason or position_id in live_tickets:
+                    continue
+                opening_deal = open_deals.get(position_id)
+                if opening_deal is None:
+                    continue
+                opening_order = opening_orders.get(int(getattr(opening_deal, "order", 0) or 0))
+                deal_type = int(getattr(opening_deal, "type", -1))
+                chart_orders.append(
+                    {
+                        "ticket": position_id,
+                        "symbol": symbol,
+                        "side": "BUY" if deal_type == int(getattr(mt5, "DEAL_TYPE_BUY", 0)) else "SELL",
+                        "order_kind": "MARKET",
+                        "lot": float(getattr(opening_deal, "volume", 0.0) or 0.0),
+                        "price": float(getattr(opening_deal, "price", 0.0) or 0.0),
+                        "sl": float(getattr(opening_order, "sl", 0.0) or 0.0) if opening_order else 0.0,
+                        "tp": float(getattr(opening_order, "tp", 0.0) or 0.0) if opening_order else 0.0,
+                        "opened_at": int(getattr(opening_deal, "time", 0) or 0),
+                        "status": "closed",
+                        "close_reason": reason,
+                        "close_price": float(getattr(closing_deal, "price", 0.0) or 0.0),
+                        "profit": float(getattr(closing_deal, "profit", 0.0) or 0.0),
+                    }
+                )
             for order in mt5.orders_get(symbol=symbol) or []:
                 order_type = int(getattr(order, "type", -1))
                 if order_type not in {mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT}:
@@ -286,6 +350,20 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
             tick = mt5.symbol_info_tick("XAUUSD")
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            try:
+                daily_deals = mt5.history_deals_get(today_start, datetime.now())
+                daily_history_available = daily_deals is not None
+                daily_deals = daily_deals or []
+                realized_today = sum(
+                    float(getattr(deal, "profit", 0.0) or 0.0)
+                    + float(getattr(deal, "swap", 0.0) or 0.0)
+                    + float(getattr(deal, "commission", 0.0) or 0.0)
+                    for deal in daily_deals
+                )
+            except Exception:
+                realized_today = 0.0
+                daily_history_available = False
             spread = (
                 abs(float(getattr(tick, "ask", 0.0)) - float(getattr(tick, "bid", 0.0)))
                 if tick is not None
@@ -297,6 +375,8 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                 "account": {
                     "balance": float(getattr(info, "balance", 0.0) or 0.0),
                     "equity": float(getattr(info, "equity", 0.0) or 0.0),
+                    "realized_today": realized_today,
+                    "daily_history_available": daily_history_available,
                     "latency": round(ping_last / 1000.0, 2) if ping_last > 0 else None,
                     "algo_enabled": bool(getattr(terminal, "trade_allowed", True)) and not bool(getattr(terminal, "tradeapi_disabled", False)) if terminal is not None else None,
                 },

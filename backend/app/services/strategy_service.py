@@ -134,7 +134,6 @@ def _copy_targets(cfg: dict, master_login: int) -> list[tuple[dict, float]]:
         for session in list_sessions(accounts)
         if str(session.get("state", "")).lower() == "connected"
     }
-
     for acc in accounts:
         try:
             login = _safe_int(acc.get("user"))
@@ -889,6 +888,23 @@ def open_manual_position(
     copy_to_sub_accounts: bool = True,
     after_master_order: Callable[[dict], str | None] | None = None,
 ):
+    daily_risk = get("daily_risk", {})
+    risk_today = (
+        isinstance(daily_risk, dict)
+        and str(daily_risk.get("day", "")) == datetime.now().date().isoformat()
+    )
+    if (
+        risk_today
+        and daily_risk.get("enabled")
+        and (daily_risk.get("master_hit") or not daily_risk.get("verified"))
+    ):
+        message = (
+            "Daily risk cannot be verified from the connected master account. New trades are paused."
+            if not daily_risk.get("verified")
+            else "Daily risk limit reached on the master account. New trades are blocked until the next day."
+        )
+        append_log("search", f"[WARNING] [daily-risk] {message}")
+        raise RuntimeError(message)
     master_ok, master_detail, _master, _cfg = _ensure_master_session()
     if not master_ok:
         message = f"Manual order blocked: {master_detail}"

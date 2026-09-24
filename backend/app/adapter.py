@@ -144,9 +144,12 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
             chart_orders = []
             for position in mt5.positions_get(symbol=symbol) or []:
                 position_type = int(getattr(position, "type", -1))
+                position_ticket = int(getattr(position, "ticket", 0) or 0)
+                position_identifier = int(getattr(position, "identifier", position_ticket) or position_ticket)
                 chart_orders.append(
                     {
-                        "ticket": int(getattr(position, "ticket", 0) or 0),
+                        "ticket": position_ticket,
+                        "position_id": position_identifier,
                         "symbol": symbol,
                         "side": "BUY" if position_type == mt5.POSITION_TYPE_BUY else "SELL",
                         "order_kind": "MARKET",
@@ -166,7 +169,14 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                 deals = mt5.history_deals_get(history_from, history_to) or []
             except Exception:
                 deals = []
-            live_tickets = {int(row["ticket"]) for row in chart_orders}
+            # MT5 deals link to POSITION_IDENTIFIER (`position_id`), which can
+            # differ from the current position ticket on some servers.
+            live_position_ids = {
+                int(value)
+                for row in chart_orders
+                for value in (row.get("ticket"), row.get("position_id"))
+                if value
+            }
             deal_entry_in = int(getattr(mt5, "DEAL_ENTRY_IN", 0))
             closing_entries = {
                 int(getattr(mt5, "DEAL_ENTRY_OUT", 1)),
@@ -198,27 +208,39 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
             }
             for position_id, closing_deal in close_deals.items():
                 reason = reason_labels.get(int(getattr(closing_deal, "reason", -1)))
-                if not reason or position_id in live_tickets:
+                if not reason or position_id in live_position_ids:
                     continue
                 opening_deal = open_deals.get(position_id)
                 if opening_deal is None:
                     continue
                 opening_order = opening_orders.get(int(getattr(opening_deal, "order", 0) or 0))
                 deal_type = int(getattr(opening_deal, "type", -1))
+                close_price = float(getattr(closing_deal, "price", 0.0) or 0.0)
+                sl_price = float(getattr(opening_order, "sl", 0.0) or 0.0) if opening_order else 0.0
+                tp_price = float(getattr(opening_order, "tp", 0.0) or 0.0) if opening_order else 0.0
+                # The opening order can be absent from broker history on some
+                # servers. Preserve a drawable exit level so the chart's
+                # position detail can still identify the TP/SL close.
+                if reason == "SL hit" and sl_price <= 0:
+                    sl_price = close_price
+                elif reason == "TP hit" and tp_price <= 0:
+                    tp_price = close_price
                 chart_orders.append(
                     {
                         "ticket": position_id,
+                        "position_id": position_id,
                         "symbol": symbol,
                         "side": "BUY" if deal_type == int(getattr(mt5, "DEAL_TYPE_BUY", 0)) else "SELL",
                         "order_kind": "MARKET",
                         "lot": float(getattr(opening_deal, "volume", 0.0) or 0.0),
                         "price": float(getattr(opening_deal, "price", 0.0) or 0.0),
-                        "sl": float(getattr(opening_order, "sl", 0.0) or 0.0) if opening_order else 0.0,
-                        "tp": float(getattr(opening_order, "tp", 0.0) or 0.0) if opening_order else 0.0,
+                        "sl": sl_price,
+                        "tp": tp_price,
                         "opened_at": int(getattr(opening_deal, "time", 0) or 0),
                         "status": "closed",
                         "close_reason": reason,
-                        "close_price": float(getattr(closing_deal, "price", 0.0) or 0.0),
+                        "close_price": close_price,
+                        "closed_at": int(getattr(closing_deal, "time", 0) or 0),
                         "profit": float(getattr(closing_deal, "profit", 0.0) or 0.0),
                     }
                 )

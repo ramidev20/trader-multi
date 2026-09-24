@@ -22,6 +22,7 @@ type CandlePoint = {
 
 type TradeOrder = {
   ticket?: number | string;
+  position_id?: number | string;
   symbol?: string;
   side?: string;
   order_kind?: string;
@@ -35,6 +36,7 @@ type TradeOrder = {
   status?: string;
   close_reason?: string;
   close_price?: number;
+  closed_at?: string | number;
 };
 
 type ChartSnapshot = {
@@ -92,6 +94,10 @@ function nearestCandleTime(
   );
 }
 
+function positionIdentity(order: TradeOrder) {
+  return String(order.position_id ?? order.ticket ?? "");
+}
+
 export default function ChartPage() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
@@ -123,6 +129,7 @@ export default function ChartPage() {
       closeReason: string;
       closePrice: number;
       startTime: number;
+      endTime: number;
     }>
   >([]);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
@@ -200,7 +207,8 @@ export default function ChartPage() {
       }
     });
     rememberedPositionsRef.current.forEach((order) => {
-      if (order.ticket != null) keys.add(`position:${order.ticket}`);
+      const identity = positionIdentity(order);
+      if (identity) keys.add(`position:${identity}`);
     });
     // Nothing above mutates React state the effects depend on, so bump a
     // counter to make them re-run immediately against the updated cleared
@@ -365,6 +373,7 @@ export default function ChartPage() {
         const hi = Math.max(...values);
         return (
           Number(param.time) >= position.startTime &&
+          Number(param.time) <= position.endTime &&
           hoverPrice >= lo &&
           hoverPrice <= hi
         );
@@ -551,13 +560,21 @@ export default function ChartPage() {
         String(order.order_kind || "").toUpperCase() === "MARKET" &&
         Number(order.price ?? order.entry ?? 0) > 0
       ) {
-        const ticket = String(order.ticket);
+        const ticket = positionIdentity(order);
+        if (!ticket) return;
         const prior = rememberedPositionsRef.current.get(ticket);
+        const closedAt =
+          order.closed_at ||
+          prior?.closed_at ||
+          (order.close_reason
+            ? normalizedCandles[normalizedCandles.length - 1]?.time
+            : undefined);
         rememberedPositionsRef.current.set(ticket, {
           ...prior,
           ...order,
           sl: Number(order.sl) > 0 ? order.sl : prior?.sl,
           tp: Number(order.tp) > 0 ? order.tp : prior?.tp,
+          closed_at: closedAt,
         });
       }
     });
@@ -565,11 +582,22 @@ export default function ChartPage() {
     // a cleared ticket here makes the cleanup loop below remove its existing
     // overlay and skips recreating it, while a ticket that wasn't on screen
     // when Clear was clicked (a new position) still draws normally.
-    const positions = Array.from(rememberedPositionsRef.current.values()).filter(
-      (order) => !clearedKeysRef.current.has(`position:${order.ticket}`),
-    );
+    const firstCandleTime = normalizedCandles[0]?.time;
+    const positions = Array.from(rememberedPositionsRef.current.values()).filter((order) => {
+      if (clearedKeysRef.current.has(`position:${positionIdentity(order)}`)) return false;
+      // The API can return closed deals from the last 30 days, while this
+      // chart only contains the latest candles. Do not clamp older closed
+      // trades to the first visible candle: after a reload that made their
+      // TP/SL boxes look like they covered the entire chart. Open trades stay
+      // visible even when they started before the current candle window.
+      if (order.close_reason && firstCandleTime != null) {
+        const openedAt = toUnix(order.opened_at || order.created_at);
+        if (openedAt != null && openedAt < firstCandleTime) return false;
+      }
+      return true;
+    });
     const activeTickets = new Set(
-      positions.map((position) => String(position.ticket)),
+      positions.map(positionIdentity),
     );
     positionSeriesRef.current.forEach((series, ticket) => {
       if (activeTickets.has(ticket)) return;
@@ -580,19 +608,23 @@ export default function ChartPage() {
 
     const hoverEntries: typeof positionsHoverRef.current = [];
     positions.forEach((position) => {
-      const ticket = String(position.ticket);
+      const ticket = positionIdentity(position);
       const entryPrice = Number(position.price ?? position.entry ?? 0);
       const tpPrice = Number(position.tp || 0);
       const slPrice = Number(position.sl || 0);
-      const endTime = normalizedCandles[normalizedCandles.length - 1]?.time;
+      const lastCandleTime = normalizedCandles[normalizedCandles.length - 1]?.time;
       let startTime = nearestCandleTime(
         position.opened_at || position.created_at,
         normalizedCandles,
       );
-      if (!startTime || !endTime) return;
-      if (startTime === endTime && normalizedCandles.length > 1) {
+      if (!startTime || !lastCandleTime) return;
+      if (startTime === lastCandleTime && normalizedCandles.length > 1) {
         startTime = normalizedCandles[normalizedCandles.length - 2].time;
       }
+      // Closed trades end at their close candle. Open trades keep extending
+      // to the newest candle as live chart data arrives.
+      const closedAt = position.close_reason ? nearestCandleTime(position.closed_at, normalizedCandles) : null;
+      const endTime = Math.max(startTime, closedAt ?? lastCandleTime);
 
       const isBuy = String(position.side || "").toUpperCase() === "BUY";
       hoverEntries.push({
@@ -605,6 +637,7 @@ export default function ChartPage() {
         closeReason: String(position.close_reason || ""),
         closePrice: Number(position.close_price || 0),
         startTime,
+        endTime,
       });
 
       let overlay = positionSeriesRef.current.get(ticket);

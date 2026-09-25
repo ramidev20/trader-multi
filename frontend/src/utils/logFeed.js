@@ -13,9 +13,10 @@ export function parseSearchLogLine(line, index) {
     const level = ["error", "warning", "success", "info"].includes(levelWord.toLowerCase())
       ? levelWord.toLowerCase()
       : "info";
-    const sideMatch = message.match(/\[scalping:(demand|supply)\]/i);
+    const sideMatch = message.match(/^\[scalping:(demand|supply)\]\s*/i);
     const side = sideMatch?.[1]?.toLowerCase();
-    return { id: `search-${index}-${at}-${message}`, level, message, at, ...(side ? { side } : {}) };
+    const displayMessage = side ? message.slice(sideMatch[0].length) : message;
+    return { id: `search-${index}-${at}-${message}`, level, message: displayMessage, at, ...(side ? { side } : {}) };
   }
   const fallback = text.match(/^\[(.*?)\]\s*(.*)$/);
   return {

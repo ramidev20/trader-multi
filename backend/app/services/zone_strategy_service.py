@@ -150,6 +150,7 @@ class ZoneStrategyEngine:
     def __init__(self, side: str) -> None:
         self.side = side
         self._trigger_task_name = f"{TRIGGER_TASK_NAME}_{side}"
+        self._scheduled_m5_task_name = f"{TRIGGER_TASK_NAME}_m5_start_{side}"
         self._search_m5_task_name = f"{SEARCH_M5_TASK_NAME}_{side}"
         self._search_m1_task_name = f"{SEARCH_M1_TASK_NAME}_{side}"
         self._exit_task_name = f"zone_exit_watch_{side}"
@@ -244,6 +245,7 @@ class ZoneStrategyEngine:
             raise RuntimeError("End time must be in the future.")
 
         stop_task(self._trigger_task_name)
+        stop_task(self._scheduled_m5_task_name)
         stop_task(self._search_m5_task_name)
         stop_task(self._search_m1_task_name)
         stop_task(self._exit_task_name)
@@ -274,7 +276,13 @@ class ZoneStrategyEngine:
         started_at = datetime.now().isoformat()
         instant = self.instant_m5_start
         dev_m1 = self.dev_m1_start
-        phase = "searching_m1_zone" if dev_m1 else ("searching_m5_zone" if instant else "waiting_trigger")
+        scheduled_instant_start = bool(instant and start_time and start_time > datetime.now())
+        phase = (
+            "searching_m1_zone" if dev_m1 else
+            "scheduled_m5_start" if scheduled_instant_start else
+            "searching_m5_zone" if instant else
+            "waiting_trigger"
+        )
         patch_path(
             self._state_path,
             {
@@ -332,12 +340,27 @@ class ZoneStrategyEngine:
                 **self._end_time_kwargs(),
             )
         elif instant:
-            append_log(
-                "search",
-                f"[INFO] [scalping:{self.side}] armed on {self.symbol} -- instant M5 start, "
-                f"skipping the M15 trigger.",
-            )
-            self._start_m5_search()
+            scheduled_start = self.start_time if self.start_time and self.start_time > datetime.now() else None
+            if scheduled_start:
+                append_log(
+                    "search",
+                    f"[INFO] [scalping:{self.side}] Instant M5 start is scheduled for "
+                    f"{scheduled_start.strftime('%Y-%m-%d %H:%M:%S')}; waiting until then.",
+                )
+                start_task(
+                    self._scheduled_m5_task_name,
+                    self._begin_scheduled_m5_search,
+                    interval_sec=1,
+                    start_time=scheduled_start,
+                    **self._end_time_kwargs(),
+                )
+            else:
+                append_log(
+                    "search",
+                    f"[INFO] [scalping:{self.side}] armed on {self.symbol} -- instant M5 start, "
+                    f"skipping the M15 trigger.",
+                )
+                self._start_m5_search()
         else:
             # Anchor the first check to the next M1 candle open instead of
             # "now" (or the user's chosen start_time, whichever is later) --
@@ -362,15 +385,17 @@ class ZoneStrategyEngine:
     def stop(self, reason: str = "Manual stop requested.") -> None:
         was_running = (
             is_task_running(self._trigger_task_name)
+            or is_task_running(self._scheduled_m5_task_name)
             or is_task_running(self._search_m5_task_name)
             or is_task_running(self._search_m1_task_name)
             or is_task_running(self._exit_task_name)
         )
         stop_task(self._trigger_task_name)
+        stop_task(self._scheduled_m5_task_name)
         stop_task(self._search_m5_task_name)
         stop_task(self._search_m1_task_name)
         stop_task(self._exit_task_name)
-        if was_running:
+        if was_running or bool(get(self._state_path, {}).get("running")):
             patch_path(self._state_path, {"running": False, "phase": "stopped", "last_stop_reason": reason})
             append_log("search", f"[WARNING] [scalping:{self.side}] {reason}")
         else:
@@ -391,6 +416,17 @@ class ZoneStrategyEngine:
             "end_time_enabled": True,
             "on_task_end": self._on_scheduled_end,
         }
+
+    def _begin_scheduled_m5_search(self) -> None:
+        # start_task normally repeats callbacks. This is an arm timer, so
+        # remove it before handing control to the recurring M5 candle task.
+        stop_task(self._scheduled_m5_task_name)
+        patch_path(self._state_path, {
+            "phase": "searching_m5_zone",
+            "running": True,
+            "triggered_at": datetime.now().isoformat(),
+        })
+        self._start_m5_search()
 
     def _on_scheduled_end(self) -> None:
         """task_manager calls this once End Time is reached, from whichever
@@ -645,7 +681,7 @@ class ZoneStrategyEngine:
         self._seed_buffer(self.m5_buffer, "M5", preload_count=0 if fresh else 3)
         append_log(
             "search",
-            f"[INFO] [scalping:{self.side}] Started searching for a new 5-minute {self.side} zone.",
+            f"[INFO] [scalping:{self.side}] Started searching for a new 5-minute zone.",
         )
         with self._lock:
             self.m5_zone = None
@@ -660,7 +696,6 @@ class ZoneStrategyEngine:
                 "placed_order": None,
                 "last_error": None,
             })
-            append_log("search", f"[INFO] [scalping:{self.side}] TP/SL closed the position; starting a fresh 5-minute search.")
         elif zone is not None:
             self._accept_m5_zone(zone)
             return
@@ -680,7 +715,7 @@ class ZoneStrategyEngine:
         patch_path(self._state_path, {"phase": "searching_m1_zone", "m5_zone": zone})
         append_log(
             "search",
-            f"[SUCCESS] [scalping:{self.side}] 5-minute {self.side} zone appeared at {zone['price_low']:.2f}-{zone['price_high']:.2f}; starting 1-minute search.",
+            f"[SUCCESS] [scalping:{self.side}] 5-minute zone appeared at {zone['price_low']:.2f}-{zone['price_high']:.2f}; starting 1-minute search.",
         )
         start_task(
             self._search_m1_task_name,
@@ -777,7 +812,7 @@ class ZoneStrategyEngine:
                 direction = "below" if self.side == "demand" else "above"
                 append_log(
                     "search",
-                    f"[WARNING] [scalping:{self.side}] 5-minute {self.side} zone breached {direction} its {edge} "
+                    f"[WARNING] [scalping:{self.side}] 5-minute zone breached {direction} its {edge} "
                     f"({zone[f'price_{edge}']:.2f}); starting a new 5-minute search.",
                 )
         self._start_m5_search(fresh=True)

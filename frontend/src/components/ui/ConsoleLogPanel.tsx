@@ -206,6 +206,11 @@ export function ConsoleLogPanel({
                     {style.label}
                   </span>
                   <span className={`min-w-0 break-words font-semibold ${messageColor}`}>
+                    {entry.side ? (
+                      <span className={`mr-1.5 inline-block shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-black uppercase tracking-wide ${entry.side === "demand" ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"}`}>
+                        {entry.side}
+                      </span>
+                    ) : null}
                     {entry.tag ? (
                       <span className="mr-1.5 inline-block shrink-0 rounded-full bg-slate-900/5 px-1.5 py-0.5 text-[9.5px] font-black uppercase tracking-wide text-slate-600">
                         {entry.tag}

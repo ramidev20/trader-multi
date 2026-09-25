@@ -16,6 +16,7 @@ const SYMBOL = "XAUUSD";
 const PHASE_LABELS = {
   idle: "Idle",
   waiting_trigger: "Waiting for M15 trigger",
+  scheduled_m5_start: "Waiting for scheduled M5 start",
   searching_m5_zone: "Searching M5 for matching zone",
   searching_m1_zone: "Searching M1 to confirm entry",
   placed: "Order placed",
@@ -326,6 +327,7 @@ export default function ScalpingPage() {
 
   const ACTIVE_PHASES = [
     "waiting_trigger",
+    "scheduled_m5_start",
     "searching_m5_zone",
     "searching_m1_zone",
   ];

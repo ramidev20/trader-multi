@@ -32,9 +32,9 @@ from .strategy_service import (
 # is what actually places the MARKET/LIMIT order.
 #
 # Zone definition -- identical 3-candle imbalance/gap check for both M5 and
-# M1, just run against each timeframe's own candle buffer, checked one
-# newly-closed candle at a time. c1 is the candle that just closed, c2 is the
-# one before it, c3 is two before that (oldest of the three).
+# M1, run against each timeframe's own candle buffer. Both timeframes validate
+# only after c1 closes. c1 is newest, c2 is the
+# one before it, and c3 is two before that (oldest of the three).
 #
 # Which edge of c3's body matters depends on which way c3 itself closed --
 # not always the same open/close pick regardless of direction:
@@ -62,11 +62,8 @@ from .strategy_service import (
 # The zone box itself is drawn on c3 alone: demand from c3's low up to its
 # gap reference, supply from its gap reference up to c3's high.
 #
-# The M5 buffer is cleared the moment the M15 trigger fires, and the M1
-# buffer the moment the M5 zone forms, so the earliest possible c3 for each
-# stage is exactly the candle that was still forming at that instant -- i.e.
-# each search only starts evaluating once *that* candle has closed, not
-# mid-candle.
+# The M5 buffer is cleared when the M15 trigger fires, and the M1 buffer when
+# the M5 zone forms. Each stage keeps its own timeframe's candles separate.
 #
 # The demand side and the supply side are armed independently (two engine
 # instances below) so both can be watching -- and can both fire -- at once.
@@ -88,7 +85,9 @@ CANDLE_BUFFER_MAXLEN = 12
 SL_LIQUIDITY_LOOKBACK_CANDLES = 20
 DEFAULT_TRIGGER_CHECK_CYCLE_SEC = 60.0
 M1_SEARCH_INTERVAL_SEC = 60.0
-M5_SEARCH_INTERVAL_SEC = 300.0
+# Poll the forming M5 candle so a valid third candle is checked during its
+# formation instead of only after it closes and the fourth candle opens.
+M5_SEARCH_INTERVAL_SEC = 1.0
 
 
 def _next_candle_open(timeframe_minutes: int, after: datetime | None = None) -> datetime:
@@ -443,8 +442,8 @@ class ZoneStrategyEngine:
             append_log("search", f"[ERROR] [scalping:{self.side}] end-time close failed: {exc}")
         self.stop("End time reached.")
 
-    def _ensure_symbol_or_log(self) -> bool:
-        """Guard every MT5 rates/tick call the way open_manual_position() does.
+    def _ensure_symbol_or_log(self, require_fresh_quote: bool = True) -> bool:
+        """Guard MT5 calls, with quote freshness required only for live prices.
 
         The main API process's MT5 module starts out disconnected -- only
         _ensure_master_session() (mt5.initialize() with the master account's
@@ -464,7 +463,10 @@ class ZoneStrategyEngine:
                 append_log("search", f"[ERROR] [scalping:{self.side}] {session_detail}")
             return False
 
-        ok, detail = _ensure_symbol_ready(self.symbol)
+        ok, detail = _ensure_symbol_ready(
+            self.symbol,
+            require_fresh_quote=require_fresh_quote,
+        )
         if ok:
             with self._lock:
                 self._last_symbol_error = None
@@ -487,7 +489,7 @@ class ZoneStrategyEngine:
         moved back to it. Checking a rolling M1 window has no such reset.
         """
         if mt5_available():
-            if not self._ensure_symbol_or_log():
+            if not self._ensure_symbol_or_log(require_fresh_quote=False):
                 return False
             lookback = max(2, int(self.trigger_check_cycle_sec // 60) + 2)
             try:
@@ -519,7 +521,7 @@ class ZoneStrategyEngine:
         not a level that keeps sliding with the newest candle.
         """
         if mt5_available():
-            if not self._ensure_symbol_or_log():
+            if not self._ensure_symbol_or_log(require_fresh_quote=False):
                 return None
             try:
                 rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 1, 1)
@@ -658,7 +660,7 @@ class ZoneStrategyEngine:
         # whole search tick made the demand and supply workers wait on each
         # other's buffer checks and state transitions too.
         with MT5_LOCK:
-            if not self._ensure_symbol_or_log():
+            if not self._ensure_symbol_or_log(require_fresh_quote=False):
                 return None
             try:
                 rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP[timeframe_label], 1, 1)
@@ -675,9 +677,9 @@ class ZoneStrategyEngine:
         return candle
 
     def _start_m5_search(self, fresh: bool = False) -> None:
-        # Evaluate the latest completed M5 pattern as soon as the M15 trigger
-        # starts this stage. Waiting for the next M5 close adds up to five
-        # minutes even though three completed candles are already available.
+        # Evaluate the latest completed M5 pattern as soon as this stage starts.
+        # C1 must be closed: checking a forming bar early shifts the apparent
+        # C1/C2 labels when the bar finally closes.
         self._seed_buffer(self.m5_buffer, "M5", preload_count=0 if fresh else 3)
         append_log(
             "search",
@@ -686,7 +688,23 @@ class ZoneStrategyEngine:
         with self._lock:
             self.m5_zone = None
             self.m1_buffer.clear()
-            zone = None if fresh else self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
+            # When a search starts exactly on an M5 boundary, the terminal can
+            # briefly keep returning the previous shift=1 candle while it
+            # publishes the bar that just closed. Do not evaluate that stale
+            # history as C1; _search_m5_tick will pick up the new closed bar
+            # as soon as MT5 advances its timestamp.
+            boundary_time = (int(time.time()) // 300) * 300
+            latest_closed_time = (
+                int(self.m5_buffer[-1]["time"]) + 300
+                if self.m5_buffer
+                else 0
+            )
+            history_is_current = latest_closed_time >= boundary_time
+            zone = (
+                self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
+                if not fresh and history_is_current
+                else None
+            )
         if fresh:
             patch_path(self._state_path, {
                 "running": True,
@@ -703,7 +721,7 @@ class ZoneStrategyEngine:
             self._search_m5_task_name,
             self._search_m5_tick,
             interval_sec=M5_SEARCH_INTERVAL_SEC,
-            start_time=_next_candle_open(5, self.start_time),
+            start_time=datetime.now(),
             **self._end_time_kwargs(),
         )
 
@@ -715,7 +733,7 @@ class ZoneStrategyEngine:
         patch_path(self._state_path, {"phase": "searching_m1_zone", "m5_zone": zone})
         append_log(
             "search",
-            f"[SUCCESS] [scalping:{self.side}] 5-minute zone appeared at {zone['price_low']:.2f}-{zone['price_high']:.2f}; starting 1-minute search.",
+            f"[SUCCESS] [scalping:{self.side}] 5-minute zone appeared at {zone['price_low']:.2f}-{zone['price_high']:.2f} (C1 closed at {datetime.fromtimestamp(int(zone['displacement_candle_time']) + 300).strftime('%H:%M:%S')}); starting 1-minute search.",
         )
         start_task(
             self._search_m1_task_name,
@@ -727,14 +745,13 @@ class ZoneStrategyEngine:
 
     def _search_m5_tick(self) -> None:
         candle = self._next_search_candle("M5")
-        if candle is None:
-            return
-        with self._lock:
-            self.m5_buffer.append(candle)
-            zone = self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
-        if zone is None:
-            return
-        self._accept_m5_zone(zone)
+        if candle is not None:
+            with self._lock:
+                self.m5_buffer.append(candle)
+                zone = self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
+            if zone is not None:
+                self._accept_m5_zone(zone)
+                return
 
     def _m5_zone_breached(self, price: float | None, candle: Any = None) -> bool:
         """Has price traded through the M5 zone while waiting on M1?
@@ -877,12 +894,9 @@ class ZoneStrategyEngine:
         """3-candle imbalance/gap check, shared by both the M5 and M1
         searches -- see the module docstring for the full spec.
 
-        c1 = the candle that just closed (newest), c2 = the one before it,
-        c3 = two candles before c1 (oldest of the three). Needs 3 candles in
-        `buffer`, which -- since the buffer is cleared/reseeded right as the
-        prior stage completes -- means the first possible c3 is the candle
-        that was still forming at that instant, so evaluation naturally
-        can't start until that candle has closed.
+        c1 is the newest closed candle, c2 is the one before it, and c3 is two
+        candles before that (oldest of the three). M5 and M1 both validate only
+        complete three-candle patterns.
         """
         if len(buffer) < 3:
             return None

@@ -13,8 +13,13 @@ pip install -r requirements.txt
 Start the backend from the project root:
 
 ```powershell
-uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000 --no-access-log
+uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
+
+This runs Uvicorn in the foreground without a reload supervisor, so `Ctrl+C`
+stops the server and returns control to the same terminal. Add `--reload` only
+when automatic backend restarts on code changes are needed; reload mode runs a
+separate watcher process.
 
 In a second terminal, install and start the frontend:
 

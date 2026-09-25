@@ -106,7 +106,7 @@ export default function App() {
   }, []);
 
   const refreshBootstrap = useCallback(async (options = {}) => {
-    const { silent = false, withSnapshots = false } = options;
+    const { silent = false, withSnapshots = false, replaceSearchLogs = false } = options;
     if (!silent) setLoadingBootstrap(true);
     try {
       const loaded = await api.bootstrap();
@@ -129,8 +129,10 @@ export default function App() {
         });
       });
       setRuntime(data.runtime || null);
-      const incomingSearchLogs = data.logs?.search || data.runtime?.logs?.search;
-      if (Array.isArray(incomingSearchLogs) && incomingSearchLogs.length) {
+      const incomingSearchLogs = data.runtime?.logs?.search || data.logs?.search;
+      if (replaceSearchLogs && Array.isArray(incomingSearchLogs)) {
+        setSearchLogs(incomingSearchLogs);
+      } else if (Array.isArray(incomingSearchLogs) && incomingSearchLogs.length) {
         setSearchLogs((current) => {
           const known = new Set(current);
           const merged = [...current];

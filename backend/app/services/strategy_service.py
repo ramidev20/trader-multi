@@ -183,7 +183,10 @@ def _initialize_mt5_for_account(account: dict) -> tuple[bool, str]:
         return True, "ok"
 
 
-def _ensure_symbol_ready(symbol: str) -> tuple[bool, str]:
+MAX_QUOTE_AGE_SECONDS = 30
+
+
+def _ensure_symbol_selected(symbol: str) -> tuple[bool, str]:
     if not mt5_available():
         return True, "simulation"
 
@@ -196,19 +199,36 @@ def _ensure_symbol_ready(symbol: str) -> tuple[bool, str]:
         if not selected:
             return False, f"Failed to select symbol {symbol}: {mt5.last_error()}"
 
-    observed_stamps: list[int] = []
-    for _ in range(10):
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is not None and getattr(tick, "bid", 0) and getattr(tick, "ask", 0):
-            stamp = getattr(tick, "time_msc", None) or getattr(tick, "time", None)
-            if stamp:
-                observed_stamps.append(int(stamp))
-                if len(observed_stamps) >= 2 and observed_stamps[-1] != observed_stamps[-2]:
-                    return True, "ok"
-        time.sleep(0.2)
-    if observed_stamps:
-        return False, f"Stale prices for {symbol}. Terminal is connected but quote stream is not updating."
-    return False, f"No prices available for {symbol}."
+    return True, "ok"
+
+
+def _ensure_symbol_ready(symbol: str, require_fresh_quote: bool = True) -> tuple[bool, str]:
+    """Ensure the symbol is selected and, for price-sensitive work, its quote is fresh.
+
+    Candle history can remain available while the quote is quiet, so candle
+    readers pass ``require_fresh_quote=False``. Orders and live-price checks
+    retain the quote-age guard.
+    """
+    selected, detail = _ensure_symbol_selected(symbol)
+    if not selected or not require_fresh_quote or not mt5_available():
+        return selected, detail
+
+    tick = mt5.symbol_info_tick(symbol)
+    bid = float(getattr(tick, "bid", 0.0) or 0.0) if tick is not None else 0.0
+    ask = float(getattr(tick, "ask", 0.0) or 0.0) if tick is not None else 0.0
+    if tick is None or bid <= 0 or ask <= 0:
+        return False, f"No prices available for {symbol}."
+
+    stamp_msc = int(getattr(tick, "time_msc", 0) or 0)
+    stamp_sec = stamp_msc / 1000.0 if stamp_msc > 0 else float(getattr(tick, "time", 0) or 0)
+    if stamp_sec > 0:
+        quote_age = time.time() - stamp_sec
+        if quote_age > MAX_QUOTE_AGE_SECONDS:
+            return False, (
+                f"Stale prices for {symbol}. Last quote is {int(quote_age)} seconds old; "
+                "the MT5 terminal has not received a recent tick."
+            )
+    return True, "ok"
 
 
 def _check_request(request: dict) -> tuple[bool, str]:
@@ -448,7 +468,7 @@ def wait_for_new_candle(
     poll_sleep: float = 0.2,
 ):
     if mt5_available():
-        symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol)
+        symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol, require_fresh_quote=False)
         if not symbol_ok:
             return None
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
@@ -477,7 +497,7 @@ def wait_for_new_candle(
 def latest_closed_candle(timeframe, symbol: str = SYMBOL_DEFAULT):
     """Return the most recently closed candle without waiting for another one."""
     if mt5_available():
-        symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol)
+        symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol, require_fresh_quote=False)
         if not symbol_ok:
             return None
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 1, 1)

@@ -253,6 +253,15 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
       .map(parseSearchLogLine)
       .slice(-200);
   }, [runtime]);
+  async function clearTradeLogs() {
+    try {
+      await api.clearLogs("search");
+      await onRefreshRuntime?.({ silent: true, replaceSearchLogs: true });
+    } catch (error) {
+      reportError(error);
+      throw error;
+    }
+  }
   const searchPipsValue = useMemo(() => {
     const parsed = Number.parseFloat(searchPips);
     return Number.isFinite(parsed) ? parsed : 0;
@@ -1456,6 +1465,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
                 <ConsoleLogPanel
                   emptyText="No trade activity logs yet."
                   entries={tradeFeedLogs}
+                  onClear={clearTradeLogs}
                   fill
                 />
               </div>

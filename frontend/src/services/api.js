@@ -36,6 +36,7 @@ export const api = {
   bootstrap: () => request("/bootstrap"),
   dashboard: () => request("/dashboard"),
   runtime: () => request("/runtime"),
+  clearLogs: (kind = "search") => request(`/runtime/logs/${encodeURIComponent(kind)}`, { method: "DELETE" }),
   settings: () => request("/settings"),
   saveTheme: (theme_mode) => request("/settings/theme", { method: "PATCH", body: JSON.stringify({ theme_mode }) }),
   saveZoom: (ui_zoom_percent) => request("/settings/zoom", { method: "PATCH", body: JSON.stringify({ ui_zoom_percent }) }),

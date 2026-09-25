@@ -48,7 +48,7 @@ export function ConsoleLogPanel({
   /** Provide when the log is owned by this browser so Clear can really
    * delete it. Omit for a backend-owned log: Clear then only hides what's
    * already on screen here, it can't erase the source's own copy. */
-  onClear?: () => void;
+  onClear?: () => void | Promise<void>;
   showTagFilter?: boolean;
   tagFilterLabel?: string;
   /** Stretch to fill the parent's height instead of a fixed 380px box --
@@ -102,10 +102,14 @@ export function ConsoleLogPanel({
     if (node) node.scrollTop = node.scrollHeight;
   }
 
-  function handleClear() {
+  async function handleClear() {
     if (onClear) {
-      onClear();
-      setHiddenKeys(new Set());
+      try {
+        await onClear();
+        setHiddenKeys(new Set());
+      } catch {
+        // The log owner reports the error; keep current rows visible on failure.
+      }
     } else {
       setHiddenKeys((current) => {
         const next = new Set(current);
@@ -176,7 +180,7 @@ export function ConsoleLogPanel({
             </button>
             <button
               type="button"
-              onClick={handleClear}
+              onClick={() => { void handleClear(); }}
               disabled={!entries.length}
               title={onClear ? "Clear this log" : "Hide everything shown so far"}
               className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-rose-200 bg-white text-rose-500 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"

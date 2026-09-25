@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from .services.mt5_compat import mt5, mt5_available
 from .services.env_utils import is_dev_mode, load_project_env
 from .services.mt5_lock import MT5_LOCK
-from .services.runtime_state import append_log, get as state_get, patch_path as state_patch, set_path as state_set, snapshot
+from .services.runtime_state import append_log, clear_logs, get as state_get, patch_path as state_patch, set_path as state_set, snapshot
 from .services.session_service import connect_account, disconnect_account, disconnect_all, list_sessions, submit_adapter_command
 from .services.session_service import master_adapter_ready
 from .services.strategy_service import (
@@ -1175,6 +1175,14 @@ def account_snapshots() -> dict[str, Any]:
 @app.get("/runtime")
 def runtime() -> dict[str, Any]:
     return snapshot()
+
+
+@app.delete("/runtime/logs/{kind}")
+def delete_runtime_logs(kind: str) -> dict[str, Any]:
+    if kind not in {"search", "adapter"}:
+        raise HTTPException(status_code=400, detail="kind must be 'search' or 'adapter'")
+    clear_logs(kind)
+    return {"status": "ok", "kind": kind, "logs": snapshot()["logs"][kind]}
 
 
 @app.get("/positions/live")

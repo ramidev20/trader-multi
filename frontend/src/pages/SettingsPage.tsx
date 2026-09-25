@@ -21,7 +21,7 @@ export function SettingsPlaceholder({
   uiZoomPercent = 100,
   onUiZoomPercentChange,
 }) {
-  const settingsTabs = ["accounts", "search", "notifications", "appearance"];
+  const settingsTabs = ["accounts", "search", "risk", "notifications", "appearance"];
   const normalizeSettingsTab = (tab) =>
     settingsTabs.includes(tab) ? tab : "accounts";
   const [settingsTab, setSettingsTab] = useState(
@@ -43,6 +43,7 @@ export function SettingsPlaceholder({
     stop_on_first_close: true,
   });
   const [settingsMessage, setSettingsMessage] = useState("");
+  const [sessionRiskSettings, setSessionRiskSettings] = useState({ enabled: true, percent: 2 });
   useEffect(
     () => setSettingsTab(normalizeSettingsTab(initialTab)),
     [initialTab],
@@ -56,6 +57,10 @@ export function SettingsPlaceholder({
             ...current,
             ...settings.search_config,
           }));
+        setSessionRiskSettings({
+          enabled: Boolean(settings?.session_risk_enabled ?? true),
+          percent: Number(settings?.session_risk_percent ?? 2),
+        });
       })
       .catch(() => {});
   }, []);
@@ -70,6 +75,27 @@ export function SettingsPlaceholder({
       setSettingsMessage(
         error instanceof Error ? error.message : String(error),
       );
+    }
+  }
+
+  async function saveSessionRiskSettings() {
+    const percent = Number(sessionRiskSettings.percent);
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+      setSettingsMessage("Session risk limit must be between 0 and 100 percent.");
+      return;
+    }
+    if (sessionRiskSettings.enabled && percent <= 0) {
+      setSettingsMessage("Set a session risk limit above 0%, or disable the session risk guard.");
+      return;
+    }
+    try {
+      await api.saveSessionRisk(percent, sessionRiskSettings.enabled);
+      setSessionRiskSettings({ ...sessionRiskSettings, percent });
+      setSettingsMessage(sessionRiskSettings.enabled
+        ? `Session risk guard enabled at ${percent}% loss.`
+        : "Session risk guard disabled.");
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -272,6 +298,45 @@ export function SettingsPlaceholder({
                   </label>
                 ))}
               </div>
+            </>
+          ) : null}
+
+          {settingsTab === "risk" ? (
+            <>
+              <h3 className="text-lg font-black text-slate-950">Session Risk Guard</h3>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+                When enabled, the bot tracks the master account from the start of a search session. The limit resets when all searches stop and you start a new session.
+              </p>
+              <label className="mt-6 flex max-w-2xl items-start justify-between gap-4 rounded-lg border border-slate-200 p-4">
+                <span>
+                  <span className="block text-sm font-black text-slate-900">Enable session risk guard</span>
+                  <span className="mt-1 block text-xs leading-5 text-slate-500">
+                    On limit, searches stop and connected positions are closed. Turning this off removes that session loss stop.
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={sessionRiskSettings.enabled}
+                  onChange={(event) => setSessionRiskSettings({ ...sessionRiskSettings, enabled: event.target.checked })}
+                  className="mt-1 h-4 w-4"
+                />
+              </label>
+              <label className="mt-5 block max-w-xs text-sm font-bold text-slate-700">
+                Session loss limit (%)
+                <input
+                  type="number"
+                  min="0.1"
+                  max="100"
+                  step="0.1"
+                  value={sessionRiskSettings.percent}
+                  onChange={(event) => setSessionRiskSettings({ ...sessionRiskSettings, percent: event.target.value })}
+                  className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 font-semibold disabled:bg-slate-100 disabled:text-slate-400"
+                  disabled={!sessionRiskSettings.enabled}
+                />
+              </label>
+              <AppButton variant="blue" className="mt-6" onClick={saveSessionRiskSettings}>
+                Save Session Risk Settings
+              </AppButton>
             </>
           ) : null}
 

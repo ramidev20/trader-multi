@@ -514,7 +514,7 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
     return 3;
   };
   const priorityForTitle = (title) => {
-    if (title === "Daily risk limit") return 0;
+    if (title === "Session risk limit") return 0;
     if (title === "Account disconnected" || title === "Algorithmic trading disabled") return 0;
     if (title === "Trade execution") return 1;
     if (title === "Account connection") return 1;
@@ -532,7 +532,7 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
     if (notifications.some((item) => item.id === id)) return;
     const lower = normalizedMessage.toLowerCase();
     const level = text.includes("[ERROR]") || lower.includes("failed") || lower.includes("blocked") ? "error" : text.includes("[WARNING]") || lower.includes("disabled") || lower.includes("disconnected") ? "warning" : text.includes("[SUCCESS]") ? "success" : "info";
-    const title = lower.includes("daily risk limit") ? "Daily risk limit" : lower.includes("algo") || lower.includes("algorithmic") ? "MT5 Algo Trading" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
+    const title = lower.includes("session risk limit") ? "Session risk limit" : lower.includes("algo") || lower.includes("algorithmic") ? "MT5 Algo Trading" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
     notifications.push({
       id,
       title,

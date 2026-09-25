@@ -40,7 +40,7 @@ export const api = {
   settings: () => request("/settings"),
   saveTheme: (theme_mode) => request("/settings/theme", { method: "PATCH", body: JSON.stringify({ theme_mode }) }),
   saveZoom: (ui_zoom_percent) => request("/settings/zoom", { method: "PATCH", body: JSON.stringify({ ui_zoom_percent }) }),
-  saveDailyRisk: (daily_risk_percent) => request("/settings/daily-risk", { method: "PATCH", body: JSON.stringify({ daily_risk_percent }) }),
+  saveSessionRisk: (session_risk_percent, enabled) => request("/settings/session-risk", { method: "PATCH", body: JSON.stringify({ session_risk_percent, ...(enabled == null ? {} : { enabled }) }) }),
   saveSearchConfig: (search_config) => request("/settings/search", { method: "PATCH", body: JSON.stringify({ search_config }) }),
   saveNotificationSettings: (payload) => request("/settings/notifications", { method: "PATCH", body: JSON.stringify(payload) }),
   saveRemoteControlSettings: (payload) => request("/settings/remote-control", { method: "PATCH", body: JSON.stringify(payload) }),

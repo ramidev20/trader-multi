@@ -91,10 +91,14 @@ M1_SEARCH_INTERVAL_SEC = 60.0
 M5_SEARCH_INTERVAL_SEC = 300.0
 
 
-def _next_candle_open(timeframe_minutes: int) -> datetime:
+def _next_candle_open(timeframe_minutes: int, after: datetime | None = None) -> datetime:
+    """Return the next candle boundary at or after the requested start time."""
     now = datetime.now()
-    minutes_until_open = timeframe_minutes - (now.minute % timeframe_minutes)
-    return now.replace(second=0, microsecond=0) + timedelta(minutes=minutes_until_open)
+    anchor = after if after is not None and after > now else now
+    interval_seconds = max(1, int(timeframe_minutes)) * 60
+    timestamp = anchor.timestamp()
+    boundary = (int(timestamp // interval_seconds) + 1) * interval_seconds
+    return datetime.fromtimestamp(boundary)
 
 
 def _is_bullish(candle: Any) -> bool:
@@ -335,10 +339,7 @@ class ZoneStrategyEngine:
             # however many seconds were left in the current minute, so checks
             # would keep landing mid-candle instead of right as each fresh M1
             # bar opens.
-            next_candle_open = _next_candle_open(1)
-            if self.start_time and self.start_time > datetime.now():
-                anchor = self.start_time
-                next_candle_open = anchor.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            next_candle_open = _next_candle_open(1, self.start_time)
             append_log(
                 "search",
                 f"[INFO] [scalping:{self.side}] armed on {self.symbol} @ {self.trigger_price:.2f}, "
@@ -643,7 +644,7 @@ class ZoneStrategyEngine:
             self._search_m5_task_name,
             self._search_m5_tick,
             interval_sec=M5_SEARCH_INTERVAL_SEC,
-            start_time=_next_candle_open(5),
+            start_time=_next_candle_open(5, self.start_time),
             **self._end_time_kwargs(),
         )
 

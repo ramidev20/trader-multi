@@ -45,6 +45,7 @@ type ChartSnapshot = {
   source?: "live" | "simulated";
   bid?: number | null;
   ask?: number | null;
+  server_time?: number | null;
   updated_at?: string;
 };
 
@@ -98,7 +99,36 @@ function positionIdentity(order: TradeOrder) {
   return String(order.position_id ?? order.ticket ?? "");
 }
 
-export default function ChartPage() {
+class ChartErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex min-h-64 flex-1 flex-col items-center justify-center gap-3 rounded-xl border border-rose-200 bg-rose-50 p-6 text-center">
+          <p className="text-sm font-semibold text-rose-800">The chart hit a rendering error.</p>
+          <button
+            type="button"
+            className="rounded-lg bg-white px-3 py-2 text-sm font-bold text-slate-700 shadow-sm"
+            onClick={() => this.setState({ hasError: false })}
+          >
+            Reload chart
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function ChartPageView() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
   const seriesRef = useRef<any>(null);
@@ -112,7 +142,6 @@ export default function ChartPage() {
     >
   >(new Map());
   const rememberedPositionsRef = useRef<Map<string, TradeOrder>>(new Map());
-  const lastPlacedOrderRef = useRef<Record<string, string | number | null>>({});
   const frozenZoneTimesRef = useRef<Map<string, number>>(new Map());
   // Hover hit-test data for the position tooltip -- kept separate from the
   // chart series themselves (lightweight-charts series aren't queryable for
@@ -160,6 +189,9 @@ export default function ChartPage() {
   >({});
   const fittedRef = useRef(false);
   const normalizedCandlesRef = useRef<CandlePoint[]>([]);
+  const chartHistoryResetRef = useRef(true);
+  const chartHistoryLoadedRef = useRef(false);
+  const quotePollRef = useRef(false);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   // Broker (MT5) time vs. this browser's clock, so the per-timeframe
   // countdowns line up with when candles actually close on the server
@@ -168,7 +200,6 @@ export default function ChartPage() {
   // timeframe's countdown (the offset between the two clocks is the same
   // regardless of which timeframe is selected).
   const brokerOffsetRef = useRef<number | null>(null);
-  const lastAnchorCandleTimeRef = useRef<number | null>(null);
   const countdownLineRef = useRef<any>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [timeframe, setTimeframe] = useState("M1");
@@ -243,12 +274,15 @@ export default function ChartPage() {
       // A slow response from the previous timeframe must not replace the
       // snapshot for the currently selected chart frame.
       if (requestId !== chartRequestRef.current) return;
+      chartHistoryResetRef.current = true;
+      chartHistoryLoadedRef.current = true;
       setSnapshot({
         candles: Array.isArray(data?.candles) ? data.candles : [],
         orders: Array.isArray(data?.orders) ? data.orders : [],
         source: data?.source,
         bid: data?.bid,
         ask: data?.ask,
+        server_time: data?.server_time,
         updated_at: data?.updated_at,
       });
       clearBanner();
@@ -264,11 +298,66 @@ export default function ChartPage() {
     // starting the initial fetch and polling for the newly selected frame.
     chartRequestRef.current += 1;
     fittedRef.current = false;
+    chartHistoryLoadedRef.current = false;
     normalizedCandlesRef.current = [];
+    chartHistoryResetRef.current = true;
     loadChart();
-    const timer = window.setInterval(() => loadChart(true), 1000);
-    return () => window.clearInterval(timer);
+    return undefined;
   }, [timeframe]);
+
+  // History is fetched when the page opens or the timeframe changes. The
+  // frequent path asks MT5 only for its current tick, then updates the
+  // forming candle locally instead of downloading the same 180 bars again.
+  useEffect(() => {
+    let cancelled = false;
+    async function pollQuote() {
+      if (cancelled || quotePollRef.current) return;
+      quotePollRef.current = true;
+      try {
+        const quote = await api.chartQuote("XAUUSD");
+        if (cancelled) return;
+        const bid = Number(quote?.bid);
+        const ask = Number(quote?.ask);
+        const serverTime = Number(quote?.server_time);
+        if (![bid, ask, serverTime].every(Number.isFinite) || bid <= 0 || ask <= 0 || serverTime <= 0) return;
+        const seconds = TIMEFRAME_SECONDS[timeframeRef.current] || 60;
+        const candleTime = Math.floor(serverTime / seconds) * seconds;
+        const price = (bid + ask) / 2;
+        setSnapshot((current) => {
+          const candles = current.candles.slice();
+          const last = candles[candles.length - 1];
+          if (last && Number(last.time) === candleTime) {
+            candles[candles.length - 1] = {
+              ...last,
+              high: Math.max(Number(last.high), price),
+              low: Math.min(Number(last.low), price),
+              close: price,
+            };
+          } else if (last && candleTime > Number(last.time)) {
+            candles.push({ time: candleTime, open: price, high: price, low: price, close: price });
+            if (candles.length > 400) candles.splice(0, candles.length - 400);
+          }
+          const refreshedOpenPositions = Array.isArray(quote?.orders) ? quote.orders : null;
+          const orders = refreshedOpenPositions
+            ? [
+                ...current.orders.filter((order) =>
+                  String(order.status || "").toLowerCase() !== "open",
+                ),
+                ...refreshedOpenPositions,
+              ]
+            : current.orders;
+          return { ...current, candles, orders, bid, ask, server_time: serverTime, source: quote?.source || current.source, updated_at: new Date().toISOString() };
+        });
+      } catch (error) {
+        if (!cancelled) reportError(error);
+      } finally {
+        quotePollRef.current = false;
+      }
+    }
+    pollQuote();
+    const timer = window.setInterval(pollQuote, 1000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -281,18 +370,8 @@ export default function ChartPage() {
         if (!cancelled) {
           const status = result?.zone_strategy || null;
           setZoneStatus(status);
-          let newOrderPlaced = false;
-          ["demand", "supply"].forEach((side) => {
-            const order = status?.[side]?.placed_order;
-            const ticket = order?.ticket ?? null;
-            if (ticket != null && lastPlacedOrderRef.current[side] !== ticket) {
-              lastPlacedOrderRef.current[side] = ticket;
-              newOrderPlaced = true;
-            }
-          });
-          // Fetch the broker's confirmed position as soon as the strategy
-          // reports placement instead of waiting for the regular chart poll.
-          if (newOrderPlaced) loadChart(true);
+          // Live positions now arrive with the quote poll, so order placement
+          // does not trigger another full candle-history request.
         }
       } catch {
         // transient network errors are fine to skip silently on a poll loop
@@ -346,6 +425,7 @@ export default function ChartPage() {
       const container = containerRef.current;
       if (
         fittedRef.current ||
+        !chartHistoryLoadedRef.current ||
         !normalizedCandlesRef.current.length ||
         !container?.clientWidth ||
         !container?.clientHeight
@@ -467,37 +547,38 @@ export default function ChartPage() {
     () =>
       snapshot.candles
         .map((candle) => ({
-          time: Number(candle.time),
+          time: Math.floor(Number(candle.time)),
           open: Number(candle.open),
-          high: Number(candle.high),
-          low: Number(candle.low),
+          high: Math.max(Number(candle.high), Number(candle.open), Number(candle.close)),
+          low: Math.min(Number(candle.low), Number(candle.open), Number(candle.close)),
           close: Number(candle.close),
         }))
         .filter((candle) =>
-          [candle.time, candle.open, candle.high, candle.low, candle.close].every(
-            Number.isFinite,
-          ),
+          [candle.time, candle.open, candle.high, candle.low, candle.close].every(Number.isFinite) &&
+          candle.time > 0 && candle.open > 0 && candle.high > 0 && candle.low > 0 && candle.close > 0,
         )
         .sort((left, right) => left.time - right.time)
-        .filter(
-          (candle, index, all) =>
-            index === 0 || candle.time !== all[index - 1].time,
-        ),
+        .reduce((all: CandlePoint[], candle) => {
+          const previous = all[all.length - 1];
+          if (previous?.time === candle.time) all[all.length - 1] = candle;
+          else all.push(candle);
+          return all;
+        }, []),
     [snapshot.candles],
   );
 
-  // Recalibrate the broker/client clock offset whenever a fresh candle opens
-  // (its time changes from the last one we saw) -- the currently-forming
-  // candle's open time is always an exact multiple of that timeframe's
-  // length in broker time, so it's a reliable anchor.
+  // Use the broker's actual quote timestamp as the clock anchor. Candle open
+  // times are unsuitable here because the first poll can see a candle well
+  // after its open and make the countdown jump by that elapsed time.
   useEffect(() => {
-    const formingCandle = normalizedCandles[normalizedCandles.length - 1];
-    if (!formingCandle) return;
-    if (lastAnchorCandleTimeRef.current !== formingCandle.time) {
-      lastAnchorCandleTimeRef.current = formingCandle.time;
-      brokerOffsetRef.current = formingCandle.time - Date.now() / 1000;
+    const serverTime = Number(snapshot.server_time);
+    if (Number.isFinite(serverTime) && serverTime > 0) {
+      const measuredOffset = serverTime - Date.now() / 1000;
+      brokerOffsetRef.current = brokerOffsetRef.current == null
+        ? measuredOffset
+        : brokerOffsetRef.current * 0.8 + measuredOffset * 0.2;
     }
-  }, [normalizedCandles]);
+  }, [snapshot.server_time]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowTick(Date.now()), 1000);
@@ -556,7 +637,21 @@ export default function ChartPage() {
 
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
-    seriesRef.current.setData(normalizedCandles);
+    try {
+      if (chartHistoryResetRef.current || !normalizedCandlesRef.current.length) {
+        seriesRef.current.setData(normalizedCandles);
+        chartHistoryResetRef.current = false;
+      } else if (normalizedCandles.length) {
+        // lightweight-charts requires update() times to be monotonic. The
+        // normalization above sorts and collapses duplicate timestamps.
+        seriesRef.current.update(normalizedCandles[normalizedCandles.length - 1]);
+      }
+    } catch (error) {
+      // A malformed broker bar must not take down the entire React page.
+      // Recover the series from the sanitized snapshot and let the next quote
+      // continue from there.
+      try { seriesRef.current.setData(normalizedCandles); } catch { reportError(error); }
+    }
     normalizedCandlesRef.current = normalizedCandles;
 
     // Remember every open position by ticket instead of only drawing what's
@@ -712,7 +807,7 @@ export default function ChartPage() {
       overlay.slZone.setData(slData);
     });
     positionsHoverRef.current = hoverEntries;
-    if (normalizedCandles.length && !fittedRef.current) {
+    if (chartHistoryLoadedRef.current && normalizedCandles.length && !fittedRef.current) {
       const container = containerRef.current;
       if (container?.clientWidth && container?.clientHeight) {
         chartRef.current?.timeScale().fitContent();
@@ -1070,5 +1165,13 @@ export default function ChartPage() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+export default function ChartPage() {
+  return (
+    <ChartErrorBoundary>
+      <ChartPageView />
+    </ChartErrorBoundary>
   );
 }

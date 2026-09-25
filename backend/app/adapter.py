@@ -118,6 +118,61 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "message": "Invalid adapter command payload."}
     if action == "copy_open":
         return _execute_copy_open(payload)
+    if action == "chart_quote":
+        try:
+            symbol = str(payload.get("symbol", "XAUUSD") or "XAUUSD").strip().upper()
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                return {"status": "error", "message": f"Symbol {symbol} is unavailable in the connected MT5 terminal."}
+            if not bool(getattr(symbol_info, "visible", False)) and not mt5.symbol_select(symbol, True):
+                return {"status": "error", "message": f"Could not select {symbol} in Market Watch."}
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                return {"status": "error", "message": f"No live quote is available for {symbol}: {mt5.last_error()}"}
+            positions = [
+                {
+                    "ticket": int(getattr(position, "ticket", 0) or 0),
+                    "position_id": int(getattr(position, "identifier", getattr(position, "ticket", 0)) or 0),
+                    "symbol": symbol,
+                    "side": "BUY" if int(getattr(position, "type", -1)) == int(getattr(mt5, "POSITION_TYPE_BUY", 0)) else "SELL",
+                    "order_kind": "MARKET",
+                    "lot": float(getattr(position, "volume", 0.0) or 0.0),
+                    "price": float(getattr(position, "price_open", 0.0) or 0.0),
+                    "sl": float(getattr(position, "sl", 0.0) or 0.0),
+                    "tp": float(getattr(position, "tp", 0.0) or 0.0),
+                    "opened_at": int(getattr(position, "time", 0) or 0),
+                    "status": "open",
+                }
+                for position in mt5.positions_get(symbol=symbol) or []
+            ]
+            for order in mt5.orders_get(symbol=symbol) or []:
+                order_type = int(getattr(order, "type", -1))
+                if order_type not in {mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT}:
+                    continue
+                positions.append(
+                    {
+                        "ticket": int(getattr(order, "ticket", 0) or 0),
+                        "symbol": symbol,
+                        "side": "BUY" if order_type == mt5.ORDER_TYPE_BUY_LIMIT else "SELL",
+                        "order_kind": "LIMIT",
+                        "lot": float(getattr(order, "volume_current", getattr(order, "volume_initial", 0.0)) or 0.0),
+                        "price": float(getattr(order, "price_open", 0.0) or 0.0),
+                        "sl": float(getattr(order, "sl", 0.0) or 0.0),
+                        "tp": float(getattr(order, "tp", 0.0) or 0.0),
+                        "opened_at": int(getattr(order, "time_setup", 0) or 0),
+                        "status": "open",
+                    }
+                )
+            return {
+                "status": "ok",
+                "source": "live",
+                "bid": float(getattr(tick, "bid", 0.0) or 0.0),
+                "ask": float(getattr(tick, "ask", 0.0) or 0.0),
+                "server_time": int(getattr(tick, "time", 0) or 0),
+                "orders": positions,
+            }
+        except Exception as ex:
+            return {"status": "error", "message": str(ex)}
     if action == "chart":
         try:
             symbol = str(payload.get("symbol", "XAUUSD") or "XAUUSD").strip().upper()

@@ -442,9 +442,13 @@ def _parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
-    except Exception:
-        return None
+        parsed = datetime.fromisoformat(value)
+        # The UI submits local wall time. Normalize ISO values carrying an
+        # offset to the host's local wall time as well, because strategy
+        # schedulers compare against datetime.now() (naive local time).
+        return parsed.astimezone().replace(tzinfo=None) if parsed.tzinfo else parsed
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid scheduled date/time: {value}") from exc
 
 
 def _sanitize_terminal_path(value: str) -> str:
@@ -523,6 +527,7 @@ def _generate_chart_candles(symbol: str, timeframe: int, count: int) -> list[dic
     elif timeframe == mt5.TIMEFRAME_M15:
         interval_seconds = 900
     now = int(datetime.now().timestamp())
+    now -= now % interval_seconds
     current_close = float(base.bid)
     for index in range(count):
         offset = count - index
@@ -1203,6 +1208,7 @@ def chart_data(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1", count: int =
     source = "simulated"
     bid = None
     ask = None
+    server_time = None
 
     if not is_dev_mode():
         config = _load_config()
@@ -1226,10 +1232,12 @@ def chart_data(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1", count: int =
         source = "live"
         bid = result.get("bid")
         ask = result.get("ask")
+        server_time = result.get("server_time")
     else:
         tf = _resolve_chart_timeframe(normalized_timeframe)
         candles = _generate_chart_candles(normalized_symbol, tf, normalized_count)
         orders = _generate_chart_orders()
+        server_time = int(datetime.now().timestamp())
     return {
         "status": "ok",
         "source": source,
@@ -1239,7 +1247,31 @@ def chart_data(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1", count: int =
         "orders": orders,
         "bid": bid,
         "ask": ask,
+        "server_time": server_time,
         "updated_at": datetime.now().isoformat(),
+    }
+
+
+@app.get("/chart/quote")
+def chart_quote(symbol: str = SYMBOL_DEFAULT) -> dict[str, Any]:
+    normalized_symbol = str(symbol or SYMBOL_DEFAULT).strip().upper()
+    if not is_dev_mode():
+        config = _load_config()
+        ready, detail, master_login = master_adapter_ready(config)
+        if not ready or not master_login:
+            raise HTTPException(status_code=409, detail=detail)
+        result = submit_adapter_command(master_login, "chart_quote", {"symbol": normalized_symbol}, timeout_sec=3.0)
+        if result.get("status") != "ok":
+            raise HTTPException(status_code=409, detail=str(result.get("message", "Live quote request failed.")))
+        return {"status": "ok", **result}
+    tick = _tick_for(normalized_symbol)
+    return {
+        "status": "ok",
+        "source": "simulated",
+        "bid": float(tick.bid),
+        "ask": float(tick.ask),
+        "server_time": int(datetime.now().timestamp()),
+        "orders": _generate_chart_orders(),
     }
 
 

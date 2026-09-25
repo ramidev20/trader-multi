@@ -890,11 +890,8 @@ class ZoneStrategyEngine:
         gap_ref, touch_ref = self._c3_reference_prices(c3, target_zone_type)
 
         if target_zone_type == "demand":
-            # The confirming candle must be bullish, as in the chart pattern:
-            # c3 defines the base, c2 retests it, and bullish c1 confirms the
-            # rejection before a demand entry is sent.
-            if not _is_bullish(c1):
-                return None
+            # c3 defines the base and c2 retests it. c1 only needs to hold
+            # above the gap reference; its candle direction is irrelevant.
             c1_low = _candle_value(c1, 3, "low")
             if c1_low <= gap_ref:
                 return None
@@ -905,8 +902,8 @@ class ZoneStrategyEngine:
             c3_low = _candle_value(c3, 3, "low")
             price_low, price_high = c3_low, gap_ref
         else:
-            if _is_bullish(c1):
-                return None
+            # Supply mirrors demand: c1 must hold below the reference, but
+            # its candle direction is irrelevant.
             c1_high = _candle_value(c1, 2, "high")
             if c1_high >= gap_ref:
                 return None

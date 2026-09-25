@@ -916,7 +916,6 @@ def open_manual_position(
         message = f"Manual order blocked: {master_session_detail}"
         append_log("search", f"[ERROR] {message}")
         raise RuntimeError(message)
-    append_log("search", f"[INFO] [order] manual master execution account={master_login}")
     account_info = mt5.account_info() if mt5_available() else None
     balance_before = float(getattr(account_info, "balance", 0.0) or 0.0) if account_info is not None else 0.0
 

@@ -152,6 +152,7 @@ class ZoneStrategyEngine:
         self._trigger_task_name = f"{TRIGGER_TASK_NAME}_{side}"
         self._search_m5_task_name = f"{SEARCH_M5_TASK_NAME}_{side}"
         self._search_m1_task_name = f"{SEARCH_M1_TASK_NAME}_{side}"
+        self._exit_task_name = f"zone_exit_watch_{side}"
         self._state_path = f"zone_strategy.{side}"
         self._lock = threading.Lock()
         self._reset_config()
@@ -199,6 +200,10 @@ class ZoneStrategyEngine:
         # here (not just in the patched runtime state) so the M1 search loop
         # can check live price against it every tick.
         self.m5_zone: Optional[dict[str, Any]] = None
+        self._exit_position_keys: set[str] = set()
+        self._exit_position_seen = False
+        self._exit_monitor_attempts = 0
+        self._exit_levels: dict[str, Any] = {}
         self._last_symbol_error: Optional[str] = None
 
     def start(self, cfg: dict) -> None:
@@ -241,6 +246,7 @@ class ZoneStrategyEngine:
         stop_task(self._trigger_task_name)
         stop_task(self._search_m5_task_name)
         stop_task(self._search_m1_task_name)
+        stop_task(self._exit_task_name)
 
         with self._lock:
             self._reset_config()
@@ -358,10 +364,12 @@ class ZoneStrategyEngine:
             is_task_running(self._trigger_task_name)
             or is_task_running(self._search_m5_task_name)
             or is_task_running(self._search_m1_task_name)
+            or is_task_running(self._exit_task_name)
         )
         stop_task(self._trigger_task_name)
         stop_task(self._search_m5_task_name)
         stop_task(self._search_m1_task_name)
+        stop_task(self._exit_task_name)
         if was_running:
             patch_path(self._state_path, {"running": False, "phase": "stopped", "last_stop_reason": reason})
             append_log("search", f"[WARNING] [scalping:{self.side}] {reason}")
@@ -630,14 +638,30 @@ class ZoneStrategyEngine:
             self._last_processed_candle_time[timeframe_label] = candle_time
         return candle
 
-    def _start_m5_search(self) -> None:
+    def _start_m5_search(self, fresh: bool = False) -> None:
         # Evaluate the latest completed M5 pattern as soon as the M15 trigger
         # starts this stage. Waiting for the next M5 close adds up to five
         # minutes even though three completed candles are already available.
-        self._seed_buffer(self.m5_buffer, "M5", preload_count=3)
+        self._seed_buffer(self.m5_buffer, "M5", preload_count=0 if fresh else 3)
+        append_log(
+            "search",
+            f"[INFO] [scalping:{self.side}] Started searching for a new 5-minute {self.side} zone.",
+        )
         with self._lock:
-            zone = self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
-        if zone is not None:
+            self.m5_zone = None
+            self.m1_buffer.clear()
+            zone = None if fresh else self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
+        if fresh:
+            patch_path(self._state_path, {
+                "running": True,
+                "phase": "searching_m5_zone",
+                "m5_zone": None,
+                "m1_zone": None,
+                "placed_order": None,
+                "last_error": None,
+            })
+            append_log("search", f"[INFO] [scalping:{self.side}] TP/SL closed the position; starting a fresh 5-minute search.")
+        elif zone is not None:
             self._accept_m5_zone(zone)
             return
         start_task(
@@ -656,7 +680,7 @@ class ZoneStrategyEngine:
         patch_path(self._state_path, {"phase": "searching_m1_zone", "m5_zone": zone})
         append_log(
             "search",
-            f"[SUCCESS] [scalping:{self.side}] M5 zone {zone['price_low']:.2f}-{zone['price_high']:.2f}, searching M1.",
+            f"[SUCCESS] [scalping:{self.side}] 5-minute {self.side} zone appeared at {zone['price_low']:.2f}-{zone['price_high']:.2f}; starting 1-minute search.",
         )
         start_task(
             self._search_m1_task_name,
@@ -677,23 +701,28 @@ class ZoneStrategyEngine:
             return
         self._accept_m5_zone(zone)
 
-    def _m5_zone_breached(self, price: float) -> bool:
+    def _m5_zone_breached(self, price: float | None, candle: Any = None) -> bool:
         """Has price traded through the M5 zone while waiting on M1?
 
-        A demand zone is invalidated the moment price closes below its own
-        low (it didn't hold as support); a supply zone the moment price
-        trades above its own high. Once that happens there's nothing left
-        worth confirming with M1 -- the zone itself is no longer a valid
-        demand/supply level.
+        While the M1 search is active, invalidate demand if price or a
+        completed M1 candle's low is below the M5 demand low. Invalidate
+        supply if price or a completed M1 candle's high is above the M5
+        supply high.
         """
         zone = self.m5_zone
         if zone is None:
             return False
         if self.side == "demand":
-            return price < zone["price_low"]
-        return price > zone["price_high"]
+            return (
+                (price is not None and price < zone["price_low"])
+                or (candle is not None and float(_candle_value(candle, 3, "low")) < zone["price_low"])
+            )
+        return (
+            (price is not None and price > zone["price_high"])
+            or (candle is not None and float(_candle_value(candle, 2, "high")) > zone["price_high"])
+        )
 
-    def _retreat_after_breach(self, reason: Optional[str] = None) -> None:
+    def _retreat_after_breach(self, reason: Optional[str] = None, breach_time: int | None = None) -> None:
         """M5 zone invalidated (or its M1 confirmation gave up) mid-M1-search:
         drop back to hunting a fresh M5 zone instead of continuing to chase
         a level that no longer holds, or that price has already moved too
@@ -722,7 +751,7 @@ class ZoneStrategyEngine:
             # sliding window. Since that window keeps sliding forward as new
             # candles arrive, the "frozen" box kept visibly growing to the
             # right forever instead of actually freezing.
-            breach_time = int(self.m5_buffer[-1]["time"]) if self.m5_buffer else None
+            breach_time = breach_time or (int(self.m5_buffer[-1]["time"]) if self.m5_buffer else None)
         breached_zone = (
             {
                 **zone,
@@ -731,7 +760,6 @@ class ZoneStrategyEngine:
             if zone
             else None
         )
-        self._seed_buffer(self.m5_buffer, "M5", preload_count=3)
         patch_path(
             self._state_path,
             {
@@ -746,19 +774,21 @@ class ZoneStrategyEngine:
                 append_log("search", f"[WARNING] [scalping:{self.side}] {reason}; searching a new M5 zone.")
             else:
                 edge = "low" if self.side == "demand" else "high"
+                direction = "below" if self.side == "demand" else "above"
                 append_log(
                     "search",
-                    f"[WARNING] [scalping:{self.side}] M5 zone breached (price past {edge} "
-                    f"{zone[f'price_{edge}']:.2f}); searching a new M5 zone.",
+                    f"[WARNING] [scalping:{self.side}] 5-minute {self.side} zone breached {direction} its {edge} "
+                    f"({zone[f'price_{edge}']:.2f}); starting a new 5-minute search.",
                 )
-        self._start_m5_search()
+        self._start_m5_search(fresh=True)
 
     def _search_m1_tick(self) -> None:
         price = self._current_price()
-        if price is not None and self._m5_zone_breached(price):
-            self._retreat_after_breach()
-            return
         candle = self._next_search_candle("M1")
+        if self._m5_zone_breached(price, candle):
+            candle_time = int(candle["time"]) if candle is not None else None
+            self._retreat_after_breach(breach_time=candle_time)
+            return
         if candle is None:
             return
         with self._lock:
@@ -784,7 +814,7 @@ class ZoneStrategyEngine:
         stop_task(self._search_m1_task_name)
         append_log(
             "search",
-            f"[SUCCESS] [scalping:{self.side}] M1 zone {zone['price_low']:.2f}-{zone['price_high']:.2f}, placing order.",
+            f"[SUCCESS] [scalping:{self.side}] 1-minute liquidity appeared at {zone['price_low']:.2f}-{zone['price_high']:.2f}; placing order.",
         )
         self._place_order(zone)
 
@@ -905,6 +935,7 @@ class ZoneStrategyEngine:
         is_buy = zone["type"] == "demand"
         side = "BUY" if is_buy else "SELL"
         position_candle_time: Optional[int] = None
+        order_result = None
         try:
             if mt5_available():
                 with MT5_LOCK:
@@ -944,7 +975,7 @@ class ZoneStrategyEngine:
             # above -- same mechanism as manual trade's Advanced Risk panel,
             # but fed the strategy's own stop instead of a manually typed
             # Stop Loss Price, since scalping never has one of those.
-            open_manual_position(
+            order_result = open_manual_position(
                 side,
                 lot_size=self.lot,
                 symbol=self.symbol,
@@ -968,7 +999,34 @@ class ZoneStrategyEngine:
             return
 
         placed_orders = get("orders", [])
-        placed = placed_orders[-1] if placed_orders else {}
+        result_order_ticket = getattr(order_result, "order", None)
+        placed = next(
+            (
+                order for order in reversed(placed_orders)
+                if str(order.get("ticket")) == str(result_order_ticket)
+                and str(order.get("side", "")).upper() == side
+            ),
+            next(
+                (order for order in reversed(placed_orders) if str(order.get("side", "")).upper() == side),
+                placed_orders[-1] if placed_orders else {},
+            ),
+        )
+        ticket = placed.get("ticket", result_order_ticket)
+        position_key_values = [
+            ticket,
+            result_order_ticket,
+            getattr(order_result, "position", None),
+        ]
+        self._exit_position_keys = {str(value) for value in position_key_values if value not in (None, "", 0)}
+        self._exit_position_seen = False
+        self._exit_monitor_attempts = 0
+        self._exit_levels = {
+            "ticket": ticket,
+            "side": side,
+            "order_kind": self.order_kind,
+            "tp": float(placed.get("tp", 0) or 0),
+            "sl": float(placed.get("sl", sl_price) or sl_price),
+        }
         if position_candle_time is not None:
             zone["position_candle_time"] = position_candle_time
         patch_path(
@@ -995,6 +1053,90 @@ class ZoneStrategyEngine:
                 },
             },
         )
+        start_task(
+            self._exit_task_name,
+            self._watch_position_exit,
+            interval_sec=1.0,
+            start_time=datetime.now() + timedelta(seconds=1),
+            log_schedule=False,
+            **self._end_time_kwargs(),
+        )
+
+    def _watch_position_exit(self) -> None:
+        """Restart the same side's search only after its trade closes by TP/SL."""
+        if not mt5_available():
+            price = self._current_price()
+            if price is None:
+                return
+            levels = self._exit_levels
+            hit_tp = price >= levels["tp"] if levels.get("side") == "BUY" else price <= levels["tp"]
+            hit_sl = price <= levels["sl"] if levels.get("side") == "BUY" else price >= levels["sl"]
+            if (levels.get("tp", 0) > 0 and hit_tp) or (levels.get("sl", 0) > 0 and hit_sl):
+                stop_task(self._exit_task_name)
+                append_log("search", f"[INFO] [scalping:{self.side}] simulated position hit {'TP' if hit_tp else 'SL'}; restarting M5 search.")
+                self._start_m5_search(fresh=True)
+            return
+
+        if not self._ensure_symbol_or_log():
+            return
+        self._exit_monitor_attempts += 1
+        now = datetime.now()
+        since = now - timedelta(days=7)
+        tp_reason = int(getattr(mt5, "DEAL_REASON_TP", 5))
+        sl_reason = int(getattr(mt5, "DEAL_REASON_SL", 4))
+        closing_entries = {
+            int(getattr(mt5, "DEAL_ENTRY_OUT", 1)),
+            int(getattr(mt5, "DEAL_ENTRY_OUT_BY", 3)),
+            int(getattr(mt5, "DEAL_ENTRY_INOUT", 2)),
+        }
+        with MT5_LOCK:
+            try:
+                positions = mt5.positions_get(symbol=self.symbol) or []
+                pending_orders = mt5.orders_get(symbol=self.symbol) or []
+            except Exception as exc:
+                append_log("search", f"[WARNING] [scalping:{self.side}] position close monitor failed: {exc}")
+                return
+
+        identity_keys = set(self._exit_position_keys)
+        for position in positions:
+            ticket = int(getattr(position, "ticket", 0) or 0)
+            identifier = int(getattr(position, "identifier", ticket) or ticket)
+            if str(ticket) in identity_keys or str(identifier) in identity_keys:
+                self._exit_position_seen = True
+                self._exit_position_keys.update({str(ticket), str(identifier)})
+                return
+        for order in pending_orders:
+            if str(int(getattr(order, "ticket", 0) or 0)) in identity_keys:
+                return
+
+        with MT5_LOCK:
+            try:
+                deals = mt5.history_deals_get(since, now) or []
+            except Exception as exc:
+                append_log("search", f"[WARNING] [scalping:{self.side}] close history read failed: {exc}")
+                return
+        closed_reason = None
+        for deal in reversed(deals):
+            if str(int(getattr(deal, "position_id", 0) or 0)) not in identity_keys:
+                continue
+            if int(getattr(deal, "entry", -1)) not in closing_entries:
+                continue
+            reason = int(getattr(deal, "reason", -1))
+            if reason == tp_reason:
+                closed_reason = "TP"
+            elif reason == sl_reason:
+                closed_reason = "SL"
+            if closed_reason:
+                break
+
+        if closed_reason:
+            stop_task(self._exit_task_name)
+            append_log("search", f"[INFO] [scalping:{self.side}] position closed by {closed_reason}; restarting M5 search.")
+            self._start_m5_search(fresh=True)
+        elif self._exit_position_seen or self._exit_monitor_attempts >= 15:
+            # Manual closes and cancelled pending orders do not restart this
+            # TP/SL-triggered search. Avoid leaving a stale watcher behind.
+            stop_task(self._exit_task_name)
 
 
 zone_manager_demand = ZoneStrategyEngine("demand")

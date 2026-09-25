@@ -8,6 +8,8 @@ export type ConsoleLogEntry = {
   level: ConsoleLogLevel;
   message: string;
   at: string;
+  /** Scalping side, used to distinguish demand and supply appearance logs. */
+  side?: "demand" | "supply";
   /** Optional small tag shown next to the timestamp (e.g. a receiver name);
    * also filterable via the dropdown when `showTagFilter` is set. */
   tag?: string | null;
@@ -192,6 +194,10 @@ export function ConsoleLogPanel({
             visible.map((entry) => {
               const style = LOG_LEVEL_STYLE[entry.level];
               const LevelIcon = style.icon;
+              const sideAppearance = entry.side && /\bappeared\b/i.test(entry.message);
+              const messageColor = sideAppearance
+                ? entry.side === "demand" ? "text-emerald-700" : "text-rose-700"
+                : "text-slate-700";
               return (
                 <div key={entry.id} data-log-level={entry.level} className={`grid grid-cols-[92px_92px_1fr] items-start gap-x-3 border-l-[3px] px-3 py-2 text-[12.5px] leading-relaxed ${style.row}`}>
                   <span className="shrink-0 font-mono text-[10.5px] text-slate-400">{entry.at}</span>
@@ -199,7 +205,7 @@ export function ConsoleLogPanel({
                     <LevelIcon className={`h-3.5 w-3.5 shrink-0 ${style.iconClass}`} />
                     {style.label}
                   </span>
-                  <span className="min-w-0 break-words font-semibold text-slate-700">
+                  <span className={`min-w-0 break-words font-semibold ${messageColor}`}>
                     {entry.tag ? (
                       <span className="mr-1.5 inline-block shrink-0 rounded-full bg-slate-900/5 px-1.5 py-0.5 text-[9.5px] font-black uppercase tracking-wide text-slate-600">
                         {entry.tag}

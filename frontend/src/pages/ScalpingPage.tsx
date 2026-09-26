@@ -209,6 +209,7 @@ export default function ScalpingPage() {
   );
   const [orderKind, setOrderKind] = useState(saved.orderKind ?? "MARKET");
   const [riskPercent, setRiskPercent] = useState(saved.riskPercent ?? "1");
+  const [maxPositions, setMaxPositions] = useState(saved.maxPositions ?? "1");
 
   // Multi-TP (up to 2 stages), same mechanism as Manual Trade's Advanced
   // Risk panel -- but with no Stop Loss Price field, since the SL here
@@ -257,6 +258,7 @@ export default function ScalpingPage() {
       liquiditySlPips,
       orderKind,
       riskPercent,
+      maxPositions,
       tp1Ratio,
       tp2Ratio,
       tp2Enabled,
@@ -280,6 +282,7 @@ export default function ScalpingPage() {
     liquiditySlPips,
     orderKind,
     riskPercent,
+    maxPositions,
     tp1Ratio,
     tp2Ratio,
     tp2Enabled,
@@ -330,6 +333,7 @@ export default function ScalpingPage() {
     "scheduled_m5_start",
     "searching_m5_zone",
     "searching_m1_zone",
+    "placed",
   ];
   const demandPhase = status.demand?.phase ?? "idle";
   const supplyPhase = status.supply?.phase ?? "idle";
@@ -372,6 +376,7 @@ export default function ScalpingPage() {
       order_kind: orderKind,
       lot: null,
       risk_percent: Number(riskPercent || 0),
+      max_positions: Math.max(1, Math.floor(Number(maxPositions) || 1)),
       instant_m5_start: Boolean(instantM5) && !devM1,
       dev_m1_start: Boolean(devM1),
       tp1_ratio: Number(tp1Ratio || 0),
@@ -392,6 +397,10 @@ export default function ScalpingPage() {
     }
     if (!(Number(tp1Ratio) > 0)) {
       showBanner("Enter a TP1 ratio greater than 0.", "error");
+      return;
+    }
+    if (!(Number(maxPositions) >= 1)) {
+      showBanner("Max positions must be at least 1.", "error");
       return;
     }
     if (endEnabled) {
@@ -470,6 +479,10 @@ export default function ScalpingPage() {
 
   async function handleDevM1Start(side) {
     clearBanner();
+    if (!(Number(maxPositions) >= 1)) {
+      showBanner("Max positions must be at least 1.", "error");
+      return;
+    }
     if (!(Number(minSlPips) > 0)) {
       showBanner("Enter a min SL (pips) amount greater than 0.", "error");
       return;
@@ -619,6 +632,16 @@ export default function ScalpingPage() {
                 setRiskPercent(decimalInput(event.target.value))
               }
               disabled={submitting}
+            />
+
+            <Field
+              label="Max Positions (both sides)"
+              type="text"
+              inputMode="numeric"
+              value={maxPositions}
+              onChange={(event) => setMaxPositions(event.target.value.replace(/[^0-9]/g, ""))}
+              disabled={submitting}
+              placeholder="1"
             />
 
             <Field

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import wraps
@@ -25,6 +26,7 @@ _sim_ticks = {"XAUUSD": 3350.0}
 _sim_last_candle_ts: dict[str, int] = {}
 MANUAL_TP_TASK_NAME = "manual_multi_tp"
 MANUAL_AUTO_CLOSE_TASK_NAME = "manual_auto_close_all"
+_SUBACCOUNT_COPY_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="subaccount-copy")
 # MetaTrader5's Python API has no tick-event/callback hook -- symbol_info_tick()
 # is always a pull, not a push. This polls it directly (cheap local IPC call,
 # not a network round-trip) at a fifth of a second instead of a full second, to
@@ -400,6 +402,37 @@ def _build_copy_request(master_request: dict, risk_percent: float, origin: str) 
     return req
 
 
+def _copy_trade_to_sub_adapter(
+    account: dict,
+    risk_percent: float,
+    master_request: dict,
+    origin: str,
+) -> None:
+    login = _safe_int(account.get("user"))
+    delay_seconds = max(
+        0.0,
+        float(account.get("order_delay_sec", account.get("orderDelaySec", 0)) or 0),
+    )
+    result = submit_adapter_command(
+        login,
+        "copy_open",
+        {
+            "master_request": master_request,
+            "risk_percent": float(risk_percent),
+            "order_delay_sec": delay_seconds,
+            "origin": origin,
+        },
+        timeout_sec=max(15.0, delay_seconds + 15.0),
+    )
+    if result.get("status") == "ok":
+        append_log("search", f"[COPY] {origin} trade copied to {login} (delay {delay_seconds:g}s).")
+    else:
+        append_log(
+            "search",
+            f"[ERROR] Copy failed for {login}: {result.get('message', 'adapter command failed')}.",
+        )
+
+
 @_mt5_session_locked
 def _clone_trade_to_sub_accounts(master_request: dict, origin: str) -> str | None:
     ok, detail, master, cfg = _ensure_master_session()
@@ -417,40 +450,18 @@ def _clone_trade_to_sub_accounts(master_request: dict, origin: str) -> str | Non
     if not mt5_available():
         return f"Copied master trade to 0/{len(targets)} sub account(s)"
 
-    copied = 0
+    # Each connected sub account owns an adapter process. Dispatch to those
+    # processes concurrently so one account's network/order delay does not
+    # serialize every other copy or hold up the master/scalping UI.
     for account, risk_percent in targets:
-        login = _safe_int(account.get("user"))
-        delay_seconds = max(
-            0.0,
-            float(account.get("order_delay_sec", account.get("orderDelaySec", 0)) or 0),
+        _SUBACCOUNT_COPY_EXECUTOR.submit(
+            _copy_trade_to_sub_adapter,
+            account,
+            risk_percent,
+            dict(master_request),
+            origin,
         )
-        if delay_seconds > 0:
-            append_log("search", f"[COPY] Waiting {delay_seconds:.0f}s before copying to {login}.")
-            time.sleep(delay_seconds)
-        init_ok, init_detail = _initialize_mt5_for_account(account)
-        if not init_ok:
-            append_log("search", f"[ERROR] Copy init failed for {login}: {init_detail}")
-            continue
-        account_session_ok, account_session_detail = _verify_mt5_login(login)
-        if not account_session_ok:
-            append_log("search", f"[ERROR] Copy blocked for {login}: {account_session_detail}")
-            continue
-        copy_req = _build_copy_request(master_request, risk_percent, origin)
-        result = mt5.order_send(copy_req)
-        if result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
-            copied += 1
-        else:
-            append_log(
-                "search",
-                f"[ERROR] Copy order failed for {login}: {getattr(result, 'comment', mt5.last_error())}",
-            )
-
-    # Restore master session for subsequent strategy ticks.
-    if master:
-        restore_ok, restore_detail = _initialize_mt5_for_account(master)
-        if not restore_ok:
-            append_log("search", f"[ERROR] Master session restore failed: {restore_detail}")
-    return f"Copied master trade to {copied}/{len(targets)} sub account(s)"
+    return f"Copy dispatched to {len(targets)} sub account(s)"
 
 
 @dataclass

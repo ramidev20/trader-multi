@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -55,10 +56,7 @@ def _copy_to_connected_sub_adapters(master_request: dict[str, Any]) -> str | Non
     if not targets:
         return "Copied master trade to 0/0 sub adapter(s)"
 
-    copied = 0
-    active_targets = 0
-    target_details: list[str] = []
-    for account, risk_percent in targets:
+    def copy_to_target(account: dict[str, Any], risk_percent: float) -> tuple[int, float, dict[str, Any]]:
         login = _safe_int(account.get("user"))
         delay_seconds = max(
             0.0,
@@ -73,12 +71,30 @@ def _copy_to_connected_sub_adapters(master_request: dict[str, Any]) -> str | Non
                 "order_delay_sec": delay_seconds,
                 "origin": "manual",
             },
-            timeout_sec=15.0,
+            timeout_sec=max(15.0, delay_seconds + 15.0),
         )
-        if result.get("status") == "ok":
-            active_targets += 1
-            copied += 1
-            target_details.append(f"{login}: {delay_seconds:g}s delay")
+        return login, delay_seconds, result
+
+    copied = 0
+    active_targets = 0
+    target_details: list[str] = []
+    with ThreadPoolExecutor(max_workers=min(16, len(targets)), thread_name_prefix="adapter-copy") as executor:
+        futures = [executor.submit(copy_to_target, account, risk_percent) for account, risk_percent in targets]
+        for future in as_completed(futures):
+            try:
+                login, delay_seconds, result = future.result()
+            except Exception as exc:
+                append_log("search", f"[ERROR] Copy dispatch failed: {exc}")
+                continue
+            if result.get("status") == "ok":
+                active_targets += 1
+                copied += 1
+                target_details.append(f"{login}: {delay_seconds:g}s delay")
+            else:
+                append_log(
+                    "search",
+                    f"[ERROR] Copy failed for {login}: {result.get('message', 'adapter command failed')}.",
+                )
 
     if active_targets == 0:
         return f"Copied master trade to 0/{len(targets)} sub adapter(s); no sub adapter is connected"

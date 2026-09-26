@@ -16,6 +16,7 @@ import { initialAccounts, liquidityLevels, strategyLogs } from "./data/mockData"
 import { cx } from "./utils/format";
 import { clearBanner, showBanner } from "./utils/banner";
 import { api } from "./services/api";
+import { sendRemoteCommand } from "./services/remoteControl";
 
 const avatarColorOptions = [
   { name: "Blue", value: "from-blue-600 to-indigo-600", swatch: "#2563eb" },
@@ -41,6 +42,7 @@ export default function App() {
   const [themeMode, setThemeMode] = useState("LIGHT");
   const [uiZoomPercent, setUiZoomPercent] = useState(100);
   const dismissedNotificationIds = useRef(new Set());
+  const forwardedScalpingOrders = useRef(new Set());
   const [tradeHistory, setTradeHistory] = useState({ history: [], summaries: [] });
   const [loadingBootstrap, setLoadingBootstrap] = useState(true);
   const [settingsTabRequest, setSettingsTabRequest] = useState("accounts");
@@ -199,6 +201,73 @@ export default function App() {
     const timer = setInterval(() => refreshBootstrap({ silent: true }), 5000);
     return () => clearInterval(timer);
   }, [refreshBootstrap]);
+
+  // Scalping runs in the backend even when its page is not selected. Watch
+  // its placed-order state here, at the app level, and forward each newly
+  // placed master order to enabled remote receivers once.
+  useEffect(() => {
+    let cancelled = false;
+    let polling = false;
+    let initialized = false;
+    const previousOrders = { demand: null, supply: null };
+    async function pollScalpingOrders() {
+      if (polling) return;
+      polling = true;
+      try {
+        const result = await api.zoneStrategyStatus();
+        if (cancelled) return;
+        const zones = result?.zone_strategy || {};
+        for (const side of ["demand", "supply"]) {
+          const sideStatus = zones[side];
+          const placed = sideStatus?.placed_order;
+          const ticket = placed?.ticket ?? placed?.created_at;
+          const orderKey = ticket == null ? null : `${side}:${ticket}`;
+          const previousKey = previousOrders[side];
+          if (
+            !devModeEnabled &&
+            initialized &&
+            sideStatus?.phase === "placed" &&
+            orderKey &&
+            orderKey !== previousKey &&
+            !forwardedScalpingOrders.current.has(orderKey)
+          ) {
+            forwardedScalpingOrders.current.add(orderKey);
+            const orderKind = String(placed.order_kind || sideStatus.order_kind || "MARKET").toUpperCase();
+            void sendRemoteCommand("open", {
+              side: String(placed.side || (side === "demand" ? "BUY" : "SELL")).toUpperCase(),
+              lot: placed.lot ?? sideStatus.lot ?? null,
+              symbol: sideStatus.symbol || "XAUUSD",
+              order_kind: orderKind,
+              limit_price: orderKind === "LIMIT" ? placed.entry : null,
+              risk_percent: sideStatus.risk_percent ?? null,
+              advanced: true,
+              sl_price: placed.sl,
+              tp1_ratio: sideStatus.tp1_ratio ?? 1,
+              tp2_ratio: sideStatus.tp2_ratio ?? 1,
+              tp3_ratio: sideStatus.tp3_ratio ?? 1,
+              tp2_enabled: Boolean(sideStatus.tp2_enabled),
+              tp3_enabled: Boolean(sideStatus.tp3_enabled),
+              tp1_percent: sideStatus.tp1_percent ?? 100,
+              tp2_percent: sideStatus.tp2_percent ?? 100,
+            });
+          }
+          previousOrders[side] =
+            sideStatus?.phase === "placed" && ticket != null ? `${side}:${ticket}` : null;
+        }
+        initialized = true;
+      } catch {
+        // Status polling is best effort; the next poll will retry.
+      } finally {
+        polling = false;
+      }
+    }
+    pollScalpingOrders();
+    const timer = window.setInterval(pollScalpingOrders, 300);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [devModeEnabled]);
 
 
   const totals = useMemo(

@@ -58,10 +58,9 @@ function WheelColumn({ values, selected, format = (item) => item, onChange }) {
 function TimeWheelDialog({ value, title, onCancel, onConfirm }) {
   const source = new Date(value);
   const [hour, setHour] = useState(source.getHours() % 12 || 12);
-  const [minute, setMinute] = useState(source.getMinutes());
+  const [minute, setMinute] = useState(String(source.getMinutes()).padStart(2, "0"));
   const [period, setPeriod] = useState(source.getHours() >= 12 ? "PM" : "AM");
   const hours = Array.from({ length: 12 }, (_, index) => index + 1);
-  const minutes = Array.from({ length: 60 }, (_, index) => index);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
@@ -75,7 +74,8 @@ function TimeWheelDialog({ value, title, onCancel, onConfirm }) {
     const next = new Date(value);
     let nextHour = hour % 12;
     if (period === "PM") nextHour += 12;
-    next.setHours(nextHour, minute, 0, 0);
+    const parsedMinute = Number.parseInt(minute, 10);
+    next.setHours(nextHour, Number.isFinite(parsedMinute) ? Math.min(59, Math.max(0, parsedMinute)) : 0, 0, 0);
     onConfirm(next);
   }
 
@@ -96,12 +96,23 @@ function TimeWheelDialog({ value, title, onCancel, onConfirm }) {
         </div>
         <div className="flex justify-center gap-3 px-6 py-7">
           <WheelColumn values={hours} selected={hour} onChange={setHour} />
-          <WheelColumn
-            values={minutes}
-            selected={minute}
-            format={(item) => String(item).padStart(2, "0")}
-            onChange={setMinute}
-          />
+          <div className="flex w-20 flex-col items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Minute</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              aria-label="Minutes"
+              value={minute}
+              maxLength={2}
+              onChange={(event) => setMinute(event.target.value.replace(/\D/g, "").slice(0, 2))}
+              onBlur={() => {
+                const parsedMinute = Number.parseInt(minute, 10);
+                setMinute(String(Number.isFinite(parsedMinute) ? Math.min(59, Math.max(0, parsedMinute)) : 0).padStart(2, "0"));
+              }}
+              className="h-16 w-full rounded-md border-y-2 border-blue-400 bg-white text-center text-2xl font-semibold text-slate-950 outline-none focus:ring-4 focus:ring-blue-100"
+            />
+            <span className="text-[10px] text-slate-400">Type 00–59</span>
+          </div>
           <WheelColumn values={["AM", "PM"]} selected={period} onChange={setPeriod} />
         </div>
         <div className="flex border-t border-slate-300">

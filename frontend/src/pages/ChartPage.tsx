@@ -860,14 +860,17 @@ function ChartPageView() {
       if (startTime === boxEndTime && normalizedCandles.length > 1) {
         startTime = normalizedCandles[normalizedCandles.length - 2].time;
       }
+      // Retired zones keep a muted version of their side color, so a demand
+      // breach cannot be mistaken for a supply zone (or vice versa).
+      const isDemand = zone.type === "demand";
       const zoneColor = greyedOut
-        ? "#94a3b8"
-        : zone.type === "demand"
-          ? "#16a34a"
-          : "#e11d48";
+        ? isDemand ? "#86a99a" : "#c58a98"
+        : isDemand ? "#16a34a" : "#e11d48";
       const zoneFill = greyedOut
-        ? `rgba(148, 163, 184, ${fillAlpha})`
-        : zone.type === "demand"
+        ? isDemand
+          ? `rgba(134, 169, 154, ${fillAlpha})`
+          : `rgba(197, 138, 152, ${fillAlpha})`
+        : isDemand
           ? `rgba(22, 163, 74, ${fillAlpha})`
           : `rgba(225, 29, 72, ${fillAlpha})`;
 
@@ -1059,6 +1062,9 @@ function ChartPageView() {
       // phase/searchActive so it survives even once a fresh zone is found.
       const breachedZone =
         symbolMatches && showM5Zone && sideStatus?.last_breached_m5_zone &&
+        sideStatus.last_breached_m5_zone.type === side &&
+        sideStatus.last_breached_m5_zone.breached_by_side === side &&
+        sideStatus.last_breached_m5_zone.was_price_breached === true &&
         !cleared.has(`${side}:breached:${sideStatus.last_breached_m5_zone.breached_at}`)
           ? sideStatus.last_breached_m5_zone
           : null;

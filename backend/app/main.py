@@ -248,6 +248,7 @@ class ZoneStrategyStartPayload(BaseModel):
     order_kind: str = "MARKET"
     lot: float | None = None
     risk_percent: float | None = None
+    max_positions: int = 1
     tp1_ratio: float | None = None
     tp2_ratio: float | None = None
     tp3_ratio: float | None = None

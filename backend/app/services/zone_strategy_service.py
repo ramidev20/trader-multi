@@ -18,6 +18,7 @@ from .strategy_service import (
     _ensure_master_session,
     _ensure_symbol_ready,
     _tick_for,
+    _open_positions_count,
     close_all_positions,
     open_manual_position,
     wait_for_new_candle,
@@ -68,14 +69,12 @@ from .strategy_service import (
 # The demand side and the supply side are armed independently (two engine
 # instances below) so both can be watching -- and can both fire -- at once.
 #
-# Stoploss is the farther of two distances from entry:
-#   - "SL liquidity": walk backward candle by candle from the M1 zone's own
-#     c3 candle, extending the stop past each earlier candle's low (buy) /
-#     high (sell) as long as it keeps making a new extreme. This clears the
-#     nearest real swing point instead of resting the stop right on top of it,
-#     where retail liquidity (and stop-hunt wicks) tend to sit.
-#   - "min SL": the user's manually entered minimum stop distance, used as a
-#     floor in case the liquidity swing is too close to entry.
+# Stoploss uses the farther of two protective levels:
+#   - "SL liquidity": walk backward from the M1 zone's c3 candle until a
+#     prior candle has a low below the BUY entry / a high above the SELL
+#     entry, then place the stop beyond that candle's actual extreme.
+#   - "min SL": the user's manually entered minimum distance from entry,
+#     used as a floor if no matching candle is found or its swing is too near.
 
 TRIGGER_TASK_NAME = "zone_trigger_watch"
 SEARCH_M5_TASK_NAME = "zone_m5_watch"
@@ -88,6 +87,7 @@ M1_SEARCH_INTERVAL_SEC = 60.0
 # Poll the forming M5 candle so a valid third candle is checked during its
 # formation instead of only after it closes and the fourth candle opens.
 M5_SEARCH_INTERVAL_SEC = 1.0
+_scalping_max_positions = 1
 
 
 def _next_candle_open(timeframe_minutes: int, after: datetime | None = None) -> datetime:
@@ -179,6 +179,7 @@ class ZoneStrategyEngine:
         self.order_kind: str = "MARKET"
         self.lot: Optional[float] = None
         self.risk_percent: Optional[float] = None
+        self.max_positions: int = 1
         # Take-profit is always ratio-based here (same mechanism as manual
         # trade's Multi-TP), never a flat pip amount -- the stop that the
         # ratios multiply against is the one this engine itself computes in
@@ -207,6 +208,7 @@ class ZoneStrategyEngine:
         self._last_symbol_error: Optional[str] = None
 
     def start(self, cfg: dict) -> None:
+        global _scalping_max_positions
         manual_sl_distance = float(cfg.get("manual_sl_distance", 0) or 0)
         if manual_sl_distance <= 0:
             raise RuntimeError("Enter a manual stoploss distance greater than 0.")
@@ -262,6 +264,8 @@ class ZoneStrategyEngine:
             self.order_kind = order_kind
             self.lot = cfg.get("lot")
             self.risk_percent = cfg.get("risk_percent")
+            self.max_positions = max(1, int(cfg.get("max_positions", 1) or 1))
+            _scalping_max_positions = self.max_positions
             self.tp1_ratio = float(cfg.get("tp1_ratio") or 1.0)
             self.tp2_ratio = float(cfg.get("tp2_ratio") or 1.0)
             self.tp3_ratio = float(cfg.get("tp3_ratio") or 1.0)
@@ -301,6 +305,7 @@ class ZoneStrategyEngine:
                 "liquidity_buffer_pips": self.liquidity_buffer_pips,
                 "lot": self.lot,
                 "risk_percent": self.risk_percent,
+                "max_positions": self.max_positions,
                 "tp1_ratio": self.tp1_ratio,
                 "tp2_ratio": self.tp2_ratio,
                 "tp3_ratio": self.tp3_ratio,
@@ -726,6 +731,10 @@ class ZoneStrategyEngine:
         )
 
     def _accept_m5_zone(self, zone: dict[str, Any]) -> None:
+        # The engine owns a side-specific search. Keep that ownership explicit
+        # in the zone payload so the UI can never attribute a breach to the
+        # opposite side if a stale/malformed zone reaches this handoff.
+        zone = {**zone, "type": self.side}
         stop_task(self._search_m5_task_name)
         self._seed_buffer(self.m1_buffer, "M1", preload_count=0)
         with self._lock:
@@ -763,6 +772,11 @@ class ZoneStrategyEngine:
         """
         zone = self.m5_zone
         if zone is None:
+            return False
+        # A zone from the other engine must never be invalidated by this
+        # engine's price direction. Treat mismatched state as non-actionable;
+        # _accept_m5_zone stamps the expected type at the handoff.
+        if zone.get("type") != self.side:
             return False
         if self.side == "demand":
             return (
@@ -808,6 +822,9 @@ class ZoneStrategyEngine:
             {
                 **zone,
                 "breached_at": breach_time if breach_time is not None else zone["displacement_candle_time"],
+                "breached_by_side": self.side,
+                "was_price_breached": reason is None,
+                "retirement_reason": reason or "price_breach",
             }
             if zone
             else None
@@ -869,6 +886,41 @@ class ZoneStrategyEngine:
             f"[SUCCESS] [scalping:{self.side}] 1-minute liquidity appeared at {zone['price_low']:.2f}-{zone['price_high']:.2f}; placing order.",
         )
         self._place_order(zone)
+
+    def _monitor_m5_zone_after_entry(self) -> bool:
+        """Keep validating the accepted M5 zone while its trade is open."""
+        price = self._current_price()
+        candle = self._next_search_candle("M5")
+        if candle is not None:
+            with self._lock:
+                self.m5_buffer.append(candle)
+        if not self._m5_zone_breached(price, candle):
+            return False
+        breach_time = int(candle["time"]) if candle is not None else (int(time.time()) // 300) * 300
+        self._retreat_after_breach(breach_time=breach_time)
+        return True
+
+    def _resume_m1_search_for_current_zone(self) -> bool:
+        """After TP/SL, reuse the still-valid M5 zone for another M1 entry."""
+        with self._lock:
+            if self.m5_zone is None:
+                return False
+            self.m1_buffer.clear()
+        self._seed_buffer(self.m1_buffer, "M1", preload_count=0)
+        patch_path(self._state_path, {
+            "running": True,
+            "phase": "searching_m1_zone",
+            "m1_zone": None,
+            "placed_order": None,
+        })
+        start_task(
+            self._search_m1_task_name,
+            self._search_m1_tick,
+            interval_sec=M1_SEARCH_INTERVAL_SEC,
+            start_time=_next_candle_open(1),
+            **self._end_time_kwargs(),
+        )
+        return True
 
     @staticmethod
     def _c3_reference_prices(c3: Any, target_zone_type: str) -> tuple[float, float]:
@@ -960,22 +1012,25 @@ class ZoneStrategyEngine:
         with self._lock:
             return list(self.m1_buffer)[:-3]
 
-    def _sl_liquidity_price(self, zone: dict[str, Any], is_buy: bool) -> float:
+    def _sl_liquidity_price(
+        self,
+        is_buy: bool,
+        entry_price: float,
+    ) -> Optional[float]:
+        """Find the nearest pre-base candle extreme beyond the entry.
+
+        Buy stops need a prior candle low below entry; sell stops need a prior
+        candle high above entry. Keep walking backward until that condition is
+        met, then use that candle's actual extreme for the liquidity stop.
+        """
         history = self._m1_history_before_base()
-        extreme = zone["price_low"] if is_buy else zone["price_high"]
         for candle in reversed(history):
             candidate = (
                 _candle_value(candle, 3, "low") if is_buy else _candle_value(candle, 2, "high")
             )
-            if is_buy:
-                if candidate >= extreme:
-                    break
-                extreme = candidate
-            else:
-                if candidate <= extreme:
-                    break
-                extreme = candidate
-        return round(float(extreme), 2)
+            if (is_buy and candidate < entry_price) or (not is_buy and candidate > entry_price):
+                return round(float(candidate), 2)
+        return None
 
     def _place_order(self, zone: dict[str, Any]) -> None:
         is_buy = zone["type"] == "demand"
@@ -1005,41 +1060,68 @@ class ZoneStrategyEngine:
                 if self.order_kind == "LIMIT"
                 else market_price
             )
-            sl_liquidity_price = self._sl_liquidity_price(zone, is_buy)
+            sl_liquidity_price = self._sl_liquidity_price(is_buy, entry_price)
             liquidity_buffer = self.liquidity_buffer_pips / 10.0
-            sl_liquidity_distance = abs(entry_price - sl_liquidity_price) + liquidity_buffer
             min_sl_distance = self.manual_sl_distance / 10.0 if self.sl_distance_in_pips else self.manual_sl_distance
-            final_distance = max(sl_liquidity_distance, min_sl_distance)
-            sl_price = entry_price - final_distance if is_buy else entry_price + final_distance
+            minimum_sl_price = (
+                entry_price - min_sl_distance
+                if is_buy
+                else entry_price + min_sl_distance
+            )
+            if sl_liquidity_price is None:
+                sl_price = minimum_sl_price
+            else:
+                liquidity_sl_price = (
+                    sl_liquidity_price - liquidity_buffer
+                    if is_buy
+                    else sl_liquidity_price + liquidity_buffer
+                )
+                # The candle was selected only after meeting the directional
+                # entry condition, so its actual low/high stays on the
+                # protective side. The min SL remains a distance floor.
+                sl_price = (
+                    min(liquidity_sl_price, minimum_sl_price)
+                    if is_buy
+                    else max(liquidity_sl_price, minimum_sl_price)
+                )
             append_log(
                 "search",
                 f"[INFO] [scalping:{self.side}] {side} @ {entry_price:.2f}, SL {sl_price:.2f} "
-                f"(liquidity {sl_liquidity_price:.2f}).",
+                f"(liquidity {sl_liquidity_price if sl_liquidity_price is not None else 'minimum SL'}).",
             )
 
             # Multi-TP, ratio-based against the SL this engine just computed
             # above -- same mechanism as manual trade's Advanced Risk panel,
             # but fed the strategy's own stop instead of a manually typed
             # Stop Loss Price, since scalping never has one of those.
-            order_result = open_manual_position(
-                side,
-                lot_size=self.lot,
-                symbol=self.symbol,
-                order_kind=self.order_kind,
-                limit_price=entry_price if self.order_kind == "LIMIT" else None,
-                risk_percent=self.risk_percent,
-                advanced=True,
-                sl_price=sl_price,
-                ratio=self.tp1_ratio,
-                tp1_ratio=self.tp1_ratio,
-                tp2_ratio=self.tp2_ratio,
-                tp3_ratio=self.tp3_ratio,
-                tp2_enabled=self.tp2_enabled,
-                tp3_enabled=self.tp3_enabled,
-                tp1_percent=self.tp1_percent,
-                tp2_percent=self.tp2_percent,
-            )
-        except RuntimeError as exc:
+            # Both side engines can reach order placement on independent
+            # timer threads. Serialize the broker request because the MT5
+            # Python connection is process-wide and not thread-safe.
+            with MT5_LOCK:
+                position_limit = _scalping_max_positions
+                if position_limit > 0 and _open_positions_count(self.symbol) >= position_limit:
+                    raise RuntimeError(
+                        f"Scalping max positions reached ({position_limit} across demand and supply)."
+                    )
+                order_result = open_manual_position(
+                    side,
+                    lot_size=self.lot,
+                    symbol=self.symbol,
+                    order_kind=self.order_kind,
+                    limit_price=entry_price if self.order_kind == "LIMIT" else None,
+                    risk_percent=self.risk_percent,
+                    advanced=True,
+                    sl_price=sl_price,
+                    ratio=self.tp1_ratio,
+                    tp1_ratio=self.tp1_ratio,
+                    tp2_ratio=self.tp2_ratio,
+                    tp3_ratio=self.tp3_ratio,
+                    tp2_enabled=self.tp2_enabled,
+                    tp3_enabled=self.tp3_enabled,
+                    tp1_percent=self.tp1_percent,
+                    tp2_percent=self.tp2_percent,
+                )
+        except Exception as exc:
             patch_path(self._state_path, {"phase": "error", "running": False, "last_error": str(exc)})
             append_log("search", f"[ERROR] [scalping:{self.side}] order failed: {exc}")
             return
@@ -1079,7 +1161,9 @@ class ZoneStrategyEngine:
             self._state_path,
             {
                 "phase": "placed",
-                "running": False,
+                # Keep the search alive while the exit watcher validates its
+                # M5 zone. The chart extends this box until breach or stop.
+                "running": True,
                 "m1_zone": zone,
                 "sl_liquidity_price": sl_liquidity_price,
                 # A breached-and-superseded zone from earlier in this run is
@@ -1117,13 +1201,18 @@ class ZoneStrategyEngine:
             levels = self._exit_levels
             hit_tp = price >= levels["tp"] if levels.get("side") == "BUY" else price <= levels["tp"]
             hit_sl = price <= levels["sl"] if levels.get("side") == "BUY" else price >= levels["sl"]
+            breached = self._monitor_m5_zone_after_entry()
             if (levels.get("tp", 0) > 0 and hit_tp) or (levels.get("sl", 0) > 0 and hit_sl):
                 stop_task(self._exit_task_name)
-                append_log("search", f"[INFO] [scalping:{self.side}] simulated position hit {'TP' if hit_tp else 'SL'}; restarting M5 search.")
-                self._start_m5_search(fresh=True)
+                append_log("search", f"[INFO] [scalping:{self.side}] simulated position hit {'TP' if hit_tp else 'SL'}.")
+                if not breached and not self._resume_m1_search_for_current_zone():
+                    self._start_m5_search(fresh=True)
             return
 
         if not self._ensure_symbol_or_log():
+            return
+        breached = self._monitor_m5_zone_after_entry()
+        if breached:
             return
         self._exit_monitor_attempts += 1
         now = datetime.now()
@@ -1177,8 +1266,9 @@ class ZoneStrategyEngine:
 
         if closed_reason:
             stop_task(self._exit_task_name)
-            append_log("search", f"[INFO] [scalping:{self.side}] position closed by {closed_reason}; restarting M5 search.")
-            self._start_m5_search(fresh=True)
+            append_log("search", f"[INFO] [scalping:{self.side}] position closed by {closed_reason}.")
+            if not self._resume_m1_search_for_current_zone():
+                self._start_m5_search(fresh=True)
         elif self._exit_position_seen or self._exit_monitor_attempts >= 15:
             # Manual closes and cancelled pending orders do not restart this
             # TP/SL-triggered search. Avoid leaving a stale watcher behind.

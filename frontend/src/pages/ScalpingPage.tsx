@@ -3,7 +3,6 @@ import { RefreshCcw, StopCircle, FlaskConical } from "lucide-react";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { AppButton, Field } from "../components/ui/Primitives";
-import { ORDER_KIND_OPTIONS, IconSelect } from "./shared/IconSelect";
 import { DateTimeField } from "./shared/DateTimeField";
 import { cx, decimalInput } from "../utils/format";
 import { clearBanner, showBanner } from "../utils/banner";
@@ -207,8 +206,11 @@ export default function ScalpingPage() {
   const [liquiditySlPips, setLiquiditySlPips] = useState(
     saved.liquiditySlPips ?? "0",
   );
-  const [orderKind, setOrderKind] = useState(saved.orderKind ?? "MARKET");
-  const [riskPercent, setRiskPercent] = useState(saved.riskPercent ?? "1");
+  const [spreadPips, setSpreadPips] = useState(saved.spreadPips ?? "0");
+  // MARKET vs LIMIT is chosen per trade: an SL wider than Max SL becomes a
+  // LIMIT whose entry moves Limit % of the SL distance toward the SL.
+  const [maxSlPips, setMaxSlPips] = useState(saved.maxSlPips ?? "");
+  const [limitPercent, setLimitPercent] = useState(saved.limitPercent ?? "");
   const [maxPositions, setMaxPositions] = useState(saved.maxPositions ?? "1");
 
   // Multi-TP (up to 2 stages), same mechanism as Manual Trade's Advanced
@@ -256,8 +258,9 @@ export default function ScalpingPage() {
       supplyInstantM5,
       minSlPips,
       liquiditySlPips,
-      orderKind,
-      riskPercent,
+      spreadPips,
+      maxSlPips,
+      limitPercent,
       maxPositions,
       tp1Ratio,
       tp2Ratio,
@@ -280,8 +283,9 @@ export default function ScalpingPage() {
     supplyInstantM5,
     minSlPips,
     liquiditySlPips,
-    orderKind,
-    riskPercent,
+    spreadPips,
+    maxSlPips,
+    limitPercent,
     maxPositions,
     tp1Ratio,
     tp2Ratio,
@@ -347,12 +351,9 @@ export default function ScalpingPage() {
   // schedule only ever covers "later today", so there's no date to pick.
   function combineDateTime(timePart) {
     const d = new Date();
-    d.setHours(
-      timePart.getHours(),
-      timePart.getMinutes(),
-      timePart.getSeconds(),
-      0,
-    );
+    // Whole minutes only: the picker shows hours:minutes, but its initial
+    // value keeps the seconds it was created at (14:30 could be 14:30:47).
+    d.setHours(timePart.getHours(), timePart.getMinutes(), 0, 0);
     const pad = (value) => String(value).padStart(2, "0");
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
@@ -374,9 +375,13 @@ export default function ScalpingPage() {
       sl_distance_in_pips: true,
       // Minimum pips between c3's low/high and the liquidity candle's.
       liquidity_buffer_pips: Number(liquiditySlPips || 0),
-      order_kind: orderKind,
+      // Added beyond the SL, same as Manual Trade's Spread field.
+      spread_pips: Number(spreadPips || 0),
+      max_sl_pips: Number(maxSlPips || 0),
+      limit_percent: Number(limitPercent || 0),
       lot: null,
-      risk_percent: Number(riskPercent || 0),
+      // Risk comes from each account's own Risk % setting.
+      risk_percent: null,
       max_positions: Math.max(1, Math.floor(Number(maxPositions) || 1)),
       instant_m5_start: Boolean(instantM5) && !devM1,
       dev_m1_start: Boolean(devM1),
@@ -402,6 +407,10 @@ export default function ScalpingPage() {
     }
     if (!(Number(maxPositions) >= 1)) {
       showBanner("Max positions must be at least 1.", "error");
+      return;
+    }
+    if (Number(maxSlPips) > 0 && !(Number(limitPercent) > 0 && Number(limitPercent) < 100)) {
+      showBanner("Enter a Limit % between 0 and 100 when Max SL is set.", "error");
       return;
     }
     if (endEnabled) {
@@ -482,6 +491,10 @@ export default function ScalpingPage() {
     clearBanner();
     if (!(Number(maxPositions) >= 1)) {
       showBanner("Max positions must be at least 1.", "error");
+      return;
+    }
+    if (Number(maxSlPips) > 0 && !(Number(limitPercent) > 0 && Number(limitPercent) < 100)) {
+      showBanner("Enter a Limit % between 0 and 100 when Max SL is set.", "error");
       return;
     }
     if (!(Number(minSlPips) > 0)) {
@@ -616,23 +629,26 @@ export default function ScalpingPage() {
             Order Settings
           </span>
           <div className="mt-3 grid grid-cols-2 gap-3">
-            <IconSelect
-              label="Order Type"
-              value={orderKind}
-              options={ORDER_KIND_OPTIONS}
-              onChange={setOrderKind}
+            <Field
+              label="Max SL (pips)"
+              type="text"
+              inputMode="decimal"
+              value={maxSlPips}
+              onChange={(event) => setMaxSlPips(decimalInput(event.target.value))}
               disabled={submitting}
+              placeholder="e.g. 80"
+              title="SL up to this size opens a MARKET order; a wider SL opens a LIMIT order (see Limit %). Leave empty to always use MARKET."
             />
 
             <Field
-              label="Risk %"
+              label="Limit %"
               type="text"
               inputMode="decimal"
-              value={riskPercent}
-              onChange={(event) =>
-                setRiskPercent(decimalInput(event.target.value))
-              }
+              value={limitPercent}
+              onChange={(event) => setLimitPercent(decimalInput(event.target.value))}
               disabled={submitting}
+              placeholder="e.g. 40"
+              title="When the SL is wider than Max SL, the LIMIT entry moves this % of the SL distance toward the SL. 100 pip SL at 40% -> 60 pip SL."
             />
 
             <Field
@@ -669,7 +685,20 @@ export default function ScalpingPage() {
               }
               disabled={submitting}
               placeholder="e.g. 5"
-              title="SL goes on the first earlier candle whose low (buy) / high (sell) is at least this many pips past c3's, and at least Min SL from entry."
+              title="SL goes on the first earlier candle (c3, then older) whose low (buy) / high (sell) is at least this many pips past c2's, and at least Min SL from entry."
+            />
+
+            <Field
+              label="Spread (pips)"
+              type="text"
+              inputMode="decimal"
+              value={spreadPips}
+              onChange={(event) =>
+                setSpreadPips(decimalInput(event.target.value))
+              }
+              disabled={submitting}
+              placeholder="e.g. 3"
+              title="Added beyond the SL (below it for buys, above it for sells), like Manual Trade's Spread."
             />
           </div>
         </div>

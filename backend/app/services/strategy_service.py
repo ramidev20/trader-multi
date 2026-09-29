@@ -918,22 +918,29 @@ def open_manual_position(
     auto_close_at: datetime | None = None,
     copy_to_sub_accounts: bool = True,
     after_master_order: Callable[[dict], str | None] | None = None,
+    log_failures: bool = True,
 ):
+    def log_failure(line: str) -> None:
+        # Callers that report failures themselves (scalping) pass
+        # log_failures=False so the feed gets one line, not two.
+        if log_failures:
+            append_log("search", line)
+
     session_risk = get("session_risk", {})
     if isinstance(session_risk, dict) and session_risk.get("enabled") and session_risk.get("hit"):
         message = str(session_risk.get("reason") or "Session risk limit reached. Start a new search session to reset it.")
-        append_log("search", f"[WARNING] [session-risk] {message}")
+        log_failure(f"[WARNING] [session-risk] {message}")
         raise RuntimeError(message)
     master_ok, master_detail, _master, _cfg = _ensure_master_session()
     if not master_ok:
         message = f"Manual order blocked: {master_detail}"
-        append_log("search", f"[ERROR] {message}")
+        log_failure(f"[ERROR] {message}")
         raise RuntimeError(message)
     master_login = _safe_int((_master or {}).get("user"))
     master_session_ok, master_session_detail = _verify_mt5_login(master_login)
     if not master_session_ok:
         message = f"Manual order blocked: {master_session_detail}"
-        append_log("search", f"[ERROR] {message}")
+        log_failure(f"[ERROR] {message}")
         raise RuntimeError(message)
     account_info = mt5.account_info() if mt5_available() else None
     balance_before = float(getattr(account_info, "balance", 0.0) or 0.0) if account_info is not None else 0.0
@@ -941,13 +948,13 @@ def open_manual_position(
     symbol_ok, symbol_detail = _ensure_symbol_ready(symbol)
     if not symbol_ok:
         message = f"Manual order blocked: {symbol_detail}"
-        append_log("search", f"[ERROR] {message}")
+        log_failure(f"[ERROR] {message}")
         raise RuntimeError(message)
 
     tick = mt5.symbol_info_tick(symbol) if mt5_available() else _tick_for(symbol)
     if tick is None:
         message = f"Manual order blocked: no live tick for {symbol}."
-        append_log("search", f"[ERROR] {message}")
+        log_failure(f"[ERROR] {message}")
         raise RuntimeError(message)
     order_type_upper = str(order_type).upper()
     order_kind_upper = str(order_kind or "MARKET").upper()
@@ -1065,7 +1072,7 @@ def open_manual_position(
     check_ok, check_detail = _check_request(request)
     if not check_ok:
         message = f"Manual order blocked: {check_detail}"
-        append_log("search", f"[ERROR] {message}")
+        log_failure(f"[ERROR] {message}")
         raise RuntimeError(message)
 
     result = mt5.order_send(request) if mt5_available() else None
@@ -1130,7 +1137,7 @@ def open_manual_position(
             )
     else:
         message = str(getattr(result, "comment", mt5.last_error()) or mt5.last_error())
-        append_log("search", f"[ERROR] Manual order failed: {message}")
+        log_failure(f"[ERROR] Manual order failed: {message}")
         raise RuntimeError(f"Manual order failed: {message}")
     return result
 

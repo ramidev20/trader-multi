@@ -20,6 +20,7 @@ class ManagedTask:
 tasks: dict[str, ManagedTask] = {}
 _tasks_lock = threading.Lock()
 _runtime_logger: Optional[LogFn] = None
+_last_errors: dict[str, str] = {}
 
 
 def _normalize_dt(dt: datetime) -> datetime:
@@ -84,8 +85,14 @@ def start_task(
 
         try:
             func(*args)
+            _last_errors.pop(task_name, None)
         except Exception as ex:
-            emit_log(f"[{task_name}] runtime error: {ex}", "error")
+            # A task polling every second can hit the same error every run;
+            # log it when it first appears or changes, not on each repeat.
+            message = str(ex)
+            if _last_errors.get(task_name) != message:
+                _last_errors[task_name] = message
+                emit_log(f"[{task_name}] runtime error: {ex}", "error")
 
         next_run_time += timedelta(seconds=task.interval_sec)
         delay = max(0, (next_run_time - _normalize_dt(datetime.now())).total_seconds())

@@ -1072,6 +1072,11 @@ def open_manual_position(
     done = bool(result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE) or not mt5_available()
     if done:
         ticket = getattr(result, "order", int(time.time() * 1000))
+        # Record the broker's fill price for market orders rather than the
+        # quote read before order_send; they differ by any slippage.
+        fill_price = float(getattr(result, "price", 0.0) or 0.0) if result is not None else 0.0
+        if order_kind_upper == "MARKET" and fill_price > 0:
+            entry_price = fill_price
         append_list(
             "orders",
             {

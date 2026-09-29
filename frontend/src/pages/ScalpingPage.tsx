@@ -372,6 +372,7 @@ export default function ScalpingPage() {
       trigger_zone_type: side,
       manual_sl_distance: Number(minSlPips),
       sl_distance_in_pips: true,
+      // Minimum pips between c3's low/high and the liquidity candle's.
       liquidity_buffer_pips: Number(liquiditySlPips || 0),
       order_kind: orderKind,
       lot: null,
@@ -656,8 +657,10 @@ export default function ScalpingPage() {
               placeholder="e.g. 50"
             />
 
+            {/* Minimum distance from c3's low (buy) / high (sell) back to
+                the candle low/high the SL is placed on. */}
             <Field
-              label="Liquidity SL (pips)"
+              label="Min Liquidity SL (pips)"
               type="text"
               inputMode="decimal"
               value={liquiditySlPips}
@@ -666,6 +669,7 @@ export default function ScalpingPage() {
               }
               disabled={submitting}
               placeholder="e.g. 5"
+              title="SL goes on the first earlier candle whose low (buy) / high (sell) is at least this many pips past c3's, and at least Min SL from entry."
             />
           </div>
         </div>

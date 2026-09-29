@@ -1299,14 +1299,20 @@ def chart_data(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1", count: int =
 
 
 @app.get("/chart/quote")
-def chart_quote(symbol: str = SYMBOL_DEFAULT) -> dict[str, Any]:
+def chart_quote(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1") -> dict[str, Any]:
     normalized_symbol = str(symbol or SYMBOL_DEFAULT).strip().upper()
+    normalized_timeframe = str(timeframe or "M1").strip().upper()
     if not is_dev_mode():
         config = _load_config()
         ready, detail, master_login = master_adapter_ready(config)
         if not ready or not master_login:
             raise HTTPException(status_code=409, detail=detail)
-        result = submit_adapter_command(master_login, "chart_quote", {"symbol": normalized_symbol}, timeout_sec=3.0)
+        result = submit_adapter_command(
+            master_login,
+            "chart_quote",
+            {"symbol": normalized_symbol, "timeframe": normalized_timeframe},
+            timeout_sec=3.0,
+        )
         if result.get("status") != "ok":
             raise HTTPException(status_code=409, detail=str(result.get("message", "Live quote request failed.")))
         return {"status": "ok", **result}
@@ -1533,6 +1539,14 @@ def calculate_lot(payload: LotCalculationPayload) -> dict[str, Any]:
 @app.post("/positions/close")
 def close_positions() -> dict[str, Any]:
     _require_master_connected()
+    # Stop every search first so none can open a new trade while (or right
+    # after) the positions are closed. Zone state is kept, so the chart
+    # freezes what it has drawn instead of clearing it.
+    strategy = state_get("strategy", {})
+    if isinstance(strategy, dict) and strategy.get("running"):
+        stop_strategy_system()
+    stop_zone_strategy_system(reason="Close all positions requested; search stopped.")
+    _finish_session_risk_if_idle()
     with MT5_LOCK:
         summary = close_all_positions()
     return {"status": "ok", "summary": summary, "orders": state_get("orders", [])}

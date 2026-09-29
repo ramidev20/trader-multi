@@ -37,6 +37,9 @@ type TradeOrder = {
   close_reason?: string;
   close_price?: number;
   closed_at?: string | number;
+  // Closed while on screen (seen disappearing from the live list); always
+  // kept drawn, unlike closed trades loaded from history.
+  closed_locally?: boolean;
 };
 
 type ChartSnapshot = {
@@ -93,6 +96,23 @@ function nearestCandleTime(
         : nearest,
     candles[0].time,
   );
+}
+
+// update() can only touch the newest bar. When a broker bar corrects a candle
+// that has already closed (or several arrive at once), redraw the series.
+function closedCandlesChanged(previous: CandlePoint[], next: CandlePoint[]) {
+  if (next.length - previous.length > 1) return true;
+  const byTime = new Map(previous.slice(-6).map((candle) => [candle.time, candle]));
+  return next.slice(-6, -1).some((candle) => {
+    const prior = byTime.get(candle.time);
+    return (
+      !!prior &&
+      (prior.open !== candle.open ||
+        prior.high !== candle.high ||
+        prior.low !== candle.low ||
+        prior.close !== candle.close)
+    );
+  });
 }
 
 function positionIdentity(order: TradeOrder) {
@@ -306,15 +326,16 @@ function ChartPageView() {
   }, [timeframe]);
 
   // History is fetched when the page opens or the timeframe changes. The
-  // frequent path asks MT5 only for its current tick, then updates the
-  // forming candle locally instead of downloading the same 180 bars again.
+  // frequent path asks MT5 for its current tick plus its last few bars and
+  // merges those in, instead of downloading the same 180 bars again.
   useEffect(() => {
     let cancelled = false;
     async function pollQuote() {
       if (cancelled || quotePollRef.current) return;
       quotePollRef.current = true;
       try {
-        const quote = await api.chartQuote("XAUUSD");
+        const requestedTimeframe = timeframeRef.current;
+        const quote = await api.chartQuote("XAUUSD", requestedTimeframe);
         if (cancelled) return;
         const bid = Number(quote?.bid);
         const ask = Number(quote?.ask);
@@ -322,11 +343,35 @@ function ChartPageView() {
         if (![bid, ask, serverTime].every(Number.isFinite) || bid <= 0 || ask <= 0 || serverTime <= 0) return;
         const seconds = TIMEFRAME_SECONDS[timeframeRef.current] || 60;
         const candleTime = Math.floor(serverTime / seconds) * seconds;
-        const price = (bid + ask) / 2;
+        // MT5 bars are bid-based; building candles from the mid price put
+        // them half a spread off the bars zones and SL levels come from.
+        const price = bid;
+        // The broker's own recent bars for this timeframe, when the quote
+        // carries them: they replace the local candles outright, so a closed
+        // candle ends up with MT5's exact OHLC (wicks between polls included).
+        const brokerBars =
+          Array.isArray(quote?.bars) &&
+          quote.bars.length &&
+          String(quote?.timeframe || "").toUpperCase() === requestedTimeframe &&
+          requestedTimeframe === timeframeRef.current
+            ? quote.bars
+            : null;
         setSnapshot((current) => {
           const candles = current.candles.slice();
           const last = candles[candles.length - 1];
-          if (last && Number(last.time) === candleTime) {
+          if (brokerBars) {
+            brokerBars.forEach((bar) => {
+              const time = Number(bar.time);
+              const tail = candles[candles.length - 1];
+              let index = -1;
+              for (let i = candles.length - 1; i >= Math.max(0, candles.length - 5); i -= 1) {
+                if (Number(candles[i].time) === time) { index = i; break; }
+              }
+              if (index >= 0) candles[index] = { ...candles[index], ...bar };
+              else if (!tail || time > Number(tail.time)) candles.push({ ...bar });
+            });
+            if (candles.length > 400) candles.splice(0, candles.length - 400);
+          } else if (last && Number(last.time) === candleTime) {
             candles[candles.length - 1] = {
               ...last,
               high: Math.max(Number(last.high), price),
@@ -502,7 +547,7 @@ function ChartPageView() {
         tooltipResultRef.current.textContent = hasResult
           ? `${match.closeReason}${match.closePrice > 0 ? ` @ ${match.closePrice.toFixed(2)}` : ""}`
           : "";
-        tooltipResultRef.current.className = `mt-1.5 rounded-lg px-2 py-1.5 text-[11px] font-black ${match.closeReason === "TP hit" ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}${hasResult ? "" : " hidden"}`;
+        tooltipResultRef.current.className = `mt-1.5 rounded-lg px-2 py-1.5 text-[11px] font-black ${match.closeReason === "TP hit" ? "bg-emerald-50 text-emerald-700" : match.closeReason === "SL hit" ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-600"}${hasResult ? "" : " hidden"}`;
       }
     }
     chart.subscribeCrosshairMove(handleCrosshairMove);
@@ -606,10 +651,9 @@ function ChartPageView() {
     if (!seriesRef.current || !chartRef.current) return;
     if (countdownSeconds == null) return;
     const lastCandle = normalizedCandles[normalizedCandles.length - 1];
+    // Bid, like the MT5 candles themselves.
     const currentPrice =
-      typeof snapshot.bid === "number" && typeof snapshot.ask === "number"
-        ? (snapshot.bid + snapshot.ask) / 2
-        : lastCandle?.close;
+      typeof snapshot.bid === "number" ? snapshot.bid : lastCandle?.close;
     if (typeof currentPrice !== "number" || !Number.isFinite(currentPrice)) return;
 
     const palette = getChartPalette();
@@ -638,7 +682,11 @@ function ChartPageView() {
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
     try {
-      if (chartHistoryResetRef.current || !normalizedCandlesRef.current.length) {
+      if (
+        chartHistoryResetRef.current ||
+        !normalizedCandlesRef.current.length ||
+        closedCandlesChanged(normalizedCandlesRef.current, normalizedCandles)
+      ) {
         seriesRef.current.setData(normalizedCandles);
         chartHistoryResetRef.current = false;
       } else if (normalizedCandles.length) {
@@ -684,6 +732,30 @@ function ChartPageView() {
         });
       }
     });
+    // snapshot.orders always carries the full live list of open positions
+    // (every quote poll replaces it). A remembered position missing from it
+    // was closed -- by Close All, manually, or by a TP/SL whose deal hasn't
+    // been reloaded yet -- so freeze its box at the current candle instead of
+    // letting it keep extending. A later history row with the real close
+    // time and reason still overrides this.
+    const liveOpenIds = new Set(
+      snapshot.orders
+        .filter((order) => String(order.status || "").toLowerCase() === "open")
+        .map(positionIdentity),
+    );
+    const freezeTime = normalizedCandles[normalizedCandles.length - 1]?.time;
+    if (freezeTime) {
+      rememberedPositionsRef.current.forEach((order, ticket) => {
+        if (order.close_reason || liveOpenIds.has(ticket)) return;
+        rememberedPositionsRef.current.set(ticket, {
+          ...order,
+          status: "closed",
+          close_reason: "Closed",
+          closed_at: order.closed_at ?? freezeTime,
+          closed_locally: true,
+        });
+      });
+    }
     // Candles always render; only the overlays are conditional -- excluding
     // a cleared ticket here makes the cleanup loop below remove its existing
     // overlay and skips recreating it, while a ticket that wasn't on screen
@@ -696,7 +768,7 @@ function ChartPageView() {
       // trades to the first visible candle: after a reload that made their
       // TP/SL boxes look like they covered the entire chart. Open trades stay
       // visible even when they started before the current candle window.
-      if (order.close_reason && firstCandleTime != null) {
+      if (order.close_reason && !order.closed_locally && firstCandleTime != null) {
         const openedAt = toUnix(order.opened_at || order.created_at);
         if (openedAt != null && openedAt < firstCandleTime) return false;
       }
@@ -860,19 +932,18 @@ function ChartPageView() {
       if (startTime === boxEndTime && normalizedCandles.length > 1) {
         startTime = normalizedCandles[normalizedCandles.length - 2].time;
       }
-      // Retired zones keep a muted version of their side color, so a demand
-      // breach cannot be mistaken for a supply zone (or vice versa).
+      // Breached zones are disabled: plain grey with dashed edges, whichever
+      // side they came from.
       const isDemand = zone.type === "demand";
       const zoneColor = greyedOut
-        ? isDemand ? "#86a99a" : "#c58a98"
+        ? "#94a3b8"
         : isDemand ? "#16a34a" : "#e11d48";
       const zoneFill = greyedOut
-        ? isDemand
-          ? `rgba(134, 169, 154, ${fillAlpha})`
-          : `rgba(197, 138, 152, ${fillAlpha})`
+        ? `rgba(148, 163, 184, ${fillAlpha})`
         : isDemand
           ? `rgba(22, 163, 74, ${fillAlpha})`
           : `rgba(225, 29, 72, ${fillAlpha})`;
+      const zoneLineStyle = greyedOut ? 2 : 0;
 
       const fillOptions = {
         autoscaleInfoProvider: () => null,
@@ -884,6 +955,7 @@ function ChartPageView() {
         bottomFillColor1: "rgba(0, 0, 0, 0)",
         bottomFillColor2: "rgba(0, 0, 0, 0)",
         lineWidth: 1,
+        lineStyle: zoneLineStyle,
         lineVisible: true,
         priceLineVisible: false,
         lastValueVisible: false,
@@ -902,7 +974,7 @@ function ChartPageView() {
         autoscaleInfoProvider: () => null,
         color: zoneColor,
         lineWidth: 1,
-        lineStyle: 0,
+        lineStyle: zoneLineStyle,
         priceLineVisible: false,
         lastValueVisible: false,
         crosshairMarkerVisible: false,
@@ -969,9 +1041,33 @@ function ChartPageView() {
             : endTime,
         );
       }
+      // A stopped side (manual Stop, Close All, end time, error) keeps its
+      // boxes but stops extending them: freeze at the order candle if a trade
+      // was placed, otherwise at the broker time the search was stopped.
+      const isStopped = ["stopped", "error"].includes(sideStatus?.phase);
+      const stoppedKey = `${side}:stopped:${sideStatus?.started_at ?? ""}`;
+      if (isStopped && endTime && !frozenZoneTimesRef.current.has(stoppedKey)) {
+        const stoppedAt = Number(sideStatus?.stopped_at);
+        frozenZoneTimesRef.current.set(
+          stoppedKey,
+          Number.isFinite(stoppedAt) && stoppedAt > 0 ? stoppedAt : endTime,
+        );
+      }
+      const placedCandleTime = Number(sideStatus?.m1_zone?.position_candle_time);
+      const placedFrozenAt = placedOrder
+        ? frozenZoneTimesRef.current.get(frozenZoneKey) ??
+          (Number.isFinite(placedCandleTime) && placedCandleTime > 0 ? placedCandleTime : undefined)
+        : undefined;
       const zoneFrozenAt = isPlaced
         ? frozenZoneTimesRef.current.get(frozenZoneKey)
-        : undefined;
+        : isStopped
+          ? placedFrozenAt ?? frozenZoneTimesRef.current.get(stoppedKey)
+          : undefined;
+      // A run stopped before the loaded candle window has nothing to show.
+      const stoppedOutOfView =
+        isStopped &&
+        zoneFrozenAt != null &&
+        zoneFrozenAt < (normalizedCandles[0]?.time ?? 0);
       let overlay = zoneOverlayRef.current[side];
       if (!overlay) {
         overlay = {
@@ -996,8 +1092,8 @@ function ChartPageView() {
       // The zone boxes stay drawn once the side's trade is placed (buy for
       // demand, sell for supply) too -- the M5/M1 zone that produced the
       // entry is still meaningful context while the position is open, same
-      // as the entry/TP/SL themselves staying visible. Only a side that's
-      // fully idle (never armed, or stopped/errored out) drops its boxes.
+      // as the entry/TP/SL themselves staying visible. A stopped/errored
+      // side keeps them too, frozen (see zoneFrozenAt above).
       const searchActive =
         symbolMatches &&
         [
@@ -1044,14 +1140,15 @@ function ChartPageView() {
       // its own timeframe.
       const showM5Zone = TIMEFRAME_MINUTES[timeframe] <= TIMEFRAME_MINUTES.M5;
       const showM1Zone = TIMEFRAME_MINUTES[timeframe] <= TIMEFRAME_MINUTES.M1;
+      const showZones = searchActive || (symbolMatches && isStopped && !stoppedOutOfView);
       const m5Zone =
-        searchActive && showM5Zone && sideStatus?.m5_zone &&
+        showZones && showM5Zone && sideStatus?.m5_zone &&
         !cleared.has(`${side}:m5:${sideStatus.m5_zone.formed_at}`)
           ? sideStatus.m5_zone
           : null;
       drawZoneBorder(overlay, m5Zone, "m5Zone", 0.1, zoneFrozenAt);
       const m1Zone =
-        searchActive && isPlaced && showM1Zone && sideStatus?.m1_zone &&
+        showZones && (isPlaced || (isStopped && placedOrder)) && showM1Zone && sideStatus?.m1_zone &&
         !cleared.has(`${side}:m1:${sideStatus.m1_zone.formed_at}`)
           ? sideStatus.m1_zone
           : null;

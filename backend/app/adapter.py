@@ -179,12 +179,36 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                         "status": "open",
                     }
                 )
+            # The broker's own recent bars (last closed ones plus the forming
+            # one), so the chart replaces its locally-updated candle with the
+            # real bid-based OHLC instead of keeping a once-a-second sample of
+            # the mid price -- that drifted from the bars zones/SL are built on.
+            timeframe_name = str(payload.get("timeframe", "M1") or "M1").strip().upper()
+            timeframe = {
+                "M1": mt5.TIMEFRAME_M1,
+                "M3": mt5.TIMEFRAME_M3,
+                "M5": mt5.TIMEFRAME_M5,
+                "M15": mt5.TIMEFRAME_M15,
+            }.get(timeframe_name, mt5.TIMEFRAME_M1)
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 3)
+            bars = [
+                {
+                    "time": int(row["time"]),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                }
+                for row in (rates if rates is not None else [])
+            ]
             return {
                 "status": "ok",
                 "source": "live",
                 "bid": float(getattr(tick, "bid", 0.0) or 0.0),
                 "ask": float(getattr(tick, "ask", 0.0) or 0.0),
                 "server_time": int(getattr(tick, "time", 0) or 0),
+                "timeframe": timeframe_name,
+                "bars": bars,
                 "orders": positions,
             }
         except Exception as ex:
@@ -278,9 +302,12 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                 int(getattr(mt5, "DEAL_REASON_TP", 5)): "TP hit",
             }
             for position_id, closing_deal in close_deals.items():
-                reason = reason_labels.get(int(getattr(closing_deal, "reason", -1)))
-                if not reason or position_id in live_position_ids:
+                if position_id in live_position_ids:
                     continue
+                # Manual / Close All exits are reported too, so the chart
+                # freezes those boxes at their real close instead of
+                # extending them as if the position were still open.
+                reason = reason_labels.get(int(getattr(closing_deal, "reason", -1)), "Closed")
                 opening_deal = open_deals.get(position_id)
                 if opening_deal is None:
                     continue

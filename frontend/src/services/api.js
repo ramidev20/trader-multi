@@ -61,7 +61,8 @@ export const api = {
     const suffix = query.toString() ? `?${query.toString()}` : "";
     return request(`/chart/data${suffix}`);
   },
-  chartQuote: (symbol = "XAUUSD") => request(`/chart/quote?symbol=${encodeURIComponent(symbol)}`),
+  chartQuote: (symbol = "XAUUSD", timeframe = "M1") =>
+    request(`/chart/quote?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`),
   tradeHistory: () => request("/trade-history"),
   calculateLot: (payload) => request("/positions/calculate-lot", { method: "POST", body: JSON.stringify(payload) }),
 

@@ -57,8 +57,9 @@ from .strategy_service import (
 #   - supply: c2's high must touch (reach up to, or through) bullish c3's
 #     close / bearish c3's open -- the top of c3's body either way.
 #
-# Two zone types can be chosen per timeframe (Scalping page, M5 and M1):
-#   - Type 1 (default): everything above -- c2 must retest c3's gap reference.
+# Two zone types are checked automatically on both M5 and M1: Type 1 first,
+# and Type 2 only if Type 1 does not match:
+#   - Type 1: everything above -- c2 must retest c3's gap reference.
 #   - Type 2: no c2 retest. Only c1 matters: it must stay entirely clear of
 #     c3's body -- demand: c1's low above the top of c3's body (max of open/
 #     close); supply: c1's high below the bottom of c3's body (min of
@@ -215,9 +216,6 @@ class ZoneStrategyEngine:
         self.trigger_zone_type: str = self.side
         self.m5_target_zone_type: str = self.side
         self.m1_target_zone_type: str = self.side
-        # 1 = c2 must retest c3, 2 = c1 only (see the module docstring).
-        self.m5_zone_variant: int = 1
-        self.m1_zone_variant: int = 1
         self.instant_m5_start: bool = False
         self.dev_m1_start: bool = False
         self.trigger_check_cycle_sec: float = DEFAULT_TRIGGER_CHECK_CYCLE_SEC
@@ -298,10 +296,6 @@ class ZoneStrategyEngine:
         # MARKET vs LIMIT is decided per trade from the SL size; the old
         # order_kind field is accepted but ignored.
         order_kind = "AUTO"
-        m5_zone_variant = int(cfg.get("m5_zone_type", 1) or 1)
-        m1_zone_variant = int(cfg.get("m1_zone_type", 1) or 1)
-        if m5_zone_variant not in (1, 2) or m1_zone_variant not in (1, 2):
-            raise RuntimeError("Zone type must be 1 or 2.")
         max_sl_pips = max(0.0, float(cfg.get("max_sl_pips", 0) or 0))
         limit_percent = float(cfg.get("limit_percent", 0) or 0)
         if max_sl_pips > 0 and not 0 < limit_percent < 100:
@@ -338,8 +332,6 @@ class ZoneStrategyEngine:
             self.liquidity_buffer_pips = max(0.0, float(cfg.get("liquidity_buffer_pips", 0) or 0))
             self.spread_pips = max(0.0, float(cfg.get("spread_pips", 0) or 0))
             self.order_kind = order_kind
-            self.m5_zone_variant = m5_zone_variant
-            self.m1_zone_variant = m1_zone_variant
             self.max_sl_pips = max_sl_pips
             self.limit_percent = limit_percent
             self.lot = cfg.get("lot")
@@ -376,8 +368,6 @@ class ZoneStrategyEngine:
                 "trigger_zone_type": self.trigger_zone_type,
                 "m5_target_zone_type": self.m5_target_zone_type,
                 "m1_target_zone_type": self.m1_target_zone_type,
-                "m5_zone_type": self.m5_zone_variant,
-                "m1_zone_type": self.m1_zone_variant,
                 "order_kind": self.order_kind,
                 "max_sl_pips": self.max_sl_pips,
                 "limit_percent": self.limit_percent,
@@ -863,7 +853,7 @@ class ZoneStrategyEngine:
             history_is_current = latest_closed_time >= boundary_time
             zone = (
                 self._detect_gap_zone_locked(
-                    self.m5_buffer, self.m5_target_zone_type, extend_to_c2=True, variant=self.m5_zone_variant
+                    self.m5_buffer, self.m5_target_zone_type, extend_to_c2=True
                 )
                 if not fresh and history_is_current
                 else None
@@ -919,7 +909,7 @@ class ZoneStrategyEngine:
         with self._lock:
             self.m5_buffer.extend(candles)
             zone = self._detect_gap_zone_locked(
-                    self.m5_buffer, self.m5_target_zone_type, extend_to_c2=True, variant=self.m5_zone_variant
+                    self.m5_buffer, self.m5_target_zone_type, extend_to_c2=True
                 )
         if zone is not None:
             self._accept_m5_zone(zone)
@@ -1020,7 +1010,7 @@ class ZoneStrategyEngine:
         with self._lock:
             self.m1_buffer.extend(candles)
             zone = self._detect_gap_zone_locked(
-                self.m1_buffer, self.m1_target_zone_type, variant=self.m1_zone_variant
+                self.m1_buffer, self.m1_target_zone_type
             )
         if zone is None:
             # No candle limit: keep searching M1 on this M5 zone until a
@@ -1139,15 +1129,22 @@ class ZoneStrategyEngine:
         buffer: deque,
         target_zone_type: str,
         extend_to_c2: bool = False,
-        variant: int = 1,
+        variant: Optional[int] = None,
     ) -> Optional[dict[str, Any]]:
         """3-candle imbalance/gap check, shared by both the M5 and M1
         searches -- see the module docstring for the full spec.
+
+        With `variant=None` (the normal case) Type 1 is tried first and Type 2
+        only if Type 1 finds nothing; pass 1 or 2 to test a single type.
 
         c1 is the newest closed candle, c2 is the one before it, and c3 is two
         candles before that (oldest of the three). M5 and M1 both validate only
         complete three-candle patterns.
         """
+        if variant is None:
+            return self._detect_gap_zone_locked(
+                buffer, target_zone_type, extend_to_c2, variant=1
+            ) or self._detect_gap_zone_locked(buffer, target_zone_type, extend_to_c2, variant=2)
         if len(buffer) < 3:
             return None
         c3, c2, c1 = list(buffer)[-3:]

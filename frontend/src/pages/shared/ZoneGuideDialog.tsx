@@ -658,7 +658,7 @@ export function ZoneGuideDialog({ open, onClose }: { open: boolean; onClose: () 
         </div>
         {tab === "type1" ? (
           <TypeBlock
-            subtitle="c2 retests c3's body edge, then c1 holds beyond it."
+            subtitle="Checked first, on both 5-min and 1-min: c2 retests c3's body edge, then c1 holds beyond it."
             demand={DEMAND_TYPE_1}
             supply={mirror(DEMAND_TYPE_1)}
             touch
@@ -666,7 +666,7 @@ export function ZoneGuideDialog({ open, onClose }: { open: boolean; onClose: () 
         ) : null}
         {tab === "type2" ? (
           <TypeBlock
-            subtitle="No retest: c1 stays fully clear of c3's body."
+            subtitle="Checked only when Type 1 doesn't match: no retest, c1 stays fully clear of c3's body."
             demand={DEMAND_TYPE_2}
             supply={mirror(DEMAND_TYPE_2)}
             touch={false}

@@ -247,8 +247,6 @@ class ZoneStrategyStartPayload(BaseModel):
     sl_distance_in_pips: bool = True
     liquidity_buffer_pips: float | None = None
     spread_pips: float = 0.0
-    m5_zone_type: int = 1
-    m1_zone_type: int = 1
     max_sl_pips: float = 0.0
     limit_percent: float = 0.0
     order_kind: str = "MARKET"

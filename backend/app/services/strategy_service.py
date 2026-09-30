@@ -530,6 +530,17 @@ def _candle_value(candle, key: int, fallback_name: str) -> float:
     return float(candle[key])
 
 
+def _record_order(row: dict, order_sink: dict | None = None) -> None:
+    """Keep an in-memory order row only in simulation, where there is no
+    terminal to ask. With MT5 connected, positions and orders are always read
+    live from the connected accounts, so nothing accumulates here. A caller
+    that needs the row itself (e.g. scalping) passes `order_sink`."""
+    if order_sink is not None:
+        order_sink.update(row)
+    if not mt5_available():
+        append_list("orders", row, limit=2000)
+
+
 def _open_positions_count(symbol: str) -> int:
     if mt5_available():
         positions = mt5.positions_get(symbol=symbol)
@@ -919,6 +930,7 @@ def open_manual_position(
     copy_to_sub_accounts: bool = True,
     after_master_order: Callable[[dict], str | None] | None = None,
     log_failures: bool = True,
+    order_sink: dict | None = None,
 ):
     def log_failure(line: str) -> None:
         # Callers that report failures themselves (scalping) pass
@@ -1084,8 +1096,7 @@ def open_manual_position(
         fill_price = float(getattr(result, "price", 0.0) or 0.0) if result is not None else 0.0
         if order_kind_upper == "MARKET" and fill_price > 0:
             entry_price = fill_price
-        append_list(
-            "orders",
+        _record_order(
             {
                 "id": str(uuid4()),
                 "ticket": ticket,
@@ -1113,7 +1124,7 @@ def open_manual_position(
                 "auto_close_at": auto_close_at.isoformat() if isinstance(auto_close_at, datetime) else None,
                 "created_at": datetime.now().isoformat(),
             },
-            limit=2000,
+            order_sink,
         )
         if after_master_order is not None:
             copy_summary = after_master_order(dict(request))
@@ -1489,8 +1500,7 @@ def open_order_strategy(config_data):
     result = mt5.order_send(request) if mt5_available() else None
     done = bool(result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE) or not mt5_available()
     if done:
-        append_list(
-            "orders",
+        _record_order(
             {
                 "id": str(uuid4()),
                 "ticket": getattr(result, "order", int(time.time() * 1000)),
@@ -1505,7 +1515,6 @@ def open_order_strategy(config_data):
                 "origin": "strategy",
                 "created_at": datetime.now().isoformat(),
             },
-            limit=2000,
         )
         copy_summary = _clone_trade_to_sub_accounts(request, origin="strategy")
         copy_suffix = f" ({copy_summary})" if copy_summary else ""

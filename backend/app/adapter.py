@@ -223,7 +223,7 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
                 "M5": mt5.TIMEFRAME_M5,
                 "M15": mt5.TIMEFRAME_M15,
             }.get(timeframe_name, mt5.TIMEFRAME_M1)
-            count = max(20, min(400, int(payload.get("count", 180) or 180)))
+            count = max(20, min(1000, int(payload.get("count", 250) or 250)))
 
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:

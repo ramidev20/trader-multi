@@ -61,6 +61,14 @@ function toUnix(value?: string | number | null) {
   return Math.floor(dt.getTime() / 1000);
 }
 
+// Candles loaded (and fitted on screen) per timeframe.
+const CHART_CANDLE_COUNT: Record<string, number> = {
+  M1: 1000,
+  M3: 500,
+  M5: 500,
+  M15: 500,
+};
+
 const TIMEFRAME_SECONDS: Record<string, number> = {
   M1: 60,
   M3: 180,
@@ -289,7 +297,7 @@ function ChartPageView() {
       const data = await api.chartData({
         symbol: "XAUUSD",
         timeframe: requestedTimeframe,
-        count: 180,
+        count: CHART_CANDLE_COUNT[requestedTimeframe] ?? 500,
       });
       // A slow response from the previous timeframe must not replace the
       // snapshot for the currently selected chart frame.
@@ -370,7 +378,7 @@ function ChartPageView() {
               if (index >= 0) candles[index] = { ...candles[index], ...bar };
               else if (!tail || time > Number(tail.time)) candles.push({ ...bar });
             });
-            if (candles.length > 400) candles.splice(0, candles.length - 400);
+            if (candles.length > 1000) candles.splice(0, candles.length - 1000);
           } else if (last && Number(last.time) === candleTime) {
             candles[candles.length - 1] = {
               ...last,
@@ -380,7 +388,7 @@ function ChartPageView() {
             };
           } else if (last && candleTime > Number(last.time)) {
             candles.push({ time: candleTime, open: price, high: price, low: price, close: price });
-            if (candles.length > 400) candles.splice(0, candles.length - 400);
+            if (candles.length > 1000) candles.splice(0, candles.length - 1000);
           }
           const refreshedOpenPositions = Array.isArray(quote?.orders) ? quote.orders : null;
           const orders = refreshedOpenPositions
@@ -425,7 +433,7 @@ function ChartPageView() {
       }
     }
     pollZoneStrategy();
-    const timer = window.setInterval(pollZoneStrategy, 500);
+    const timer = window.setInterval(pollZoneStrategy, 1000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

@@ -1258,6 +1258,7 @@ class ZoneStrategyEngine:
         side = "BUY" if is_buy else "SELL"
         position_candle_time: Optional[int] = None
         order_result = None
+        placed: dict[str, Any] = {}
         sl_liquidity_price: Optional[float] = None
         sl_liquidity_pips: Optional[float] = None
         order_kind = "MARKET"
@@ -1367,6 +1368,7 @@ class ZoneStrategyEngine:
                     tp2_percent=self.tp2_percent,
                     # The engine logs one line for a failure itself.
                     log_failures=False,
+                    order_sink=placed,
                 )
         except _SearchStopped:
             append_log("search", f"[INFO] [scalping:{self.side}] search stopped; {side} entry not sent.")
@@ -1375,19 +1377,8 @@ class ZoneStrategyEngine:
             self._recover_after_failed_order(str(exc))
             return
 
-        placed_orders = get("orders", [])
+        # `placed` is this order's own row (no shared orders list to search).
         result_order_ticket = getattr(order_result, "order", None)
-        placed = next(
-            (
-                order for order in reversed(placed_orders)
-                if str(order.get("ticket")) == str(result_order_ticket)
-                and str(order.get("side", "")).upper() == side
-            ),
-            next(
-                (order for order in reversed(placed_orders) if str(order.get("side", "")).upper() == side),
-                placed_orders[-1] if placed_orders else {},
-            ),
-        )
         ticket = placed.get("ticket", result_order_ticket)
         position_key_values = [
             ticket,

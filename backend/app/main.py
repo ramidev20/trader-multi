@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import asyncio
@@ -271,6 +272,22 @@ class ZoneStrategyStopPayload(BaseModel):
 
 
 
+
+
+class _QuietPollingAccessLog(logging.Filter):
+    """Drop the uvicorn access-log lines for endpoints the UI polls every
+    second (scalping status, chart data/quote), however the server is started.
+    run.py already passes --no-access-log; this covers a direct `uvicorn`."""
+
+    _NOISY = ("/zone-strategy/status", "/chart/")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(path in message for path in self._NOISY)
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietPollingAccessLog())
+
 app = FastAPI(title="MT5 Trader API", version="0.3.0")
 
 
@@ -529,7 +546,7 @@ def _generate_chart_orders() -> list[dict[str, Any]]:
 
 
 def _generate_chart_candles(symbol: str, timeframe: int, count: int) -> list[dict[str, Any]]:
-    count = max(20, min(400, int(count or 120)))
+    count = max(20, min(1000, int(count or 120)))
     base = _tick_for(symbol)
     candles: list[dict[str, Any]] = []
     interval_seconds = 60
@@ -1252,7 +1269,7 @@ def live_orders() -> dict[str, Any]:
 def chart_data(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1", count: int = 180) -> dict[str, Any]:
     normalized_symbol = str(symbol or SYMBOL_DEFAULT).strip().upper()
     normalized_timeframe = str(timeframe or "M1").strip().upper()
-    normalized_count = max(20, min(400, int(count or 180)))
+    normalized_count = max(20, min(1000, int(count or 180)))
     source = "simulated"
     bid = None
     ask = None

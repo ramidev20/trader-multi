@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { RefreshCcw, StopCircle, FlaskConical } from "lucide-react";
+import { RefreshCcw, StopCircle, FlaskConical, CircleHelp } from "lucide-react";
 import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
-import { AppButton, Field } from "../components/ui/Primitives";
+import { AppButton, Field, SelectBox } from "../components/ui/Primitives";
+import { ZoneGuideDialog } from "./shared/ZoneGuideDialog";
 import { DateTimeField } from "./shared/DateTimeField";
 import { cx, decimalInput } from "../utils/format";
 import { clearBanner, showBanner } from "../utils/banner";
@@ -209,6 +210,10 @@ export default function ScalpingPage() {
   const [spreadPips, setSpreadPips] = useState(saved.spreadPips ?? "0");
   // MARKET vs LIMIT is chosen per trade: an SL wider than Max SL becomes a
   // LIMIT whose entry moves Limit % of the SL distance toward the SL.
+  // Which zone pattern each timeframe looks for (see the zone guide dialog).
+  const [m5ZoneType, setM5ZoneType] = useState(saved.m5ZoneType ?? "Type 1");
+  const [m1ZoneType, setM1ZoneType] = useState(saved.m1ZoneType ?? "Type 1");
+  const [zoneGuideOpen, setZoneGuideOpen] = useState(false);
   const [maxSlPips, setMaxSlPips] = useState(saved.maxSlPips ?? "");
   const [limitPercent, setLimitPercent] = useState(saved.limitPercent ?? "");
 
@@ -260,6 +265,8 @@ export default function ScalpingPage() {
       spreadPips,
       maxSlPips,
       limitPercent,
+      m5ZoneType,
+      m1ZoneType,
       tp1Ratio,
       tp2Ratio,
       tp2Enabled,
@@ -284,6 +291,8 @@ export default function ScalpingPage() {
     spreadPips,
     maxSlPips,
     limitPercent,
+    m5ZoneType,
+    m1ZoneType,
     tp1Ratio,
     tp2Ratio,
     tp2Enabled,
@@ -374,6 +383,8 @@ export default function ScalpingPage() {
       liquidity_buffer_pips: Number(liquiditySlPips || 0),
       // Added beyond the SL, same as Manual Trade's Spread field.
       spread_pips: Number(spreadPips || 0),
+      m5_zone_type: m5ZoneType === "Type 2" ? 2 : 1,
+      m1_zone_type: m1ZoneType === "Type 2" ? 2 : 1,
       max_sl_pips: Number(maxSlPips || 0),
       limit_percent: Number(limitPercent || 0),
       lot: null,
@@ -543,8 +554,18 @@ export default function ScalpingPage() {
 
   return (
     <LocalizationProvider dateAdapter={AdapterDayjs}>
+    <ZoneGuideDialog open={zoneGuideOpen} onClose={() => setZoneGuideOpen(false)} />
     <div className="flex min-h-max flex-none flex-col gap-3">
-      <div className="flex flex-wrap justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => setZoneGuideOpen(true)}
+          title="Zone types guide"
+          aria-label="Zone types guide"
+          className="shrink-0 rounded-full p-2 text-slate-500 transition hover:bg-slate-200 hover:text-blue-600"
+        >
+          <CircleHelp className="h-5 w-5" />
+        </button>
         <AppButton
           variant="blue"
           className="shrink-0"
@@ -617,6 +638,19 @@ export default function ScalpingPage() {
             Order Settings
           </span>
           <div className="mt-3 grid grid-cols-2 gap-3">
+            <SelectBox
+              label="5-min zone type"
+              value={m5ZoneType}
+              options={["Type 1", "Type 2"]}
+              onChange={(event) => setM5ZoneType(event.target.value)}
+            />
+            <SelectBox
+              label="1-min zone type"
+              value={m1ZoneType}
+              options={["Type 1", "Type 2"]}
+              onChange={(event) => setM1ZoneType(event.target.value)}
+            />
+
             <Field
               label="Max SL (pips)"
               type="text"

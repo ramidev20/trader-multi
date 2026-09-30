@@ -51,17 +51,25 @@ from .strategy_service import (
 #
 # c2 also has to have actually retraced back onto a c3 level before the c1
 # breakout counts, otherwise c1's gap could be jumping clean over a c3 that
-# was never retested. This "touch reference" uses its own open/close pick --
-# for supply, a different one than the gap check above:
+# was never retested. The touch reference is c3's gap reference itself:
 #   - demand: c2's low must touch (reach down to, or through) bullish c3's
-#     open / bearish c3's close -- same mapping as demand's gap reference.
+#     open / bearish c3's close.
 #   - supply: c2's high must touch (reach up to, or through) bullish c3's
-#     open / bearish c3's close -- *not* mirrored from the supply gap
-#     reference; same open/close mapping as demand's touch reference,
-#     checked against the high instead of the low.
+#     close / bearish c3's open -- the top of c3's body either way.
+#
+# Two zone types can be chosen per timeframe (Scalping page, M5 and M1):
+#   - Type 1 (default): everything above -- c2 must retest c3's gap reference.
+#   - Type 2: no c2 retest. Only c1 matters: it must stay entirely clear of
+#     c3's body -- demand: c1's low above the top of c3's body (max of open/
+#     close); supply: c1's high below the bottom of c3's body (min of
+#     open/close). So c1 never touches c3's open or close, whichever way c3
+#     closed.
 #
 # The zone box itself is drawn on c3 alone: demand from c3's low up to its
-# gap reference, supply from its gap reference up to c3's high.
+# gap reference, supply from its gap reference up to c3's high. M5 zones only:
+# if c2's low is below c3's low (demand) / c2's high is above c3's high
+# (supply), the box extends to c2's extreme, and that is the level whose
+# breach invalidates the zone. M1 zones stay on c3 alone.
 #
 # The M5 buffer is cleared when the M15 trigger fires, and the M1 buffer when
 # the M5 zone forms. Each stage keeps its own timeframe's candles separate.
@@ -75,9 +83,11 @@ from .strategy_service import (
 # instances below) so both can be watching -- and can both fire -- at once.
 #
 # Stoploss is always anchored on a real M1 candle low (BUY) / high (SELL):
-#   - Start from the M1 zone's c2 low/high and walk backward one candle at a
-#     time (c3 first, then older candles). Take the first candle whose low is
-#     below c2's low (BUY) / whose high is above c2's high (SELL) by at least
+#   - The reference is c2's low/high only when c2 goes beyond c3 (demand: c2
+#     low below c3 low; supply: c2 high above c3 high); otherwise it is c3's
+#     own low/high. Walk backward from there one candle at a time. Take the
+#     first candle whose low is below the reference (BUY) / whose high is
+#     above it (SELL) by at least
 #     the user's "Liquidity SL (pips)" minimum, and that is also at least the
 #     global "min SL" from entry. The stop sits on that candle's low/high;
 #     the user's "Spread (pips)" is then added beyond it, the same way Manual
@@ -205,6 +215,9 @@ class ZoneStrategyEngine:
         self.trigger_zone_type: str = self.side
         self.m5_target_zone_type: str = self.side
         self.m1_target_zone_type: str = self.side
+        # 1 = c2 must retest c3, 2 = c1 only (see the module docstring).
+        self.m5_zone_variant: int = 1
+        self.m1_zone_variant: int = 1
         self.instant_m5_start: bool = False
         self.dev_m1_start: bool = False
         self.trigger_check_cycle_sec: float = DEFAULT_TRIGGER_CHECK_CYCLE_SEC
@@ -285,6 +298,10 @@ class ZoneStrategyEngine:
         # MARKET vs LIMIT is decided per trade from the SL size; the old
         # order_kind field is accepted but ignored.
         order_kind = "AUTO"
+        m5_zone_variant = int(cfg.get("m5_zone_type", 1) or 1)
+        m1_zone_variant = int(cfg.get("m1_zone_type", 1) or 1)
+        if m5_zone_variant not in (1, 2) or m1_zone_variant not in (1, 2):
+            raise RuntimeError("Zone type must be 1 or 2.")
         max_sl_pips = max(0.0, float(cfg.get("max_sl_pips", 0) or 0))
         limit_percent = float(cfg.get("limit_percent", 0) or 0)
         if max_sl_pips > 0 and not 0 < limit_percent < 100:
@@ -321,6 +338,8 @@ class ZoneStrategyEngine:
             self.liquidity_buffer_pips = max(0.0, float(cfg.get("liquidity_buffer_pips", 0) or 0))
             self.spread_pips = max(0.0, float(cfg.get("spread_pips", 0) or 0))
             self.order_kind = order_kind
+            self.m5_zone_variant = m5_zone_variant
+            self.m1_zone_variant = m1_zone_variant
             self.max_sl_pips = max_sl_pips
             self.limit_percent = limit_percent
             self.lot = cfg.get("lot")
@@ -357,6 +376,8 @@ class ZoneStrategyEngine:
                 "trigger_zone_type": self.trigger_zone_type,
                 "m5_target_zone_type": self.m5_target_zone_type,
                 "m1_target_zone_type": self.m1_target_zone_type,
+                "m5_zone_type": self.m5_zone_variant,
+                "m1_zone_type": self.m1_zone_variant,
                 "order_kind": self.order_kind,
                 "max_sl_pips": self.max_sl_pips,
                 "limit_percent": self.limit_percent,
@@ -841,7 +862,9 @@ class ZoneStrategyEngine:
             )
             history_is_current = latest_closed_time >= boundary_time
             zone = (
-                self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
+                self._detect_gap_zone_locked(
+                    self.m5_buffer, self.m5_target_zone_type, extend_to_c2=True, variant=self.m5_zone_variant
+                )
                 if not fresh and history_is_current
                 else None
             )
@@ -895,7 +918,9 @@ class ZoneStrategyEngine:
             return
         with self._lock:
             self.m5_buffer.extend(candles)
-            zone = self._detect_gap_zone_locked(self.m5_buffer, self.m5_target_zone_type)
+            zone = self._detect_gap_zone_locked(
+                    self.m5_buffer, self.m5_target_zone_type, extend_to_c2=True, variant=self.m5_zone_variant
+                )
         if zone is not None:
             self._accept_m5_zone(zone)
 
@@ -994,7 +1019,9 @@ class ZoneStrategyEngine:
             return
         with self._lock:
             self.m1_buffer.extend(candles)
-            zone = self._detect_gap_zone_locked(self.m1_buffer, self.m1_target_zone_type)
+            zone = self._detect_gap_zone_locked(
+                self.m1_buffer, self.m1_target_zone_type, variant=self.m1_zone_variant
+            )
         if zone is None:
             # No candle limit: keep searching M1 on this M5 zone until a
             # match is found or the zone is breached. The buffer only keeps
@@ -1093,8 +1120,8 @@ class ZoneStrategyEngine:
 
         Which edge (open vs. close) is picked depends on which way c3 itself
         closed, not a fixed choice regardless of direction. Returns
-        (gap_reference, touch_reference); for demand these are the same
-        price, for supply they're mirrored opposites of each other.
+        (gap_reference, touch_reference); these are the same price for both
+        demand and supply.
         """
         c3_bullish = _is_bullish(c3)
         c3_open = _candle_value(c3, 1, "open")
@@ -1103,10 +1130,17 @@ class ZoneStrategyEngine:
             ref = c3_close if not c3_bullish else c3_open
             return ref, ref
         gap_ref = c3_open if not c3_bullish else c3_close
-        touch_ref = c3_open if c3_bullish else c3_close
-        return gap_ref, touch_ref
+        # Supply: c2's high has to reach the same body edge c1 later stays
+        # below (bullish c3 -> close, bearish c3 -> open).
+        return gap_ref, gap_ref
 
-    def _detect_gap_zone_locked(self, buffer: deque, target_zone_type: str) -> Optional[dict[str, Any]]:
+    def _detect_gap_zone_locked(
+        self,
+        buffer: deque,
+        target_zone_type: str,
+        extend_to_c2: bool = False,
+        variant: int = 1,
+    ) -> Optional[dict[str, Any]]:
         """3-candle imbalance/gap check, shared by both the M5 and M1
         searches -- see the module docstring for the full spec.
 
@@ -1123,29 +1157,39 @@ class ZoneStrategyEngine:
             # c3 defines the base and c2 retests it. c1 only needs to hold
             # above the gap reference; its candle direction is irrelevant.
             c1_low = _candle_value(c1, 3, "low")
-            if c1_low <= gap_ref:
+            # Type 2: clear of the whole c3 body, not just its lower edge.
+            c1_limit = gap_ref if variant == 1 else max(
+                _candle_value(c3, 1, "open"), _candle_value(c3, 4, "close")
+            )
+            if c1_low <= c1_limit:
                 return None
             c2_low = _candle_value(c2, 3, "low")
-            if c2_low > touch_ref:
+            if variant == 1 and c2_low > touch_ref:
                 return None
             # Zone box drawn on c3 alone -- its low up to its gap reference.
             c3_low = _candle_value(c3, 3, "low")
-            price_low, price_high = c3_low, gap_ref
+            # M5: a deeper c2 low becomes the zone's low (the breach level).
+            price_low, price_high = (min(c3_low, c2_low) if extend_to_c2 else c3_low), gap_ref
         else:
             # Supply mirrors demand: c1 must hold below the reference, but
             # its candle direction is irrelevant.
             c1_high = _candle_value(c1, 2, "high")
-            if c1_high >= gap_ref:
+            c1_limit = gap_ref if variant == 1 else min(
+                _candle_value(c3, 1, "open"), _candle_value(c3, 4, "close")
+            )
+            if c1_high >= c1_limit:
                 return None
             c2_high = _candle_value(c2, 2, "high")
-            if c2_high < touch_ref:
+            if variant == 1 and c2_high < touch_ref:
                 return None
             # Zone box drawn on c3 alone -- its gap reference up to its high.
             c3_high = _candle_value(c3, 2, "high")
-            price_low, price_high = gap_ref, c3_high
+            # M5: a higher c2 high becomes the zone's high (the breach level).
+            price_low, price_high = gap_ref, (max(c3_high, c2_high) if extend_to_c2 else c3_high)
 
         return {
             "type": target_zone_type,
+            "variant": variant,
             "price_high": round(float(price_high), 2),
             "price_low": round(float(price_low), 2),
             "base_candle_time": int(c3["time"]),
@@ -1185,25 +1229,37 @@ class ZoneStrategyEngine:
         min_sl_distance: float,
         min_liquidity_distance: float,
     ) -> tuple[float, Optional[tuple[float, float, int]]]:
-        """Liquidity candle behind the M1 zone's c2. Returns (c2 extreme, match).
+        """Liquidity candle behind the M1 zone. Returns (reference extreme, match).
 
-        The stop sits exactly on a real candle extreme, starting from c2's
-        own low (BUY) / high (SELL). Walk backward -- c3 first, then older
-        candles -- and take the first candle whose low is below c2's low
-        (BUY) / high is above c2's high (SELL) by at least
-        `min_liquidity_distance`, and that is also at least the global min SL
-        away from entry. Nearer swings are skipped, so the walk moves on to
-        the next deeper low/high instead of floating the stop at an arbitrary
-        price. `match` is (that candle's low/high, its distance from c2's
-        low/high, its broker time), or None if the lookback has no such candle.
+        The stop sits exactly on a real candle extreme. The reference the
+        distance is measured from is c2's low (BUY) / high (SELL) only when c2
+        goes beyond c3 (c2 low below c3 low / c2 high above c3 high);
+        otherwise it is c3's own low / high. Walk backward from the reference
+        candle and take the first candle whose low is below the reference
+        (BUY) / high is above it (SELL) by at least `min_liquidity_distance`,
+        and that is also at least the global min SL away from entry. Nearer
+        swings are skipped, so the walk moves on to the next deeper low/high
+        instead of floating the stop at an arbitrary price. `match` is (that
+        candle's low/high, its distance from the reference, its broker time),
+        or None if the lookback has no such candle.
         """
-        c2_time = int(zone.get("retest_candle_time") or int(zone["base_candle_time"]) + 60)
+        c3_time = int(zone["base_candle_time"])
+        c2_time = int(zone.get("retest_candle_time") or c3_time + 60)
         c2, history = self._m1_history_through(c2_time)
-        if c2 is not None:
-            c2_extreme = float(_candle_value(c2, 3, "low") if is_buy else _candle_value(c2, 2, "high"))
+        c3 = next((candle for candle in history if int(candle["time"]) == c3_time), None)
+        pick = (lambda candle: float(_candle_value(candle, 3, "low"))) if is_buy else (
+            lambda candle: float(_candle_value(candle, 2, "high"))
+        )
+        if c2 is not None and c3 is not None:
+            c2_beyond_c3 = pick(c2) < pick(c3) if is_buy else pick(c2) > pick(c3)
+            if c2_beyond_c3:
+                c2_extreme = pick(c2)  # history is already everything before c2
+            else:
+                c2_extreme = pick(c3)
+                history = [candle for candle in history if int(candle["time"]) < c3_time]
         else:
-            # No c2 bar to read (sim mode): start from c3 as before.
-            _c3, history = self._m1_history_through(int(zone["base_candle_time"]))
+            # No c2/c3 bars to read (sim mode): start from c3 as before.
+            _c3, history = self._m1_history_through(c3_time)
             c2_extreme = float(zone["price_low"] if is_buy else zone["price_high"])
         if is_buy:
             limit = min(c2_extreme - min_liquidity_distance, entry_price - min_sl_distance)

@@ -211,7 +211,6 @@ export default function ScalpingPage() {
   // LIMIT whose entry moves Limit % of the SL distance toward the SL.
   const [maxSlPips, setMaxSlPips] = useState(saved.maxSlPips ?? "");
   const [limitPercent, setLimitPercent] = useState(saved.limitPercent ?? "");
-  const [maxPositions, setMaxPositions] = useState(saved.maxPositions ?? "1");
 
   // Multi-TP (up to 2 stages), same mechanism as Manual Trade's Advanced
   // Risk panel -- but with no Stop Loss Price field, since the SL here
@@ -261,7 +260,6 @@ export default function ScalpingPage() {
       spreadPips,
       maxSlPips,
       limitPercent,
-      maxPositions,
       tp1Ratio,
       tp2Ratio,
       tp2Enabled,
@@ -286,7 +284,6 @@ export default function ScalpingPage() {
     spreadPips,
     maxSlPips,
     limitPercent,
-    maxPositions,
     tp1Ratio,
     tp2Ratio,
     tp2Enabled,
@@ -382,7 +379,6 @@ export default function ScalpingPage() {
       lot: null,
       // Risk comes from each account's own Risk % setting.
       risk_percent: null,
-      max_positions: Math.max(1, Math.floor(Number(maxPositions) || 1)),
       instant_m5_start: Boolean(instantM5) && !devM1,
       dev_m1_start: Boolean(devM1),
       tp1_ratio: Number(tp1Ratio || 0),
@@ -403,10 +399,6 @@ export default function ScalpingPage() {
     }
     if (!(Number(tp1Ratio) > 0)) {
       showBanner("Enter a TP1 ratio greater than 0.", "error");
-      return;
-    }
-    if (!(Number(maxPositions) >= 1)) {
-      showBanner("Max positions must be at least 1.", "error");
       return;
     }
     if (Number(maxSlPips) > 0 && !(Number(limitPercent) > 0 && Number(limitPercent) < 100)) {
@@ -489,10 +481,6 @@ export default function ScalpingPage() {
 
   async function handleDevM1Start(side) {
     clearBanner();
-    if (!(Number(maxPositions) >= 1)) {
-      showBanner("Max positions must be at least 1.", "error");
-      return;
-    }
     if (Number(maxSlPips) > 0 && !(Number(limitPercent) > 0 && Number(limitPercent) < 100)) {
       showBanner("Enter a Limit % between 0 and 100 when Max SL is set.", "error");
       return;
@@ -652,16 +640,6 @@ export default function ScalpingPage() {
             />
 
             <Field
-              label="Max Positions (both sides)"
-              type="text"
-              inputMode="numeric"
-              value={maxPositions}
-              onChange={(event) => setMaxPositions(event.target.value.replace(/[^0-9]/g, ""))}
-              disabled={submitting}
-              placeholder="1"
-            />
-
-            <Field
               label="Min SL (pips)"
               type="text"
               inputMode="decimal"
@@ -723,8 +701,9 @@ export default function ScalpingPage() {
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <Field
                 label="TP1 Ratio"
-                type="text"
-                inputMode="decimal"
+                type="number"
+                min="0.1"
+                step="0.1"
                 value={tp1Ratio}
                 onChange={(event) => setTp1Ratio(decimalInput(event.target.value))}
                 disabled={submitting}
@@ -751,8 +730,9 @@ export default function ScalpingPage() {
                     />
                   </span>
                 }
-                type="text"
-                inputMode="decimal"
+                type="number"
+                min="0.1"
+                step="0.1"
                 value={tp2Ratio}
                 onChange={(event) => setTp2Ratio(decimalInput(event.target.value))}
                 disabled={submitting || !tp2Enabled}

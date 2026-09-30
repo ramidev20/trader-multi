@@ -18,7 +18,6 @@ from .strategy_service import (
     _ensure_master_session,
     _ensure_symbol_ready,
     _tick_for,
-    _open_positions_count,
     _close_mt5_pending_order,
     close_all_positions,
     open_manual_position,
@@ -91,6 +90,10 @@ from .strategy_service import (
 #     "Limit %" of the SL distance while the SL stays put, e.g. a 100 pip SL
 #     with 40% becomes a limit 40 pips better than market with a 60 pip SL.
 #     If the M5 zone breaks before the limit fills, the limit is cancelled.
+#
+# A position closed by its final TP (the broker TP -- partial TP1/TP2
+# withdrawals are closed by the app and don't count) ends the session: both
+# sides' searches stop and every open position on the symbol is closed.
 #   - Candles that fail either minimum are skipped and the walk continues to
 #     the next deeper low/high. Only if no candle in the lookback qualifies
 #     does the stop fall back to entry -/+ min SL.
@@ -113,17 +116,12 @@ CLOSED_CANDLE_CATCHUP = 5
 # Polls to wait for the closing deal to reach history after a position
 # disappears, before treating the close as manual.
 EXIT_REASON_GRACE_POLLS = 10
-_scalping_max_positions = 1
 _end_close_lock = threading.Lock()
 _last_end_close_at = float("-inf")
 # Symbol/session problems are the same for both sides; report each once
 # (keyed by check kind) instead of once per side, every poll.
 _symbol_error_lock = threading.Lock()
 _reported_symbol_errors: dict[str, Optional[str]] = {}
-
-
-class _PositionCapReached(RuntimeError):
-    pass
 
 
 class _SearchStopped(RuntimeError):
@@ -228,7 +226,6 @@ class ZoneStrategyEngine:
         self.limit_percent: float = 0.0
         self.lot: Optional[float] = None
         self.risk_percent: Optional[float] = None
-        self.max_positions: int = 1
         # Take-profit is always ratio-based here (same mechanism as manual
         # trade's Multi-TP), never a flat pip amount -- the stop that the
         # ratios multiply against is the one this engine itself computes in
@@ -261,7 +258,6 @@ class ZoneStrategyEngine:
         self._search_resumed_during_trade = False
 
     def start(self, cfg: dict) -> None:
-        global _scalping_max_positions
         manual_sl_distance = float(cfg.get("manual_sl_distance", 0) or 0)
         if manual_sl_distance <= 0:
             raise RuntimeError("Enter a manual stoploss distance greater than 0.")
@@ -331,8 +327,6 @@ class ZoneStrategyEngine:
             # Risk comes from each account's own Risk % setting
             # (open_manual_position falls back to the master's when None).
             self.risk_percent = None
-            self.max_positions = max(1, int(cfg.get("max_positions", 1) or 1))
-            _scalping_max_positions = self.max_positions
             self.tp1_ratio = float(cfg.get("tp1_ratio") or 1.0)
             self.tp2_ratio = float(cfg.get("tp2_ratio") or 1.0)
             self.tp3_ratio = float(cfg.get("tp3_ratio") or 1.0)
@@ -375,7 +369,6 @@ class ZoneStrategyEngine:
                 "spread_pips": self.spread_pips,
                 "lot": self.lot,
                 "risk_percent": self.risk_percent,
-                "max_positions": self.max_positions,
                 "tp1_ratio": self.tp1_ratio,
                 "tp2_ratio": self.tp2_ratio,
                 "tp3_ratio": self.tp3_ratio,
@@ -531,16 +524,10 @@ class ZoneStrategyEngine:
         stop_task(self._end_task_name)
         end_label = self.end_time.strftime("%H:%M:%S") if self.end_time else "End time"
         self.stop(f"End time {end_label} reached; search stopped.")
-        global _last_end_close_at
-        with _end_close_lock:
-            if time.monotonic() - _last_end_close_at < 30:
-                return
-            _last_end_close_at = time.monotonic()
-        append_log("search", f"[WARNING] [scalping] End time {end_label} reached; closing {self.symbol} positions.")
-        try:
-            close_all_positions(symbol=self.symbol)
-        except Exception as exc:
-            append_log("search", f"[ERROR] [scalping] end-time close failed: {exc}")
+        _close_all_once(
+            self.symbol,
+            f"[WARNING] [scalping] End time {end_label} reached; closing {self.symbol} positions.",
+        )
 
     def _ensure_symbol_or_log(self, require_fresh_quote: bool = True) -> bool:
         """Guard MT5 calls, with quote freshness required only for live prices.
@@ -1236,7 +1223,7 @@ class ZoneStrategyEngine:
                 )
         return c2_extreme, None
 
-    def _recover_after_failed_order(self, message: str, cap_reached: bool) -> None:
+    def _recover_after_failed_order(self, message: str) -> None:
         """Keep searching after an order is refused instead of dying.
 
         A refused order (position cap, broker reject, limit price already
@@ -1262,8 +1249,7 @@ class ZoneStrategyEngine:
             })
             return
         patch_path(self._state_path, {"last_error": message})
-        label = "Entry skipped" if cap_reached else "Order failed"
-        append_log("search", f"[WARNING] [scalping:{self.side}] {label}: {message} Still searching.")
+        append_log("search", f"[WARNING] [scalping:{self.side}] Order failed: {message} Still searching.")
         if not self._resume_m1_search_for_current_zone(allow_without_zone=self.dev_m1_start):
             self._start_m5_search(fresh=True)
 
@@ -1361,11 +1347,6 @@ class ZoneStrategyEngine:
             with MT5_LOCK:
                 if self._stopped:
                     raise _SearchStopped()
-                position_limit = _scalping_max_positions
-                if position_limit > 0 and _open_positions_count(self.symbol) >= position_limit:
-                    raise _PositionCapReached(
-                        f"Scalping max positions reached ({position_limit} across demand and supply)."
-                    )
                 order_result = open_manual_position(
                     side,
                     lot_size=self.lot,
@@ -1390,11 +1371,8 @@ class ZoneStrategyEngine:
         except _SearchStopped:
             append_log("search", f"[INFO] [scalping:{self.side}] search stopped; {side} entry not sent.")
             return
-        except _PositionCapReached as exc:
-            self._recover_after_failed_order(str(exc), cap_reached=True)
-            return
         except Exception as exc:
-            self._recover_after_failed_order(str(exc), cap_reached=False)
+            self._recover_after_failed_order(str(exc))
             return
 
         placed_orders = get("orders", [])
@@ -1560,6 +1538,14 @@ class ZoneStrategyEngine:
         return None
 
     def _restart_search_after_close(self, closed_reason: str) -> None:
+        if closed_reason == "TP":
+            _stop_all_and_close(
+                self.symbol,
+                f"[SUCCESS] [scalping:{self.side}] Position hit its final TP; stopping scalping "
+                f"and closing all {self.symbol} positions.",
+                "Final TP hit; search stopped.",
+            )
+            return
         prefix = f"[INFO] [scalping:{self.side}] Position closed by {closed_reason}"
         # A breach during the trade already restarted the M5 search.
         if self._search_resumed_during_trade:
@@ -1572,6 +1558,44 @@ class ZoneStrategyEngine:
             return
         append_log("search", f"{prefix}; starting a new 5-minute search.")
         self._start_m5_search(fresh=True, announce=False)
+
+
+def _claim_close_all() -> bool:
+    """End time and a final TP can fire on both sides within moments of each
+    other; only the first caller gets to close, so the feed shows one close."""
+    global _last_end_close_at
+    with _end_close_lock:
+        if time.monotonic() - _last_end_close_at < 30:
+            return False
+        _last_end_close_at = time.monotonic()
+        return True
+
+
+def _close_positions(symbol: str) -> None:
+    try:
+        close_all_positions(symbol=symbol)
+    except Exception as exc:
+        append_log("search", f"[ERROR] [scalping] close-all failed: {exc}")
+
+
+def _close_all_once(symbol: str, announcement: str) -> None:
+    """Close every position on `symbol` unless that was just done."""
+    if not _claim_close_all():
+        return
+    append_log("search", announcement)
+    _close_positions(symbol)
+
+
+def _stop_all_and_close(symbol: str, announcement: str, stop_reason: str) -> None:
+    """Final TP: stop both sides' searches first (so nothing new opens),
+    then close every open position on the symbol once."""
+    first = _claim_close_all()
+    if first:
+        append_log("search", announcement)
+    for manager in _zone_managers.values():
+        manager.stop(stop_reason)
+    if first:
+        _close_positions(symbol)
 
 
 zone_manager_demand = ZoneStrategyEngine("demand")

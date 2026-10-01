@@ -533,7 +533,7 @@ class ZoneStrategyEngine:
         close instead of a duplicate "nothing to close" line.
         """
         stop_task(self._end_task_name)
-        end_label = self.end_time.strftime("%H:%M:%S") if self.end_time else "End time"
+        end_label = self.end_time.strftime("%Y-%m-%d %H:%M:%S") if self.end_time else "End time"
         self.stop(f"End time {end_label} reached; search stopped.")
         _close_all_once(
             self.symbol,

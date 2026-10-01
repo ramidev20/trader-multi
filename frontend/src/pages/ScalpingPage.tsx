@@ -59,6 +59,60 @@ function SwitchToggle({ checked, onChange, disabled = false }) {
   );
 }
 
+// Stamps a picked time of day onto today's date. Start/End Time carry a full
+// date, but it's only ever set here -- on page load (so a time saved on an
+// earlier day doesn't send that old date) and when OK is pressed in the time
+// picker -- never re-derived behind the user's back.
+function onToday(timePart) {
+  const d = new Date();
+  // Whole minutes only: the picker shows hours:minutes, but its initial
+  // value keeps the seconds it was created at (14:30 could be 14:30:47).
+  d.setHours(timePart.getHours(), timePart.getMinutes(), 0, 0);
+  return d;
+}
+
+// Same local-wall-clock ISO format as the Search page's Start/End Time --
+// avoids converting to UTC, which would make the picker look shifted on
+// reload.
+function toLocalIso(d) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function formatDayLabel(date, now) {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(date);
+  target.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((target.getTime() - today.getTime()) / 86400000);
+  const relative = diffDays === 0 ? "Today" : diffDays === -1 ? "Yesterday" : null;
+  const dateText = date.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+  return relative ? `${relative} · ${dateText}` : dateText;
+}
+
+// The date a Start/End Time will actually send. Only goes stale if the page
+// stays open past midnight -- flagged so it's re-picked rather than sending
+// yesterday's date.
+function ScheduleDateLabel({ value, now, muted = false }) {
+  const stale = value.toDateString() !== now.toDateString();
+  return (
+    <p
+      className={cx(
+        "mt-2 text-[11px] font-semibold leading-4",
+        stale ? "text-amber-600" : muted ? "text-slate-400" : "text-slate-600",
+      )}
+    >
+      {formatDayLabel(value, now)}
+      {stale ? " -- press OK in the picker to move it to today" : ""}
+    </p>
+  );
+}
+
 function loadSavedForm() {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -224,18 +278,20 @@ export default function ScalpingPage() {
   const [tp1Percent, setTp1Percent] = useState(saved.tp1Percent ?? "100");
   const [tp2Percent, setTp2Percent] = useState(saved.tp2Percent ?? "100");
 
-  // Optional schedule, same idea as the Search page's Start/End Time, but
-  // time-of-day only -- this always applies to today, so there's no date
-  // picker. Start delays the M15 trigger watch (or the M5/M1 search
-  // directly when paired with a side's "Instant M5" checkbox); end
-  // auto-stops the search and closes any open position, same as the Search
-  // page's End Time. Times round-trip through localStorage as ISO strings,
-  // so they're rehydrated back into Date objects here rather than used as-is.
-  const [startTime, setStartTime] = useState(
-    () => new Date(saved.startTime || Date.now()),
+  // Optional schedule, same idea as the Search page's Start/End Time. Each
+  // value is a full datetime whose date is always today: re-stamped on load
+  // (a saved time from an earlier day keeps its time, drops its date) and
+  // again whenever OK is pressed in the time picker -- see onToday. Start
+  // delays the M15 trigger watch (or the M5/M1 search directly when paired
+  // with a side's "Instant M5" checkbox); end auto-stops the search and
+  // closes any open position, same as the Search page's End Time. Times
+  // round-trip through localStorage as ISO strings, so they're rehydrated
+  // back into Date objects here rather than used as-is.
+  const [startTime, setStartTime] = useState(() =>
+    onToday(new Date(saved.startTime || Date.now())),
   );
-  const [endTime, setEndTime] = useState(
-    () => new Date(saved.endTime || Date.now()),
+  const [endTime, setEndTime] = useState(() =>
+    onToday(new Date(saved.endTime || Date.now())),
   );
   const [endEnabled, setEndEnabled] = useState(saved.endEnabled ?? false);
   const [openPicker, setOpenPicker] = useState(null);
@@ -344,18 +400,9 @@ export default function ScalpingPage() {
   const supplyActive = ACTIVE_PHASES.includes(supplyPhase);
   const anyActive = demandActive || supplyActive;
 
-  // Same local-wall-clock ISO format as the Search page's Start/End Time --
-  // avoids converting to UTC, which would make the picker look shifted on
-  // reload. Always combined with today's date, never a stored one -- this
-  // schedule only ever covers "later today", so there's no date to pick.
-  function combineDateTime(timePart) {
-    const d = new Date();
-    // Whole minutes only: the picker shows hours:minutes, but its initial
-    // value keeps the seconds it was created at (14:30 could be 14:30:47).
-    d.setHours(timePart.getHours(), timePart.getMinutes(), 0, 0);
-    const pad = (value) => String(value).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  }
+  // Only for the date labels' "Today"/"Yesterday" wording -- the status poll
+  // re-renders every 1.5s, so it stays current.
+  const now = new Date();
 
   function setPickerOpenState(pickerKey, isOpen) {
     setOpenPicker(isOpen ? pickerKey : null);
@@ -364,8 +411,8 @@ export default function ScalpingPage() {
   function buildPayload(side, price, instantM5, devM1 = false) {
     // Dev test is a "right now" shortcut -- it never carries the scheduled
     // start/end window from the main form.
-    const startIso = devM1 ? null : combineDateTime(startTime);
-    const endIso = !devM1 && endEnabled ? combineDateTime(endTime) : null;
+    const startIso = devM1 ? null : toLocalIso(startTime);
+    const endIso = !devM1 && endEnabled ? toLocalIso(endTime) : null;
     return {
       symbol: SYMBOL,
       trigger_price: instantM5 || devM1 ? 0 : Number(price),
@@ -407,13 +454,9 @@ export default function ScalpingPage() {
       showBanner("Enter a Limit % between 0 and 100 when Max SL is set.", "error");
       return;
     }
-    if (endEnabled) {
-      const startIso = combineDateTime(startTime);
-      const endIso = combineDateTime(endTime);
-      if (new Date(endIso) <= new Date(startIso)) {
-        showBanner("End time must be later than start time.", "error");
-        return;
-      }
+    if (endEnabled && endTime <= startTime) {
+      showBanner("End time must be later than start time.", "error");
+      return;
     }
     const candidates = [
       {
@@ -765,11 +808,12 @@ export default function ScalpingPage() {
               Schedule
             </span>
             <p className="mt-1 text-[11px] leading-4 text-slate-400">
-              Optional -- same as the Search page, always for today. Start
-              delays the M15 trigger watch (or the M5/M1 search directly, for
-              a side with Instant M5 checked) until this time. End stops the
-              search and closes any open position, whichever side hits it
-              first. Doesn&apos;t apply to the 1 min dev test.
+              Optional -- same as the Search page. Start delays the M15
+              trigger watch (or the M5/M1 search directly, for a side with
+              Instant M5 checked) until this time. End stops the search and
+              closes any open position, whichever side hits it first. The
+              date is always today, set when you press OK in the time picker.
+              Doesn&apos;t apply to the 1 min dev test.
             </p>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <div className="rounded-lg border border-slate-200 bg-white p-2.5">
@@ -780,11 +824,12 @@ export default function ScalpingPage() {
                     label="Time"
                     picker="time"
                     value={startTime}
-                    onChange={setStartTime}
+                    onChange={(next) => setStartTime(onToday(next))}
                     openPicker={openPicker}
                     setPickerOpenState={setPickerOpenState}
                   />
                 </div>
+                <ScheduleDateLabel value={startTime} now={now} />
               </div>
               <div className="rounded-lg border border-slate-200 bg-white p-2.5">
                 <div className="flex items-center justify-between">
@@ -806,11 +851,12 @@ export default function ScalpingPage() {
                     label="Time"
                     picker="time"
                     value={endTime}
-                    onChange={setEndTime}
+                    onChange={(next) => setEndTime(onToday(next))}
                     openPicker={openPicker}
                     setPickerOpenState={setPickerOpenState}
                   />
                 </div>
+                <ScheduleDateLabel value={endTime} now={now} muted={!endEnabled} />
               </div>
             </div>
           </div>

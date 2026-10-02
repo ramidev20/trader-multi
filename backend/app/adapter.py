@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,13 +11,11 @@ from typing import Any
 import MetaTrader5 as mt5
 
 from backend.app.services.path_utils import resolve_terminal_path
-from backend.app.services.session_service import adapter_command_paths, submit_adapter_command
+from backend.app.services.session_service import adapter_command_paths
 from backend.app.services.strategy_service import (
     _build_copy_request,
-    _copy_targets,
-    _load_config,
-    _safe_int,
     close_positions_on_current_session,
+    copy_to_sub_adapters_and_wait,
     open_manual_position,
 )
 
@@ -48,68 +45,39 @@ def _write_command_result(path: Path, result: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
-def _copy_to_connected_sub_adapters(master_request: dict[str, Any]) -> str | None:
-    """Fan out a master trade without changing the current adapter's MT5 login."""
-    config = _load_config()
-    master_login = _safe_int(config.get("master_account_login"))
-    targets = _copy_targets(config, master_login)
-    if not targets:
-        return "Copied master trade to 0/0 sub adapter(s)"
+# copy_open commands waiting out their account's order delay, as
+# (due time on time.monotonic(), result path, payload). They used to
+# time.sleep() inside the command, which froze this adapter -- no snapshots,
+# live positions or Close All for the account -- for the whole delay.
+_scheduled_copies: list[tuple[float, Path, dict[str, Any]]] = []
 
-    def copy_to_target(account: dict[str, Any], risk_percent: float) -> tuple[int, float, dict[str, Any]]:
-        login = _safe_int(account.get("user"))
-        delay_seconds = max(
-            0.0,
-            float(account.get("order_delay_sec", account.get("orderDelaySec", 0)) or 0),
-        )
-        result = submit_adapter_command(
-            login,
-            "copy_open",
-            {
-                "master_request": master_request,
-                "risk_percent": float(risk_percent),
-                "order_delay_sec": delay_seconds,
-                "origin": "manual",
-            },
-            timeout_sec=max(15.0, delay_seconds + 15.0),
-        )
-        return login, delay_seconds, result
 
-    copied = 0
-    active_targets = 0
-    target_details: list[str] = []
-    with ThreadPoolExecutor(max_workers=min(16, len(targets)), thread_name_prefix="adapter-copy") as executor:
-        futures = [executor.submit(copy_to_target, account, risk_percent) for account, risk_percent in targets]
-        for future in as_completed(futures):
-            try:
-                login, delay_seconds, result = future.result()
-            except Exception as exc:
-                append_log("search", f"[ERROR] Copy dispatch failed: {exc}")
-                continue
-            if result.get("status") == "ok":
-                active_targets += 1
-                copied += 1
-                target_details.append(f"{login}: {delay_seconds:g}s delay")
-            else:
-                append_log(
-                    "search",
-                    f"[ERROR] Copy failed for {login}: {result.get('message', 'adapter command failed')}.",
-                )
+def _copy_delay_seconds(payload: dict[str, Any]) -> float:
+    try:
+        return max(0.0, float(payload.get("order_delay_sec", 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
 
-    if active_targets == 0:
-        return f"Copied master trade to 0/{len(targets)} sub adapter(s); no sub adapter is connected"
-    detail = ", ".join(target_details)
-    return f"Copied master trade to {copied}/{len(targets)} sub adapter(s) ({detail})"
+
+def _run_due_copies() -> None:
+    if not _scheduled_copies:
+        return
+    now = time.monotonic()
+    due = sorted((item for item in _scheduled_copies if item[0] <= now), key=lambda item: item[0])
+    if not due:
+        return
+    _scheduled_copies[:] = [item for item in _scheduled_copies if item[0] > now]
+    for _due_at, result_path, payload in due:
+        _write_command_result(result_path, _execute_copy_open(payload))
 
 
 def _execute_copy_open(payload: dict[str, Any]) -> dict[str, Any]:
+    """Place the copy now; any order delay was already waited out by
+    process_pending_commands' scheduler."""
     master_request = payload.get("master_request", {})
     if not isinstance(master_request, dict):
         return {"status": "error", "message": "Invalid master trade for copy command."}
     try:
-        delay_seconds = max(0.0, float(payload.get("order_delay_sec", 0) or 0))
-        if delay_seconds > 0:
-            time.sleep(delay_seconds)
         request = _build_copy_request(
             master_request,
             float(payload.get("risk_percent", 1.0) or 1.0),
@@ -518,9 +486,18 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "message": f"Unsupported adapter command: {action}"}
     try:
         copy_summary: list[str | None] = [None]
+        filled_request: list[dict[str, Any] | None] = [None]
+        # defer_copy: reply as soon as the master order fills and hand the
+        # request back, so the API can mirror to remote receivers and copy to
+        # sub accounts in parallel instead of after every sub (and its order
+        # delay) has finished here.
+        defer_copy = bool(payload.get("defer_copy"))
 
         def copy_to_sub_adapters(master_request: dict[str, Any]) -> str | None:
-            copy_summary[0] = _copy_to_connected_sub_adapters(master_request)
+            filled_request[0] = master_request
+            if defer_copy:
+                return None
+            copy_summary[0] = copy_to_sub_adapters_and_wait(master_request)
             return copy_summary[0]
 
         result = open_manual_position(
@@ -558,6 +535,7 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
             "ticket": int(getattr(result, "order", 0) or getattr(result, "position", 0) or 0),
             "message": "Order sent by the connected MT5 adapter.",
             "copy_summary": copy_summary[0],
+            "master_request": filled_request[0],
         }
     except Exception as ex:
         return {"status": "error", "message": str(ex)}
@@ -566,17 +544,29 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
 def process_pending_commands(login: int) -> None:
     command_dir = adapter_command_paths(login, "placeholder")[0].parent
     if not command_dir.exists():
+        _run_due_copies()
         return
     for request_path in command_dir.glob("*.request.json"):
         result_path = request_path.with_name(request_path.name.replace(".request.json", ".result.json"))
         try:
             command = json.loads(request_path.read_text(encoding="utf-8"))
+            payload = command.get("payload") if isinstance(command, dict) else None
+            if (
+                isinstance(payload, dict)
+                and str(command.get("action", "")).strip().lower() == "copy_open"
+                and _copy_delay_seconds(payload) > 0
+            ):
+                # Wait out the delay without blocking: the result is written
+                # when it comes due (the caller waits delay + 15s for it).
+                _scheduled_copies.append((time.monotonic() + _copy_delay_seconds(payload), result_path, payload))
+                continue
             result = _execute_command(command) if isinstance(command, dict) else {"status": "error", "message": "Invalid adapter command."}
         except Exception as ex:
             result = {"status": "error", "message": str(ex)}
         finally:
             request_path.unlink(missing_ok=True)
         _write_command_result(result_path, result)
+    _run_due_copies()
 
 
 def main() -> None:

@@ -31,9 +31,11 @@ from .services.strategy_service import (
     stop_strategy_system,
     close_all_positions,
     calculate_manual_lot,
+    copy_to_sub_adapters_in_background,
     _tick_for,
 )
 from .services.task_manager import set_runtime_logger, start_task, stop_task
+from .services.remote_controller import remote_controller
 from .services.zone_strategy_service import start_zone_strategy_system, stop_zone_strategy_system
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -111,6 +113,24 @@ class RemoteControlSettingsUpdate(BaseModel):
     receiver_url: str = ""
 
 
+class ControllerReceiverPayload(BaseModel):
+    id: str | None = None
+    label: str = ""
+    url: str
+    token: str
+    enabled: bool = True
+
+
+class ControllerReceiverEnabledPayload(BaseModel):
+    enabled: bool
+
+
+class ControllerCommandPayload(BaseModel):
+    action: str
+    data: dict[str, Any] = {}
+    receiver_ids: list[str] | None = None
+
+
 class NotificationSettingsUpdate(BaseModel):
     enabled: bool = True
     show_warnings: bool = True
@@ -184,10 +204,11 @@ def _remote_control_enabled() -> bool:
 
 def _execute_remote_command(action_name: str, data: dict[str, Any]) -> dict[str, Any]:
     """Run remote commands through the same guarded operations as the local UI."""
+    # mirror_remote=False: this PC is the receiver here; never re-broadcast.
     if action_name == "open":
-        return open_position(OpenPositionPayload(**data))
+        return open_position(OpenPositionPayload(**data), mirror_remote=False)
     if action_name == "close_all":
-        return close_positions()
+        return close_positions(mirror_remote=False)
     if action_name == "start_search":
         return start_strategy(StrategyStartPayload(**data))
     if action_name == "stop_search":
@@ -195,7 +216,7 @@ def _execute_remote_command(action_name: str, data: dict[str, Any]) -> dict[str,
     if action_name == "session_risk_stop":
         stop_strategy()
         stop_zone_strategy(ZoneStrategyStopPayload())
-        return close_positions()
+        return close_positions(mirror_remote=False)
     raise ValueError(f"Unsupported remote action: {action_name}")
 
 
@@ -401,6 +422,8 @@ def ensure_config_on_startup() -> None:
         start_time=datetime.now(),
         log_schedule=False,
     )
+    # Reconnects receivers that were connected when the app last closed.
+    remote_controller.start()
 
 
 def _refresh_bootstrap_cache() -> dict[str, Any]:
@@ -1144,16 +1167,18 @@ def _session_risk_tick() -> None:
     try:
         login, name, equity = _master_equity_snapshot()
     except Exception as exc:
-        reason = f"Session risk could not be verified: {exc}. Searches stopped as a precaution."
-        append_log("search", f"[ERROR] [session-risk] {reason}")
-        state_patch("session_risk", {"active": False, "hit": True, "master_hit": True, "verified": False, "reason": reason})
-        try:
-            stop_strategy_system()
-            stop_zone_strategy_system()
-            close_all_positions()
-        except Exception as stop_exc:
-            append_log("search", f"[ERROR] [session-risk] Automatic stop/close failed: {stop_exc}")
+        # An unreadable equity (MT5 terminal disconnected, adapter busy past
+        # the 5s snapshot timeout) is not a loss. Treating it as one used to
+        # stop every search and close all positions on a mere disconnect.
+        # Nothing can trade while the terminal is down, and the first
+        # successful read afterwards still enforces the limit on real equity.
+        if risk.get("verified", True):
+            append_log("search", f"[WARNING] [session-risk] Equity check paused: {exc} Searches keep running; retrying every 5s.")
+        state_patch("session_risk", {"verified": False})
         return
+    if not risk.get("verified", True):
+        append_log("search", f"[INFO] [session-risk] Equity readable again ({equity:.2f}); session risk check resumed.")
+        state_patch("session_risk", {"verified": True})
     start_equity = float(risk.get("start_equity", 0) or 0)
     loss_amount = max(0.0, start_equity - equity)
     loss_percent = (loss_amount / start_equity * 100.0) if start_equity > 0 else 0.0
@@ -1175,6 +1200,10 @@ def _session_risk_tick() -> None:
         "hit_accounts": [login],
     })
     append_log("search", f"[WARNING] [session-risk] {reason}")
+    # Sent from here, not from the UI, so a minimized window can't delay it.
+    remote_controller.broadcast_in_background(
+        "session_risk_stop", {}, "stop and close receivers", "[session-risk]"
+    )
     try:
         stop_strategy_system()
         stop_zone_strategy_system()
@@ -1492,23 +1521,59 @@ def remove_liquidity_level(level_id: int) -> dict[str, Any]:
     return {"status": "ok", "levels": state_get("liquidity_levels", [])}
 
 
+def _start_remote_mirror(action_name: str, data: dict[str, Any]):
+    """Start sending to the remote receivers without waiting; pair with
+    _remote_mirror_result once the local work is done."""
+    if not remote_controller.has_enabled_receivers():
+        return None
+    return remote_controller.submit_command(action_name, data)
+
+
+def _remote_mirror_result(future) -> dict[str, Any] | None:
+    if future is None:
+        return None
+    try:
+        # send_command never raises and bounds itself by its own timeouts.
+        return future.result(timeout=180)
+    except Exception as exc:
+        return {"sent": 0, "results": [], "error": str(exc)}
+
+
 @app.post("/positions/open")
-def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
+def open_position_endpoint(payload: OpenPositionPayload) -> dict[str, Any]:
+    return open_position(payload)
+
+
+def open_position(payload: OpenPositionPayload, mirror_remote: bool = True) -> dict[str, Any]:
     config = _load_config()
     ready, _detail, master_login = master_adapter_ready(config)
+    try:
+        payload_data = payload.model_dump(mode="json")
+    except TypeError:
+        payload_data = payload.model_dump()
+    # Receivers size the lot from their own Risk % (_receiver_open_settings).
+    remote_data = {key: value for key, value in payload_data.items() if key not in {"risk_percent", "lot"}}
     if not is_dev_mode():
         # Never initialize MT5 from the API process. Doing so can take over the
         # terminal session that belongs to the long-running adapter process.
         if not ready or not master_login:
             raise HTTPException(status_code=409, detail=_detail)
-        try:
-            payload_data = payload.model_dump(mode="json")
-        except TypeError:
-            payload_data = payload.model_dump()
-        result = submit_adapter_command(master_login, "open", payload_data)
+        # defer_copy: the adapter replies the moment the master order fills
+        # (sub copies with their order delays used to run first). Receivers
+        # and sub accounts are then sent to at the same time, in the
+        # background: the reply doesn't wait for any order delay, and each
+        # outcome is written to the search log.
+        result = submit_adapter_command(master_login, "open", {**payload_data, "defer_copy": True})
         if result.get("status") != "ok":
             raise HTTPException(status_code=409, detail=str(result.get("message", "MT5 adapter command failed.")))
-        return {"status": "ok", "orders": state_get("orders", []), "adapter_result": result}
+        side_label = str(payload.side).upper()
+        if mirror_remote:
+            remote_controller.broadcast_in_background("open", remote_data, f"{side_label} mirror", "[manual]")
+        master_request = result.pop("master_request", None)
+        if isinstance(master_request, dict):
+            copy_to_sub_adapters_in_background(master_request, "manual", "[manual]")
+            result["copy_summary"] = "Copying to sub accounts in the background."
+        return {"status": "ok", "orders": state_get("orders", []), "adapter_result": result, "remote": None}
     try:
         open_manual_position(
             str(payload.side).upper(),
@@ -1536,7 +1601,8 @@ def open_position(payload: OpenPositionPayload) -> dict[str, Any]:
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"status": "ok", "orders": state_get("orders", [])}
+    remote_future = _start_remote_mirror("open", remote_data) if mirror_remote else None
+    return {"status": "ok", "orders": state_get("orders", []), "remote": _remote_mirror_result(remote_future)}
 
 
 @app.post("/positions/calculate-lot")
@@ -1556,8 +1622,15 @@ def calculate_lot(payload: LotCalculationPayload) -> dict[str, Any]:
 
 
 @app.post("/positions/close")
-def close_positions() -> dict[str, Any]:
+def close_positions_endpoint() -> dict[str, Any]:
+    return close_positions()
+
+
+def close_positions(mirror_remote: bool = True) -> dict[str, Any]:
     _require_master_connected()
+    # Closing is always wanted on the receivers too, so it goes out right
+    # away and runs alongside the local close instead of after it.
+    remote_future = _start_remote_mirror("close_all", {}) if mirror_remote else None
     # Stop every search first so none can open a new trade while (or right
     # after) the positions are closed. Zone state is kept, so the chart
     # freezes what it has drawn instead of clearing it.
@@ -1566,9 +1639,12 @@ def close_positions() -> dict[str, Any]:
         stop_strategy_system()
     stop_zone_strategy_system(reason="Close all positions requested; search stopped.")
     _finish_session_risk_if_idle()
-    with MT5_LOCK:
-        summary = close_all_positions()
-    return {"status": "ok", "summary": summary, "orders": state_get("orders", [])}
+    try:
+        with MT5_LOCK:
+            summary = close_all_positions()
+    finally:
+        remote = _remote_mirror_result(remote_future)
+    return {"status": "ok", "summary": summary, "orders": state_get("orders", []), "remote": remote}
 
 
 @app.post("/actions")
@@ -1596,6 +1672,62 @@ def action(payload: ActionPayload) -> dict[str, Any]:
         return disconnect_saved_account(login)
 
     return {"status": "ok", "message": f"Action handled: {action_name}"}
+
+
+# Controller side: this backend's own connections to receivers (see
+# services/remote_controller.py). The UI only reads and drives them.
+@app.get("/remote/controller")
+def remote_controller_state() -> dict[str, Any]:
+    return {"status": "ok", **remote_controller.snapshot()}
+
+
+@app.post("/remote/controller/receivers")
+async def remote_controller_save(payload: ControllerReceiverPayload) -> dict[str, Any]:
+    if not payload.url.strip() or not payload.token.strip():
+        raise HTTPException(status_code=400, detail="URL and token are both required.")
+    receiver_id = await remote_controller.run(remote_controller.save_receiver, payload.model_dump())
+    return {"status": "ok", "id": receiver_id, **remote_controller.snapshot()}
+
+
+@app.delete("/remote/controller/receivers/{receiver_id}")
+async def remote_controller_remove(receiver_id: str) -> dict[str, Any]:
+    await remote_controller.run(remote_controller.remove_receiver, receiver_id)
+    return {"status": "ok", **remote_controller.snapshot()}
+
+
+@app.patch("/remote/controller/receivers/{receiver_id}/enabled")
+async def remote_controller_enable(receiver_id: str, payload: ControllerReceiverEnabledPayload) -> dict[str, Any]:
+    await remote_controller.run(remote_controller.set_enabled, receiver_id, payload.enabled)
+    return {"status": "ok", **remote_controller.snapshot()}
+
+
+@app.post("/remote/controller/receivers/{receiver_id}/connect")
+async def remote_controller_connect(receiver_id: str) -> dict[str, Any]:
+    try:
+        await remote_controller.run(remote_controller.connect_receiver, receiver_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "ok", **remote_controller.snapshot()}
+
+
+@app.post("/remote/controller/receivers/{receiver_id}/disconnect")
+async def remote_controller_disconnect(receiver_id: str) -> dict[str, Any]:
+    await remote_controller.run(remote_controller.disconnect_receiver, receiver_id)
+    return {"status": "ok", **remote_controller.snapshot()}
+
+
+@app.post("/remote/controller/command")
+async def remote_controller_command(payload: ControllerCommandPayload) -> dict[str, Any]:
+    outcome = await remote_controller.run(
+        remote_controller.send_command, payload.action, payload.data, payload.receiver_ids
+    )
+    return {"status": "ok", **outcome}
+
+
+@app.delete("/remote/controller/logs")
+def remote_controller_clear_logs() -> dict[str, Any]:
+    remote_controller.clear_logs()
+    return {"status": "ok", **remote_controller.snapshot()}
 
 
 @app.websocket("/remote/ws")

@@ -15,7 +15,7 @@ import { cx, decimalInput, signedDecimalInput } from "../utils/format";
 import { clearBanner, showBanner } from "../utils/banner";
 import { parseSearchLogLine } from "../utils/logFeed";
 import { api } from "../services/api";
-import { listReceivers, sendRemoteCommand } from "../services/remoteControl";
+import { listReceivers } from "../services/remoteControl";
 
 const TRADE_FORM_STORAGE_KEY = "trader.trade.form";
 // XAUUSD pip size, mirroring the backend which converts pips with `pips / 10`.
@@ -177,19 +177,8 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
           : `Session risk limit hit for ${hitNames.join(", ") || "a subaccount"}. Searches stopped and positions are being closed.`,
         "warning",
       );
-      if (risk.master_hit && listReceivers().some((receiver) => receiver.enabled)) {
-        sendRemoteCommand("session_risk_stop", {})
-          .then(({ results }) => {
-            const failed = results.filter((result) => result.status === "error");
-            if (failed.length) {
-              showBanner(
-                `Session risk was reached locally, but ${failed.length} remote receiver(s) could not be stopped and closed: ${failed.map((item) => `${item.label} (${item.message})`).join("; ")}`,
-                "error",
-              );
-            }
-          })
-          .catch((error) => showBanner(error?.message || String(error), "error", error?.code));
-      }
+      // The backend sends session_risk_stop to the receivers itself the
+      // moment the limit is hit; its outcome appears in the search log.
     } else if (!risk?.hit) {
       sessionRiskNoticeRef.current = "";
     }
@@ -845,26 +834,18 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
           : null,
         symbol: "XAUUSD",
       };
-      await api.openPosition(orderPayload);
+      // The backend mirrors to every enabled receiver the moment the master
+      // order fills (in parallel with the sub-account copies) and returns
+      // the per-receiver outcome here.
+      const response = await api.openPosition(orderPayload);
       // Local order is live from here on; a receiver failure below must still
       // refresh the tables, it just also reports the mirroring error.
       placed = true;
-      // Attempt this whenever a receiver is configured, not only when
-      // isRemoteConnected() already reads true: that flag can be stale for a
-      // few hundred ms right after a reconnect, and gating on it meant a
-      // receiver that looked briefly offline got silently skipped -- with no
-      // error shown -- instead of failing loudly like every other receiver
-      // problem. sendRemoteCommand re-checks each receiver's live state and
-      // reports "not connected" as a normal per-receiver failure below.
-      if (listReceivers().some((receiver) => receiver.enabled)) {
-        const { risk_percent, riskPercent, ...receiverPayload } = orderPayload;
-        const { results } = await sendRemoteCommand("open", receiverPayload);
-        const failed = results.filter((result) => result.status === "error");
-        if (failed.length) {
-          throw new Error(
-            `Order opened locally, but ${failed.length} receiver(s) did not mirror it: ${failed.map((f) => `${f.label} (${f.message})`).join("; ")}`,
-          );
-        }
+      const failed = (response?.remote?.results || []).filter((result) => result.status === "error");
+      if (failed.length) {
+        throw new Error(
+          `Order opened locally, but ${failed.length} receiver(s) did not mirror it: ${failed.map((f) => `${f.label} (${f.message})`).join("; ")}`,
+        );
       }
       clearBanner();
     } catch (error) {
@@ -949,19 +930,14 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     const receiversMirrored = listReceivers().some((receiver) => receiver.enabled);
     try {
       setCloseConfirmOpen(false);
+      // The backend sends close_all to the receivers at the same time as it
+      // closes locally, and returns their outcome with the local summary.
       const response = await api.closePositions();
-      // See openPosition's comment: attempt this whenever a receiver is
-      // configured, not only when isRemoteConnected() already reads true, or
-      // a receiver that is actually reachable but briefly looked offline gets
-      // silently skipped instead of failing loudly.
-      if (receiversMirrored) {
-        const { results } = await sendRemoteCommand("close_all", {});
-        const failed = results.filter((result) => result.status === "error");
-        if (failed.length) {
-          throw new Error(
-            `Positions closed locally, but ${failed.length} receiver(s) did not receive the close request: ${failed.map((f) => `${f.label} (${f.message})`).join("; ")}`,
-          );
-        }
+      const failed = (response?.remote?.results || []).filter((result) => result.status === "error");
+      if (failed.length) {
+        throw new Error(
+          `Positions closed locally, but ${failed.length} receiver(s) did not receive the close request: ${failed.map((f) => `${f.label} (${f.message})`).join("; ")}`,
+        );
       }
       await onRefreshRuntime?.();
       await loadPositions({ silent: true });

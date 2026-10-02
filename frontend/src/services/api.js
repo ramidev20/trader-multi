@@ -77,4 +77,15 @@ export const api = {
   stopZoneStrategy: (side) => request("/zone-strategy/stop", { method: "POST", body: JSON.stringify(side ? { side } : {}) }),
   zoneStrategyStatus: () => request("/zone-strategy/status"),
 
+  remoteController: () => request("/remote/controller"),
+  saveControllerReceiver: (payload) => request("/remote/controller/receivers", { method: "POST", body: JSON.stringify(payload) }),
+  removeControllerReceiver: (id) => request(`/remote/controller/receivers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  setControllerReceiverEnabled: (id, enabled) =>
+    request(`/remote/controller/receivers/${encodeURIComponent(id)}/enabled`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
+  connectControllerReceiver: (id) => request(`/remote/controller/receivers/${encodeURIComponent(id)}/connect`, { method: "POST" }),
+  disconnectControllerReceiver: (id) => request(`/remote/controller/receivers/${encodeURIComponent(id)}/disconnect`, { method: "POST" }),
+  sendControllerCommand: (action, data, receiver_ids = null) =>
+    request("/remote/controller/command", { method: "POST", body: JSON.stringify({ action, data, receiver_ids }) }),
+  clearControllerLogs: () => request("/remote/controller/logs", { method: "DELETE" }),
+
 };

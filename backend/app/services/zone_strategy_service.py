@@ -7,8 +7,10 @@ from collections import deque
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from .env_utils import is_dev_mode
 from .mt5_compat import mt5, mt5_available
 from .mt5_lock import MT5_LOCK
+from .remote_controller import remote_controller
 from .runtime_state import append_log, get, patch_path
 from .task_manager import is_task_running, start_task, stop_task
 from .strategy_service import (
@@ -18,6 +20,7 @@ from .strategy_service import (
     _ensure_master_session,
     _ensure_symbol_ready,
     _tick_for,
+    _clone_trade_to_sub_accounts,
     _close_mt5_pending_order,
     close_all_positions,
     open_manual_position,
@@ -127,6 +130,9 @@ CLOSED_CANDLE_CATCHUP = 5
 # Polls to wait for the closing deal to reach history after a position
 # disappears, before treating the close as manual.
 EXIT_REASON_GRACE_POLLS = 10
+# _closing_reason result when deal history can't be read (terminal down):
+# the exit watcher must wait, not treat the close as manual.
+CLOSE_REASON_UNREADABLE = "UNREADABLE"
 _end_close_lock = threading.Lock()
 _last_end_close_at = float("-inf")
 # Symbol/session problems are the same for both sides; report each once
@@ -1398,6 +1404,12 @@ class ZoneStrategyEngine:
             # Both side engines can reach order placement on independent
             # timer threads. Serialize the broker request because the MT5
             # Python connection is process-wide and not thread-safe.
+            def after_master_fill(request: dict[str, Any]) -> Optional[str]:
+                # Receivers first, the instant the master order fills; the
+                # local sub-account dispatch re-verifies the MT5 login first.
+                self._mirror_to_receivers(side, order_kind, placed, entry_price, final_sl)
+                return _clone_trade_to_sub_accounts(request, origin="manual")
+
             with MT5_LOCK:
                 if self._stopped:
                     raise _SearchStopped()
@@ -1422,6 +1434,7 @@ class ZoneStrategyEngine:
                     # The engine logs one line for a failure itself.
                     log_failures=False,
                     order_sink=placed,
+                    after_master_order=after_master_fill,
                 )
         except _SearchStopped:
             append_log("search", f"[INFO] [scalping:{self.side}] search stopped; {side} entry not sent.")
@@ -1487,6 +1500,47 @@ class ZoneStrategyEngine:
             log_schedule=False,
         )
 
+    def _mirror_to_receivers(
+        self,
+        side: str,
+        order_kind: str,
+        placed: dict[str, Any],
+        entry_price: float,
+        final_sl: float,
+    ) -> None:
+        """Send this entry to the remote receivers straight away.
+
+        Done here rather than by the UI noticing the "placed" phase, which a
+        minimized window only polled about once a minute. Each receiver sizes
+        the lot from its own Risk % (see _receiver_open_settings).
+        """
+        if is_dev_mode():
+            return
+        remote_controller.broadcast_in_background(
+            "open",
+            {
+                "side": side,
+                "symbol": self.symbol,
+                "order_kind": order_kind,
+                "limit_price": placed.get("entry", entry_price) if order_kind == "LIMIT" else None,
+                "advanced": True,
+                # Already includes the spread, so none is added again.
+                "sl_price": placed.get("sl", final_sl),
+                "spread_pips": 0.0,
+                # With TP2 off, TP1 comes from `ratio`, not tp1_ratio.
+                "ratio": self.tp1_ratio,
+                "tp1_ratio": self.tp1_ratio,
+                "tp2_ratio": self.tp2_ratio,
+                "tp3_ratio": self.tp3_ratio,
+                "tp2_enabled": self.tp2_enabled,
+                "tp3_enabled": self.tp3_enabled,
+                "tp1_percent": self.tp1_percent,
+                "tp2_percent": self.tp2_percent,
+            },
+            f"{side} {order_kind} mirror",
+            f"[scalping:{self.side}]",
+        )
+
     def _watch_position_exit(self) -> None:
         """Restart the same side's search only after its trade closes by TP/SL."""
         if not mt5_available():
@@ -1508,11 +1562,16 @@ class ZoneStrategyEngine:
         self._exit_monitor_attempts += 1
         with MT5_LOCK:
             try:
-                positions = mt5.positions_get(symbol=self.symbol) or []
-                pending_orders = mt5.orders_get(symbol=self.symbol) or []
+                positions = mt5.positions_get(symbol=self.symbol)
+                pending_orders = mt5.orders_get(symbol=self.symbol)
             except Exception as exc:
                 append_log("search", f"[WARNING] [scalping:{self.side}] position close monitor failed: {exc}")
                 return
+        # None means MT5 could not answer (terminal disconnected), not "no
+        # positions" -- reading it as empty counted the trade as closed
+        # outside TP/SL and stopped the search. Wait for the terminal.
+        if positions is None or pending_orders is None:
+            return
 
         identity_keys = set(self._exit_position_keys)
         for position in positions:
@@ -1527,6 +1586,8 @@ class ZoneStrategyEngine:
                 return
 
         closed_reason = self._closing_reason(identity_keys)
+        if closed_reason == CLOSE_REASON_UNREADABLE:
+            return
         if closed_reason:
             stop_task(self._exit_task_name)
             self._restart_search_after_close(closed_reason)
@@ -1567,10 +1628,13 @@ class ZoneStrategyEngine:
         with MT5_LOCK:
             for key in identity_keys:
                 try:
-                    deals.extend(mt5.history_deals_get(position=int(key)) or [])
+                    history = mt5.history_deals_get(position=int(key))
                 except Exception as exc:
                     append_log("search", f"[WARNING] [scalping:{self.side}] close history read failed: {exc}")
-                    return None
+                    return CLOSE_REASON_UNREADABLE
+                if history is None:
+                    return CLOSE_REASON_UNREADABLE
+                deals.extend(history)
         for deal in sorted(deals, key=lambda item: int(getattr(item, "time_msc", 0) or 0), reverse=True):
             if int(getattr(deal, "entry", -1)) not in closing_entries:
                 continue

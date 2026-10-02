@@ -1,127 +1,99 @@
-const RECEIVERS_STORAGE_KEY = "trader.remoteControl.receivers";
-const LOG_STORAGE_KEY = "trader.remoteControl.logs";
-const LOG_LIMIT = 120;
-const HEARTBEAT_INTERVAL_MS = 8000;
-const HEARTBEAT_STALE_MS = 20000;
-const COMMAND_TIMEOUT_MS = 60000;
+// Controller-side remote control. The connections to receivers live in this
+// app's Python backend (backend/app/services/remote_controller.py), not in
+// the page: WebView2 throttles a minimized window's timers to about once a
+// minute, which used to drop healthy connections and delay mirrored orders.
+// This module only mirrors the backend's state for the UI and forwards
+// actions to it; minimizing or reloading the window no longer affects the
+// connections themselves.
+import { api } from "./api";
+import { showBanner } from "../utils/banner";
+
+// Pre-backend storage: receivers saved in the browser are moved to the
+// backend once, then removed from here.
+const LEGACY_RECEIVERS_STORAGE_KEY = "trader.remoteControl.receivers";
+const LEGACY_LOG_STORAGE_KEY = "trader.remoteControl.logs";
+const POLL_INTERVAL_MS = 1000;
 
 const receiverListeners = new Set();
 const logListeners = new Set();
-const logEntries = loadLogs();
+let receivers = [];
+let logEntries = [];
+let receiversKey = "";
+let logsKey = "";
+let legacyMigrated = false;
+let polling = false;
 
-/** One entry per saved receiver: { id, label, url, token, enabled } plus live connection state. */
-const receivers = new Map();
-for (const saved of loadReceivers()) {
-  receivers.set(saved.id, makeReceiverRecord(saved));
+function reportError(error) {
+  showBanner(error?.message || String(error), "error", error?.code);
 }
-dedupeReceiversByUrl();
 
-function loadReceivers() {
-  try {
-    const saved = JSON.parse(globalThis.localStorage?.getItem(RECEIVERS_STORAGE_KEY) || "[]");
-    return Array.isArray(saved) ? saved : [];
-  } catch {
-    return [];
+function applySnapshot(data) {
+  const nextReceivers = Array.isArray(data?.receivers) ? data.receivers : [];
+  const nextLogs = Array.isArray(data?.logs) ? data.logs : [];
+  // Only notify on change, so the 1s poll doesn't re-render every second.
+  const nextReceiversKey = JSON.stringify(nextReceivers);
+  if (nextReceiversKey !== receiversKey) {
+    receiversKey = nextReceiversKey;
+    receivers = nextReceivers;
+    receiverListeners.forEach((listener) => listener(listReceivers()));
+  }
+  const nextLogsKey = nextLogs.length ? `${nextLogs.length}:${nextLogs[nextLogs.length - 1].id}` : "0";
+  if (nextLogsKey !== logsKey) {
+    logsKey = nextLogsKey;
+    logEntries = nextLogs;
+    logListeners.forEach((listener) => listener([...logEntries]));
   }
 }
 
-function loadLogs() {
+async function migrateLegacyReceivers() {
+  let saved = [];
   try {
-    const saved = JSON.parse(globalThis.localStorage?.getItem(LOG_STORAGE_KEY) || "[]");
-    return Array.isArray(saved) ? saved.slice(-LOG_LIMIT) : [];
+    saved = JSON.parse(globalThis.localStorage?.getItem(LEGACY_RECEIVERS_STORAGE_KEY) || "[]");
   } catch {
-    return [];
+    saved = [];
+  }
+  if (Array.isArray(saved) && saved.length && !receivers.length) {
+    for (const row of saved) {
+      if (!row?.url || !row?.token) continue;
+      await api.saveControllerReceiver({
+        label: row.label || "Receiver",
+        url: row.url,
+        token: row.token,
+        enabled: row.enabled !== false,
+      });
+    }
+  }
+  try {
+    globalThis.localStorage?.removeItem(LEGACY_RECEIVERS_STORAGE_KEY);
+    globalThis.localStorage?.removeItem(LEGACY_LOG_STORAGE_KEY);
+  } catch {
+    // Nothing else to clean up.
+  }
+  // Only after every save succeeded; a failed save is retried next poll.
+  legacyMigrated = true;
+}
+
+export async function refreshRemoteState() {
+  if (polling) return;
+  polling = true;
+  try {
+    applySnapshot(await api.remoteController());
+    if (!legacyMigrated) {
+      await migrateLegacyReceivers();
+      applySnapshot(await api.remoteController());
+    }
+  } catch {
+    // The backend may be starting up; the next poll retries.
+  } finally {
+    polling = false;
   }
 }
 
-function persistReceivers() {
-  try {
-    const rows = Array.from(receivers.values()).map((r) => ({
-      id: r.id,
-      label: r.label,
-      url: r.url,
-      token: r.token,
-      enabled: r.enabled,
-    }));
-    globalThis.localStorage?.setItem(RECEIVERS_STORAGE_KEY, JSON.stringify(rows));
-  } catch {
-    // Keep receivers usable when browser storage is unavailable.
-  }
-}
-
-function makeReceiverRecord(saved) {
-  return {
-    id: saved.id,
-    label: saved.label || "Receiver",
-    url: saved.url || "",
-    token: saved.token || "",
-    enabled: saved.enabled !== false,
-    status: { state: "offline", message: "Not connected." },
-    socket: null,
-    desired: false,
-    heartbeatTimer: null,
-    lastPongAt: 0,
-    reconnectTimer: null,
-    reconnectAttempt: 0,
-    pending: new Map(),
-  };
-}
-
-function nowLabel() {
-  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function commandId() {
-  return globalThis.crypto?.randomUUID?.() || `cmd-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function appendLog(level, message, receiverLabel) {
-  const entry = {
-    id: globalThis.crypto?.randomUUID?.() || `remote-log-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    level,
-    // Kept as its own field (not baked into the message text) so the UI can
-    // filter/tag by receiver without parsing a "[Label] " prefix back out.
-    receiver: receiverLabel || null,
-    message,
-    at: nowLabel(),
-    atMs: Date.now(),
-  };
-  logEntries.push(entry);
-  if (logEntries.length > LOG_LIMIT) logEntries.splice(0, logEntries.length - LOG_LIMIT);
-  try {
-    globalThis.localStorage?.setItem(LOG_STORAGE_KEY, JSON.stringify(logEntries));
-  } catch {
-    // Logging must continue when browser storage is unavailable.
-  }
-  logListeners.forEach((listener) => listener([...logEntries]));
-}
-
-/** Empties the controller's own connection/command log. Does not affect any
- * receiver's own log (that log lives on the receiver's backend, not here). */
-export function clearRemoteLogs() {
-  logEntries.length = 0;
-  try {
-    globalThis.localStorage?.setItem(LOG_STORAGE_KEY, JSON.stringify(logEntries));
-  } catch {
-    // Nothing further to do if storage is unavailable.
-  }
-  logListeners.forEach((listener) => listener([...logEntries]));
-}
-
-function publishReceivers() {
-  const snapshot = listReceivers();
-  receiverListeners.forEach((listener) => listener(snapshot));
-}
+refreshRemoteState();
+globalThis.setInterval(refreshRemoteState, POLL_INTERVAL_MS);
 
 export function listReceivers() {
-  return Array.from(receivers.values()).map((r) => ({
-    id: r.id,
-    label: r.label,
-    url: r.url,
-    token: r.token,
-    enabled: r.enabled,
-    status: r.status,
-  }));
+  return receivers.map((receiver) => ({ ...receiver, status: { ...receiver.status } }));
 }
 
 export function subscribeReceivers(listener) {
@@ -136,309 +108,59 @@ export function subscribeRemoteLogs(listener) {
   return () => logListeners.delete(listener);
 }
 
-function normalizeUrl(url) {
-  return String(url || "").trim().toLowerCase();
+/** Empties the controller's own connection/command log. Does not affect any
+ * receiver's own log (that log lives on the receiver's backend, not here). */
+export function clearRemoteLogs() {
+  return api.clearControllerLogs().then(applySnapshot).catch(reportError);
 }
 
-/** One-time cleanup for entries saved before duplicate-URL prevention existed:
- * collapse any receivers that already share a URL down to one, so a stale
- * duplicate can't keep silently doubling every broadcast command. */
-function dedupeReceiversByUrl() {
-  const seenByUrl = new Map();
-  const toRemove = [];
-  for (const record of receivers.values()) {
-    const key = normalizeUrl(record.url);
-    if (!key) continue;
-    const keeper = seenByUrl.get(key);
-    if (!keeper) {
-      seenByUrl.set(key, record);
-      continue;
-    }
-    if (record.enabled) keeper.enabled = true;
-    toRemove.push(record.id);
-  }
-  if (!toRemove.length) return;
-  for (const id of toRemove) receivers.delete(id);
-  persistReceivers();
-}
-
-/** A second saved entry pointing at the same receiver URL means every command
- * gets broadcast to that one physical PC twice -- e.g. two "open" commands,
- * two real orders. Reuse the existing entry for that URL instead of adding
- * a duplicate. */
-function findReceiverIdByUrl(url, excludingId) {
-  const target = normalizeUrl(url);
-  if (!target) return null;
-  for (const record of receivers.values()) {
-    if (record.id !== excludingId && normalizeUrl(record.url) === target) return record.id;
-  }
-  return null;
-}
-
-export function saveReceiver({ id, label, url, token, enabled = true }) {
-  const duplicateId = findReceiverIdByUrl(url, id);
-  const receiverId = id || duplicateId || globalThis.crypto?.randomUUID?.() || `receiver-${Date.now()}`;
-  const existing = receivers.get(receiverId);
-  const record = existing || makeReceiverRecord({ id: receiverId });
-  record.label = label?.trim() || record.label || "Receiver";
-  record.url = url?.trim() || "";
-  record.token = token?.trim() || "";
-  record.enabled = enabled;
-  receivers.set(receiverId, record);
-  persistReceivers();
-  publishReceivers();
-  return receiverId;
+/** Saves (or updates) a receiver and resolves to its id. A URL that is
+ * already saved reuses that entry, so one PC never receives every command
+ * twice. */
+export async function saveReceiver({ id, label, url, token, enabled = true }) {
+  const result = await api.saveControllerReceiver({ id: id || null, label, url, token, enabled });
+  applySnapshot(result);
+  return result.id;
 }
 
 export function removeReceiver(id) {
-  const record = receivers.get(id);
-  if (!record) return;
-  teardownConnection(record, "Receiver removed.", true);
-  receivers.delete(id);
-  persistReceivers();
-  publishReceivers();
+  return api.removeControllerReceiver(id).then(applySnapshot).catch(reportError);
 }
 
 export function setReceiverEnabled(id, enabled) {
-  const record = receivers.get(id);
-  if (!record) return;
-  record.enabled = enabled;
-  if (!enabled && record.desired) {
-    disconnectReceiver(id);
+  return api.setControllerReceiverEnabled(id, enabled).then(applySnapshot).catch(reportError);
+}
+
+/** Resolves once authenticated; rejects with the reason if the first attempt
+ * fails (the backend keeps retrying unless the token was rejected). */
+export async function connectReceiver(id) {
+  try {
+    applySnapshot(await api.connectControllerReceiver(id));
+  } finally {
+    refreshRemoteState();
   }
-  persistReceivers();
-  publishReceivers();
-}
-
-function clearTimers(record) {
-  if (record.heartbeatTimer) globalThis.clearInterval(record.heartbeatTimer);
-  if (record.reconnectTimer) globalThis.clearTimeout(record.reconnectTimer);
-  record.heartbeatTimer = null;
-  record.reconnectTimer = null;
-}
-
-function rejectPending(record, message) {
-  record.pending.forEach((waiting) => waiting.reject(new Error(message)));
-  record.pending.clear();
-}
-
-function startHeartbeat(record, targetSocket) {
-  if (record.heartbeatTimer) globalThis.clearInterval(record.heartbeatTimer);
-  record.lastPongAt = Date.now();
-  record.heartbeatTimer = globalThis.setInterval(() => {
-    if (record.socket !== targetSocket || targetSocket.readyState !== WebSocket.OPEN) return;
-    if (Date.now() - record.lastPongAt > HEARTBEAT_STALE_MS + HEARTBEAT_INTERVAL_MS) {
-      appendLog("warning", "No response to heartbeat pings. Reconnecting.", record.label);
-      targetSocket.close(4000, "Heartbeat timed out.");
-      return;
-    }
-    targetSocket.send(JSON.stringify({ type: "ping", sent_at: new Date().toISOString() }));
-  }, HEARTBEAT_INTERVAL_MS);
-}
-
-function scheduleReconnect(record) {
-  if (!record.desired || record.reconnectTimer) return;
-  const delay = Math.min(15000, 1500 * (2 ** record.reconnectAttempt));
-  record.reconnectAttempt += 1;
-  appendLog("warning", `Connection lost. Reconnecting in ${Math.round(delay / 1000)}s...`, record.label);
-  record.status = { state: "connecting", message: "Connection lost. Reconnecting automatically..." };
-  publishReceivers();
-  record.reconnectTimer = globalThis.setTimeout(() => {
-    record.reconnectTimer = null;
-    if (record.desired) openReceiverSocket(record, true).catch(() => {});
-  }, delay);
-}
-
-function openReceiverSocket(record, reconnecting = false) {
-  if (record.socket) {
-    const previous = record.socket;
-    record.socket = null;
-    previous.close();
-  }
-  if (record.heartbeatTimer) globalThis.clearInterval(record.heartbeatTimer);
-  record.heartbeatTimer = null;
-  record.status = { state: "connecting", message: "Authenticating with the trading PC..." };
-  publishReceivers();
-
-  return new Promise((resolve, reject) => {
-    const nextSocket = new WebSocket(record.url);
-    record.socket = nextSocket;
-    let settled = false;
-    let socketOpened = false;
-
-    nextSocket.onopen = () => {
-      socketOpened = true;
-      nextSocket.send(JSON.stringify({ type: "authenticate", token: record.token }));
-    };
-
-    nextSocket.onmessage = (event) => {
-      if (record.socket !== nextSocket) return;
-      let message;
-      try {
-        message = JSON.parse(event.data);
-      } catch {
-        appendLog("warning", "Ignored an invalid response from the receiver.", record.label);
-        return;
-      }
-      if (message.type === "pong") {
-        record.lastPongAt = Date.now();
-        return;
-      }
-      if (message.type === "connection") {
-        settled = true;
-        record.reconnectAttempt = 0;
-        record.lastPongAt = Date.now();
-        appendLog("success", message.message || "Connected and authenticated.", record.label);
-        record.status = { state: "online", message: message.message || "Connected and authenticated." };
-        publishReceivers();
-        startHeartbeat(record, nextSocket);
-        resolve(message);
-        return;
-      }
-      if (message.type === "log" && message.message) {
-        // Per-step execution narration (risk % selected, order-delay
-        // countdown, ...) -- noise here; the result below is what matters.
-        return;
-      }
-      const waiting = record.pending.get(message.id);
-      if (!waiting) return;
-      record.pending.delete(message.id);
-      if (message.status === "success") {
-        const resultMessage = message.result?.message || message.result?.adapter_result?.message;
-        const copySummary = message.result?.copy_summary || message.result?.adapter_result?.copy_summary;
-        const summary = [resultMessage, copySummary].filter(Boolean).join(" — ") || `Command ${message.id || "unknown"} completed successfully.`;
-        appendLog("success", summary, record.label);
-        waiting.resolve(message);
-      } else {
-        appendLog("error", `Command ${message.id || "unknown"} failed: ${message.message || "Remote command failed."}`, record.label);
-        waiting.reject(new Error(message.message || "Remote command failed."));
-      }
-    };
-
-    nextSocket.onerror = () => {
-      if (record.socket === nextSocket) {
-        appendLog("error", "Socket error while contacting the receiver.", record.label);
-      }
-    };
-
-    nextSocket.onclose = (event) => {
-      if (record.socket !== nextSocket) return;
-      record.socket = null;
-      if (record.heartbeatTimer) globalThis.clearInterval(record.heartbeatTimer);
-      record.heartbeatTimer = null;
-      const closeReason = event.reason || "Connection closed. Check the token or network if this was unexpected.";
-      const closeLabel = settled ? "Remote session ended" : socketOpened ? "Authentication failed" : "Receiver unreachable";
-      appendLog(settled ? "warning" : "error", `${closeLabel}: ${closeReason}`, record.label);
-      rejectPending(record, closeReason);
-      if (!settled) reject(new Error(closeReason));
-      if (event.code === 1008) {
-        record.desired = false;
-        record.status = { state: "offline", message: closeReason };
-        publishReceivers();
-      } else if (record.desired) {
-        scheduleReconnect(record);
-      } else {
-        record.status = { state: "offline", message: closeReason };
-        publishReceivers();
-      }
-    };
-  });
-}
-
-function teardownConnection(record, message, silent = false) {
-  record.desired = false;
-  clearTimers(record);
-  const previous = record.socket;
-  record.socket = null;
-  previous?.close(1000, message);
-  rejectPending(record, message);
-  if (!silent) appendLog("info", message, record.label);
-  record.status = { state: "offline", message };
-  publishReceivers();
-}
-
-export function connectReceiver(id) {
-  const record = receivers.get(id);
-  if (!record) return Promise.reject(new Error("Unknown receiver."));
-  if (!record.url.trim() || !record.token.trim()) {
-    appendLog("error", "Connection blocked: URL and token are required.", record.label);
-    return Promise.reject(new Error("Enter the receiver WebSocket URL and token."));
-  }
-  clearTimers(record);
-  record.reconnectAttempt = 0;
-  record.desired = true;
-  return openReceiverSocket(record);
 }
 
 export function disconnectReceiver(id) {
-  const record = receivers.get(id);
-  if (!record) return;
-  teardownConnection(record, "Disconnected from the receiver.");
+  return api.disconnectControllerReceiver(id).then(applySnapshot).catch(reportError);
 }
 
 export function isReceiverConnected(id) {
-  const record = receivers.get(id);
-  return Boolean(record?.socket && record.socket.readyState === WebSocket.OPEN && record.status.state === "online");
+  return receivers.some((receiver) => receiver.id === id && receiver.status?.state === "online");
 }
 
 /** True when at least one enabled receiver is currently online. */
 export function isRemoteConnected() {
-  for (const record of receivers.values()) {
-    if (record.enabled && record.socket && record.socket.readyState === WebSocket.OPEN && record.status.state === "online") {
-      return true;
-    }
-  }
-  return false;
-}
-
-function sendToReceiver(record, action, data) {
-  if (!record.socket || record.socket.readyState !== WebSocket.OPEN || record.status.state !== "online") {
-    return Promise.reject(new Error("Remote receiver is not connected."));
-  }
-  const id = commandId();
-  appendLog("info", `Sending command ${action} (${id}).`, record.label);
-  return new Promise((resolve, reject) => {
-    record.pending.set(id, { resolve, reject });
-    record.socket.send(JSON.stringify({ id, action, data }));
-    globalThis.setTimeout(() => {
-      const waiting = record.pending.get(id);
-      if (waiting) {
-        record.pending.delete(id);
-        appendLog("error", `Command ${action} (${id}) timed out after ${COMMAND_TIMEOUT_MS / 1000}s.`, record.label);
-        waiting.reject(new Error(`The remote receiver did not answer within ${COMMAND_TIMEOUT_MS / 1000} seconds.`));
-      }
-    }, COMMAND_TIMEOUT_MS);
-  });
+  return receivers.some((receiver) => receiver.enabled && receiver.status?.state === "online");
 }
 
 /**
- * Broadcasts a command to every enabled + connected receiver (or a specific
- * subset of receiver ids). Returns per-receiver outcomes instead of throwing,
- * so one offline receiver never blocks the others.
+ * Broadcasts a command through the backend to every enabled receiver (or a
+ * specific subset of receiver ids). Returns per-receiver outcomes instead of
+ * throwing, so one offline receiver never blocks the others.
  */
 export async function sendRemoteCommand(action, data, receiverIds = null) {
-  const targets = Array.from(receivers.values()).filter((record) => {
-    if (!record.enabled) return false;
-    if (receiverIds && !receiverIds.includes(record.id)) return false;
-    return true;
-  });
-  if (!targets.length) {
-    return { sent: 0, results: [] };
-  }
-  const results = await Promise.all(
-    targets.map(async (record) => {
-      try {
-        const message = await sendToReceiver(record, action, data);
-        return { id: record.id, label: record.label, status: "success", message };
-      } catch (error) {
-        return {
-          id: record.id,
-          label: record.label,
-          status: "error",
-          message: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }),
-  );
-  return { sent: results.length, results };
+  const result = await api.sendControllerCommand(action, data, receiverIds);
+  refreshRemoteState();
+  return { sent: result.sent ?? 0, results: Array.isArray(result.results) ? result.results : [] };
 }

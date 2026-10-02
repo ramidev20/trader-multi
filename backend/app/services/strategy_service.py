@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import wraps
@@ -16,6 +16,7 @@ from .mt5_compat import mt5, mt5_available
 from .env_utils import is_dev_mode
 from .mt5_lock import MT5_LOCK
 from .path_utils import resolve_terminal_path, sanitize_terminal_path
+from .remote_controller import remote_controller
 from .runtime_state import append_list, append_log, get, patch_path, replace_list, set_path
 from .session_service import list_sessions, submit_adapter_command
 from .task_manager import emit_log, is_task_running, start_task, stop_task
@@ -462,6 +463,98 @@ def _clone_trade_to_sub_accounts(master_request: dict, origin: str) -> str | Non
             origin,
         )
     return f"Copy dispatched to {len(targets)} sub account(s)"
+
+
+def copy_to_sub_adapters_and_wait(master_request: dict, origin: str = "manual") -> str:
+    """Fan a filled master trade out to every connected sub adapter at once
+    and wait for the results. Needs no MT5 session of its own (only config
+    and the adapters), so the API process can run it alongside the remote
+    mirror instead of the master adapter running it before replying."""
+    config = _load_config()
+    master_login = _safe_int(config.get("master_account_login"))
+    targets = _copy_targets(config, master_login)
+    if not targets:
+        return "Copied master trade to 0/0 sub adapter(s)"
+
+    def copy_to_target(account: dict, risk_percent: float) -> tuple[int, float, dict]:
+        login = _safe_int(account.get("user"))
+        delay_seconds = max(
+            0.0,
+            float(account.get("order_delay_sec", account.get("orderDelaySec", 0)) or 0),
+        )
+        result = submit_adapter_command(
+            login,
+            "copy_open",
+            {
+                "master_request": master_request,
+                "risk_percent": float(risk_percent),
+                "order_delay_sec": delay_seconds,
+                "origin": origin,
+            },
+            timeout_sec=max(15.0, delay_seconds + 15.0),
+        )
+        return login, delay_seconds, result
+
+    copied = 0
+    target_details: list[str] = []
+    with ThreadPoolExecutor(max_workers=min(16, len(targets)), thread_name_prefix="adapter-copy") as executor:
+        futures = [executor.submit(copy_to_target, account, risk_percent) for account, risk_percent in targets]
+        for future in as_completed(futures):
+            try:
+                login, delay_seconds, result = future.result()
+            except Exception as exc:
+                append_log("search", f"[ERROR] Copy dispatch failed: {exc}")
+                continue
+            if result.get("status") == "ok":
+                copied += 1
+                target_details.append(f"{login}: {delay_seconds:g}s delay")
+            else:
+                append_log(
+                    "search",
+                    f"[ERROR] Copy failed for {login}: {result.get('message', 'adapter command failed')}.",
+                )
+
+    if copied == 0:
+        return f"Copied master trade to 0/{len(targets)} sub adapter(s); no sub adapter is connected"
+    return f"Copied master trade to {copied}/{len(targets)} sub adapter(s) ({', '.join(target_details)})"
+
+
+def copy_to_sub_adapters_in_background(master_request: dict, origin: str, log_prefix: str) -> None:
+    """copy_to_sub_adapters_and_wait without holding up the caller; the
+    outcome goes to the search log (failures also become notifications)."""
+    def run() -> None:
+        summary = copy_to_sub_adapters_and_wait(master_request, origin)
+        if summary.startswith("Copied master trade to 0/0"):
+            return
+        level = "WARNING" if summary.startswith("Copied master trade to 0/") else "SUCCESS"
+        append_log("search", f"[{level}] {log_prefix} {summary}.")
+
+    _SUBACCOUNT_COPY_EXECUTOR.submit(run)
+
+
+def _mirror_strategy_order(side_label: str, symbol: str, entry_price: float, tp: float, sl: float) -> None:
+    """Send a Search page entry to the remote receivers as soon as it fills.
+
+    TP/SL go as pip distances, like the sub-account copies, so each receiver
+    keeps the same distances from its own fill price; each receiver sizes
+    the lot from its own Risk %.
+    """
+    if is_dev_mode():
+        return
+    remote_controller.broadcast_in_background(
+        "open",
+        {
+            "side": side_label,
+            "symbol": symbol,
+            "order_kind": "MARKET",
+            "tp": round(abs(tp - entry_price) * 10.0, 1),
+            "sl": round(abs(entry_price - sl) * 10.0, 1),
+            "tp_in_pips": True,
+            "sl_in_pips": True,
+        },
+        f"{side_label} mirror",
+        "[order]",
+    )
 
 
 @dataclass
@@ -1516,6 +1609,9 @@ def open_order_strategy(config_data):
                 "created_at": datetime.now().isoformat(),
             },
         )
+        # Receivers first: the sub-account dispatch below takes the MT5
+        # session lock and re-verifies the login before it hands off.
+        _mirror_strategy_order(side_label, symbol, float(entry_price), float(tp), float(sl))
         copy_summary = _clone_trade_to_sub_accounts(request, origin="strategy")
         copy_suffix = f" ({copy_summary})" if copy_summary else ""
         emit_log(f"[order] success {side_label} {symbol}{copy_suffix}", "success")

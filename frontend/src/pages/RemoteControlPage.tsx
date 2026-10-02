@@ -87,7 +87,7 @@ function importLegacyReceiver() {
         url: saved.url,
         token: saved.token,
         enabled: true,
-      });
+      }).catch(() => {});
     }
     globalThis.localStorage?.removeItem(LEGACY_CONTROLLER_SETTINGS_KEY);
   } catch {
@@ -387,19 +387,23 @@ function ReceiverForm({
   const [token, setToken] = useState(initial?.token ?? "");
   const [error, setError] = useState("");
 
-  function submit() {
+  async function submit() {
     if (!url.trim() || !token.trim()) {
       setError("URL and token are both required.");
       return;
     }
-    const id = saveReceiver({
-      id: initial?.id,
-      label: label.trim() || `Receiver ${url.trim()}`,
-      url,
-      token,
-      enabled: initial?.enabled ?? true,
-    });
-    onSaved(id);
+    try {
+      const id = await saveReceiver({
+        id: initial?.id,
+        label: label.trim() || `Receiver ${url.trim()}`,
+        url,
+        token,
+        enabled: initial?.enabled ?? true,
+      });
+      onSaved(id);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    }
   }
 
   return (

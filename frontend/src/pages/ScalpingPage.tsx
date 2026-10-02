@@ -267,6 +267,9 @@ export default function ScalpingPage() {
   const [zoneGuideOpen, setZoneGuideOpen] = useState(false);
   const [maxSlPips, setMaxSlPips] = useState(saved.maxSlPips ?? "");
   const [limitPercent, setLimitPercent] = useState(saved.limitPercent ?? "");
+  // 5-minute zones bigger than this (extreme of c3/c2 to c3's close) are
+  // skipped and the search continues. Empty = no limit.
+  const [maxZonePips, setMaxZonePips] = useState(saved.maxZonePips ?? "");
 
   // Multi-TP (up to 2 stages), same mechanism as Manual Trade's Advanced
   // Risk panel -- but with no Stop Loss Price field, since the SL here
@@ -318,6 +321,7 @@ export default function ScalpingPage() {
       spreadPips,
       maxSlPips,
       limitPercent,
+      maxZonePips,
       tp1Ratio,
       tp2Ratio,
       tp2Enabled,
@@ -342,6 +346,7 @@ export default function ScalpingPage() {
     spreadPips,
     maxSlPips,
     limitPercent,
+    maxZonePips,
     tp1Ratio,
     tp2Ratio,
     tp2Enabled,
@@ -425,6 +430,7 @@ export default function ScalpingPage() {
       spread_pips: Number(spreadPips || 0),
       max_sl_pips: Number(maxSlPips || 0),
       limit_percent: Number(limitPercent || 0),
+      max_zone_pips: Number(maxZonePips || 0),
       lot: null,
       // Risk comes from each account's own Risk % setting.
       risk_percent: null,
@@ -732,6 +738,19 @@ export default function ScalpingPage() {
               disabled={submitting}
               placeholder="e.g. 3"
               title="Added beyond the SL (below it for buys, above it for sells), like Manual Trade's Spread."
+            />
+
+            <Field
+              label="Max Demand / Supply (pips)"
+              type="text"
+              inputMode="decimal"
+              value={maxZonePips}
+              onChange={(event) =>
+                setMaxZonePips(decimalInput(event.target.value))
+              }
+              disabled={submitting}
+              placeholder="e.g. 60"
+              title="5-minute zones only. Measured from the zone's extreme (lowest low of c3/c2 for demand, highest high for supply) to c3's close. A bigger zone is skipped and the search continues. Leave empty for no limit."
             />
           </div>
         </div>

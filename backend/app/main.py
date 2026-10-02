@@ -270,6 +270,7 @@ class ZoneStrategyStartPayload(BaseModel):
     spread_pips: float = 0.0
     max_sl_pips: float = 0.0
     limit_percent: float = 0.0
+    max_zone_pips: float = 0.0
     order_kind: str = "MARKET"
     lot: float | None = None
     risk_percent: float | None = None

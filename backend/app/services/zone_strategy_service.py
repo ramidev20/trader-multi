@@ -241,6 +241,9 @@ class ZoneStrategyEngine:
         self.order_kind: str = "AUTO"
         self.max_sl_pips: float = 0.0
         self.limit_percent: float = 0.0
+        # 5-minute zones measuring more than this from their extreme (c3 or
+        # c2 low/high) to c3's close are skipped; 0 = no limit.
+        self.max_zone_pips: float = 0.0
         self.lot: Optional[float] = None
         self.risk_percent: Optional[float] = None
         # Take-profit is always ratio-based here (same mechanism as manual
@@ -306,6 +309,9 @@ class ZoneStrategyEngine:
         limit_percent = float(cfg.get("limit_percent", 0) or 0)
         if max_sl_pips > 0 and not 0 < limit_percent < 100:
             raise RuntimeError("Limit % must be between 0 and 100 when Max SL is set.")
+        max_zone_pips = float(cfg.get("max_zone_pips", 0) or 0)
+        if max_zone_pips < 0:
+            raise RuntimeError("Max demand/supply pips cannot be negative.")
         cfg_start_time = cfg.get("start_time")
         start_time = cfg_start_time if isinstance(cfg_start_time, datetime) else None
         cfg_end_time = cfg.get("end_time")
@@ -340,6 +346,7 @@ class ZoneStrategyEngine:
             self.order_kind = order_kind
             self.max_sl_pips = max_sl_pips
             self.limit_percent = limit_percent
+            self.max_zone_pips = max_zone_pips
             self.lot = cfg.get("lot")
             # Risk comes from each account's own Risk % setting
             # (open_manual_position falls back to the master's when None).
@@ -377,6 +384,7 @@ class ZoneStrategyEngine:
                 "order_kind": self.order_kind,
                 "max_sl_pips": self.max_sl_pips,
                 "limit_percent": self.limit_percent,
+                "max_zone_pips": self.max_zone_pips,
                 "instant_m5_start": instant,
                 "dev_m1_start": dev_m1,
                 "trigger_check_cycle_sec": self.trigger_check_cycle_sec,
@@ -873,7 +881,7 @@ class ZoneStrategyEngine:
                 "placed_order": None,
                 "last_error": None,
             })
-        elif zone is not None:
+        elif zone is not None and not self._m5_zone_too_big(zone):
             self._accept_m5_zone(zone)
             return
         start_task(
@@ -882,6 +890,26 @@ class ZoneStrategyEngine:
             interval_sec=M5_SEARCH_INTERVAL_SEC,
             start_time=datetime.now(),
         )
+
+    def _m5_zone_too_big(self, zone: dict[str, Any]) -> bool:
+        """Max demand/supply pips: measured from the zone's extreme -- the
+        lower of c3/c2's lows (demand) or the higher of their highs (supply),
+        which is the zone's breach edge -- to c3's close. A bigger zone is
+        logged and skipped; the search carries on to the next pattern."""
+        if self.max_zone_pips <= 0:
+            return False
+        is_demand = zone.get("type") == "demand"
+        extreme = float(zone["price_low"] if is_demand else zone["price_high"])
+        span_pips = round(abs(float(zone["c3_close"]) - extreme) * 10.0, 1)
+        if span_pips <= self.max_zone_pips:
+            return False
+        append_log(
+            "search",
+            f"[INFO] [scalping:{self.side}] 5-minute zone {zone['price_low']:.2f}-{zone['price_high']:.2f} skipped: "
+            f"{span_pips:g} pips from its {'low' if is_demand else 'high'} to the c3 close is over the "
+            f"max {self.max_zone_pips:g}; still searching.",
+        )
+        return True
 
     def _accept_m5_zone(self, zone: dict[str, Any]) -> None:
         # The engine owns a side-specific search. Keep that ownership explicit
@@ -917,7 +945,7 @@ class ZoneStrategyEngine:
             zone = self._detect_gap_zone_locked(
                     self.m5_buffer, self.m5_target_zone_type, extend_to_c2=True
                 )
-        if zone is not None:
+        if zone is not None and not self._m5_zone_too_big(zone):
             self._accept_m5_zone(zone)
 
     def _m5_zone_breach(self, price: float | None, candles: list[Any]) -> tuple[bool, Optional[int]]:
@@ -1195,6 +1223,8 @@ class ZoneStrategyEngine:
             "variant": variant,
             "price_high": round(float(price_high), 2),
             "price_low": round(float(price_low), 2),
+            # For the 5-minute Max demand/supply pips check.
+            "c3_close": round(float(_candle_value(c3, 4, "close")), 2),
             "base_candle_time": int(c3["time"]),
             "retest_candle_time": int(c2["time"]),
             "displacement_candle_time": int(c1["time"]),

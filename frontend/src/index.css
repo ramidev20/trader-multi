@@ -348,3 +348,17 @@ html[data-theme="DARK"] .topo-line {
   animation: topo-travel 2.2s linear infinite;
 }
 
+
+/* IosTimePicker dialog: the source package's quick slide-up fade-in. */
+@keyframes ios-time-picker-pop {
+  from { transform: translateY(24px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.ios-time-picker-pop {
+  animation: ios-time-picker-pop 150ms ease-out;
+}
+/* The theme maps bg-slate-100 onto the same colour as bg-white, which hid
+   the selection band against the dialog; use the source's dark band colour. */
+html[data-theme="DARK"] .ios-time-picker-band {
+  background-color: #2c2c2f !important;
+}

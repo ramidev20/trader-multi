@@ -4,4 +4,7 @@ pydantic==2.9.2
 python-multipart==0.0.12
 python-dotenv>=1.0,<2
 pywebview>=5.1,<6
-MetaTrader5>=5.0.45
+numpy>=1.26
+# backend/app/services/ctrader_proto/*_pb2.py were generated with protoc for
+# protobuf 7.35; the runtime must be the same major version, at least that.
+protobuf>=7.35.1,<8

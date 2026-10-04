@@ -1,6 +1,8 @@
 # Lequidity Trader
 
-Lequidity Trader is a React/Vite dashboard with a FastAPI backend for managing MetaTrader 5 accounts, strategy execution, risk monitoring, and trade history.
+Lequidity Trader is a React/Vite dashboard with a FastAPI backend for managing cTrader accounts, strategy execution, risk monitoring, and trade history.
+
+This `ctrader` branch trades through the **cTrader Open API**: each account adapter holds a direct TLS connection to cTrader's servers, so no trading terminal has to be installed or running. Prices, candles, positions and fills are pushed to the app and served from memory.
 
 ## Development
 
@@ -44,7 +46,25 @@ The launcher starts the FastAPI backend and Vite development server, then opens 
 
 ## Developer Mode
 
-The root `.env` file controls developer mode. With `TRADER_DEV_MODE=true`, the app uses mock MT5 data so you can browse and test pages without logging into a live MT5 account.
+The root `.env` file controls developer mode. With `TRADER_DEV_MODE=true`, the app uses mock trading data so you can browse and test pages without connecting a live cTrader account.
+
+## cTrader Setup
+
+1. Register an application at [openapi.ctrader.com](https://openapi.ctrader.com) and wait for it to be approved.
+2. Put its credentials in the root `.env`:
+
+   ```
+   CTRADER_CLIENT_ID=...
+   CTRADER_CLIENT_SECRET=...
+   ```
+
+3. From the application's page, generate an **access token** (the *Playground* flow is enough) with the `trading` scope for the cTrader ID that owns your accounts.
+4. In the app, add each account with:
+   - **cTrader Account Number** -- the number shown in cTrader (the internal Open API account id also works);
+   - **Environment** -- `demo` or `live` (the adapter switches automatically if the account lives on the other server);
+   - **Open API Access Token** -- the token from step 3.
+
+Access tokens expire (about 30 days); when an account stops connecting with an `ACCESS_TOKEN` error, generate a new token and update the account.
 
 ## Configuration
 

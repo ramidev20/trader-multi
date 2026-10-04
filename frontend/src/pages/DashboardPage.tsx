@@ -472,7 +472,7 @@ export default function DashboardPage({
             <MetricCard
               label="Connected Terminals"
               value={`${totals.connected}/${accountsData.length}`}
-              hint="MT5 local terminal sessions"
+              hint="cTrader Open API sessions"
               icon={Server}
               tone="blue"
             />

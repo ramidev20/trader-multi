@@ -72,8 +72,10 @@ The project reads the root `.env` file for both backend and frontend dev flags.
 Use this flag in `.env`:
 - `TRADER_DEV_MODE=true`
 
-With developer mode enabled, the UI loads mock trading data and simulated MT5 behavior so you can test pages without connecting a real MT5 account.
+With developer mode enabled, the UI loads mock trading data and simulated trading behavior so you can test pages without connecting a real cTrader account.
+
+For live trading set `TRADER_DEV_MODE=false` and fill in `CTRADER_CLIENT_ID` / `CTRADER_CLIENT_SECRET` (see **cTrader Setup** in the README). No trading terminal needs to be installed.
 
 ## 6) Remote Control (Two PCs)
 
-On the PC running MT5, install Tailscale. Set `TRADER_DEV_MODE=false` in `.env`, then launch with `python run.py`. On the **Remote Control** page, choose the **Receiver** role, generate a token, turn on "Accept remote trades", and save -- this is stored in `config.json`, not `.env`. On the other PC, choose the **Controller / Trader** role and add this PC as a receiver using `ws://<tailscale-ip>:8000/remote/ws` and the same token.
+On the PC that runs the account adapters, install Tailscale. Set `TRADER_DEV_MODE=false` in `.env`, then launch with `python run.py`. On the **Remote Control** page, choose the **Receiver** role, generate a token, turn on "Accept remote trades", and save -- this is stored in `config.json`, not `.env`. On the other PC, choose the **Controller / Trader** role and add this PC as a receiver using `ws://<tailscale-ip>:8000/remote/ws` and the same token.

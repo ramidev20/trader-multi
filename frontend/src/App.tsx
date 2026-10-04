@@ -62,8 +62,7 @@ export default function App() {
     setAsMain: false,
     login: "",
     password: "",
-    server: "",
-    path: "",
+    server: "demo",
     status: "Connected",
     balance: 0,
     equity: 0,
@@ -237,8 +236,7 @@ export default function App() {
       setAsMain: false,
       login: "",
       password: "",
-      server: "",
-      path: "",
+      server: "demo",
       status: "Connected",
       balance: 0,
       equity: 0,
@@ -259,8 +257,7 @@ export default function App() {
       setAsMain: account.role === "MASTER",
       login: account.login,
       password: account.password || "",
-      server: account.server,
-      path: account.path,
+      server: String(account.server || "").toLowerCase().includes("live") ? "live" : "demo",
       status: account.status,
       balance: account.balance,
       equity: account.equity,
@@ -309,7 +306,6 @@ export default function App() {
         user: Number(formState.login),
         password: formState.password || "",
         server: formState.server,
-        terminal_path: formState.path,
         role: shouldBeMain ? "master" : "sub",
         color: formState.color,
         risk_percent: Number(formState.risk || 1),
@@ -418,7 +414,7 @@ export default function App() {
         <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
         <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-6 pt-2 lg:px-5" style={styles.pageContent}>
           <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }} className="flex min-h-0 flex-1 flex-col">
-            {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock MT5 data unless a live backend session is available.</div> : null}
+            {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock trading data unless a live cTrader session is available.</div> : null}
             {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}
             {activePage === "dashboard" && <DashboardPage totals={totals} accountsData={accountList} onAdd={openAddDialog} onEdit={openEditDialog} onDelete={openDeleteDialog} onConnect={connectAccountAndSync} onRefresh={refreshDashboard} />}
             {activePage === "search" && (masterConnected ? <SearchPage runtime={runtime} searchLogs={searchLogs} onRefreshRuntime={refreshBootstrap} timeRange={searchTimeRange} onTimeRangeChange={setSearchTimeRange} /> : <MasterConnectionRequiredPage />)}
@@ -454,10 +450,9 @@ export default function App() {
       <Dialog open={dialogMode === "add" || dialogMode === "edit"} title={dialogMode === "edit" ? "Edit Account Settings" : "Add Account"} onClose={closeDialog}>
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Account Name" value={formState.name} onChange={(e) => setFormState((s) => ({ ...s, name: e.target.value }))} />
-          <Field label="Login Username" value={formState.login} onChange={(e) => setFormState((s) => ({ ...s, login: e.target.value }))} />
-          <Field label="Server" value={formState.server} onChange={(e) => setFormState((s) => ({ ...s, server: e.target.value }))} />
-          <Field label="Password" value={formState.password} onChange={(e) => setFormState((s) => ({ ...s, password: e.target.value }))} />
-          <Field label="Terminal Path" value={formState.path} onChange={(e) => setFormState((s) => ({ ...s, path: e.target.value }))} />
+          <Field label="cTrader Account Number" value={formState.login} onChange={(e) => setFormState((s) => ({ ...s, login: e.target.value }))} />
+          <SelectBox label="Environment" value={formState.server} options={["demo", "live"]} onChange={(e) => setFormState((s) => ({ ...s, server: e.target.value }))} />
+          <Field label="Open API Access Token" type="password" autoComplete="off" value={formState.password} onChange={(e) => setFormState((s) => ({ ...s, password: e.target.value }))} />
           <label className="block">
             <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Avatar Color</span>
             <select
@@ -532,7 +527,7 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
     if (notifications.some((item) => item.id === id)) return;
     const lower = normalizedMessage.toLowerCase();
     const level = text.includes("[ERROR]") || lower.includes("failed") || lower.includes("blocked") ? "error" : text.includes("[WARNING]") || lower.includes("disabled") || lower.includes("disconnected") ? "warning" : text.includes("[SUCCESS]") ? "success" : "info";
-    const title = lower.includes("session risk limit") ? "Session risk limit" : lower.includes("algo") || lower.includes("algorithmic") ? "MT5 Algo Trading" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
+    const title = lower.includes("session risk limit") ? "Session risk limit" : lower.includes("algo") || lower.includes("algorithmic") ? "Algo Trading" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
     notifications.push({
       id,
       title,
@@ -547,7 +542,7 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
     notifications.push({ id: `disconnected-${account.login}`, title: "Account disconnected", message: `${account.name} is not connected.`, level: "warning", category: "other", priority: 0, seq: notifications.length + 1 });
   });
   (data?.accounts || []).filter((account) => account.algoEnabled === false).forEach((account) => {
-    notifications.push({ id: `algo-disabled-${account.login}`, title: "Algorithmic trading disabled", message: `${account.name} has Algo Trading disabled in MT5.`, level: "warning", category: "other", priority: 0, seq: notifications.length + 1 });
+    notifications.push({ id: `algo-disabled-${account.login}`, title: "Algorithmic trading disabled", message: `${account.name} has trading disabled on its cTrader account.`, level: "warning", category: "other", priority: 0, seq: notifications.length + 1 });
   });
   if (!preferences.enabled) return [];
   return notifications.filter((item) => (

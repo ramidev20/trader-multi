@@ -1213,7 +1213,7 @@ function ChartPageView() {
               : "bg-amber-100/90 text-amber-700",
           )}
         >
-          {snapshot.source === "live" ? "LIVE MT5" : "SIMULATED"}
+          {snapshot.source === "live" ? "LIVE CTRADER" : "SIMULATED"}
         </span>
         <div className="rounded-lg border border-slate-200 bg-white/90 px-2.5 py-1.5 text-xs font-bold text-slate-700 shadow-sm backdrop-blur-sm">
           Spread {spread == null ? "-" : (spread * 10).toFixed(1)}

@@ -140,10 +140,12 @@ class NotificationSettingsUpdate(BaseModel):
 
 class AccountPayload(BaseModel):
     username: str
+    # cTrader account number, Open API access token and "demo"/"live".
     user: int
     password: str
-    server: str
-    terminal_path: str
+    server: str = "demo"
+    # Accepted for older clients; cTrader needs no terminal.
+    terminal_path: str = ""
     role: str = "sub"
     color: str | None = None
     risk_percent: float | None = None
@@ -310,7 +312,7 @@ class _QuietPollingAccessLog(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_QuietPollingAccessLog())
 
-app = FastAPI(title="MT5 Trader API", version="0.3.0")
+app = FastAPI(title="cTrader Trader API", version="0.3.0")
 
 
 @app.on_event("shutdown")
@@ -464,7 +466,6 @@ def _to_front_account(index: int, account: dict[str, Any], session: dict[str, An
         "login": str(login),
         "password": str(account.get("password", "")),
         "server": str(account.get("server", "")),
-        "path": str(account.get("terminal_path", "")),
         "status": "Connected" if connected else "Starting" if starting else "Disconnected" if disconnected else session_state.title(),
         "sessionState": session_state,
         "balance": balance,
@@ -503,13 +504,6 @@ def _parse_dt(value: str | None) -> datetime | None:
         return parsed.astimezone().replace(tzinfo=None) if parsed.tzinfo else parsed
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Invalid scheduled date/time: {value}") from exc
-
-
-def _sanitize_terminal_path(value: str) -> str:
-    path = str(value or "").strip()
-    if len(path) >= 2 and path[0] == path[-1] and path[0] in {'"', "'"}:
-        path = path[1:-1].strip()
-    return path
 
 
 def _safe_int(value: Any) -> int:
@@ -658,7 +652,7 @@ def _fetch_live_positions() -> tuple[list[dict[str, Any]], list[str]]:
             if active_account is None:
                 active_account = _resolve_active_account_for_positions(accounts, config)
             if active_account is None:
-                errors.append("Connected MT5 account is not saved in the application.")
+                errors.append("Connected cTrader account is not saved in the application.")
             else:
                 login = _safe_int(active_account.get("user"))
                 role = "MASTER" if str(active_account.get("role", "sub")).lower() == "master" else "SUB"
@@ -1014,7 +1008,7 @@ def save_account(payload: AccountPayload) -> dict[str, Any]:
         else (payload.risk_multiplier or 1.0)
     )
     account_data.pop("risk_multiplier", None)
-    account_data["terminal_path"] = _sanitize_terminal_path(account_data.get("terminal_path", ""))
+    account_data.pop("terminal_path", None)
 
     for idx, existing in enumerate(accounts):
         if int(existing.get("user", 0) or 0) == payload.user:
@@ -1321,7 +1315,7 @@ def chart_data(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1", count: int =
             timeout_sec=5.0,
         )
         if result.get("status") != "ok":
-            raise HTTPException(status_code=409, detail=str(result.get("message", "Live MT5 candle request failed.")))
+            raise HTTPException(status_code=409, detail=str(result.get("message", "Live cTrader candle request failed.")))
         candles = result.get("candles", [])
         orders = result.get("orders", [])
         source = "live"
@@ -1405,7 +1399,7 @@ def trade_history() -> dict[str, Any]:
             continue
         result = submit_adapter_command(login, "history", {}, timeout_sec=10.0)
         if result.get("status") != "ok":
-            errors.append(f"{login}: {result.get('message', 'MT5 adapter command failed.')}")
+            errors.append(f"{login}: {result.get('message', 'cTrader adapter command failed.')}")
             continue
         try:
             current_balance = float(result.get("balance", 0.0) or 0.0)
@@ -1566,7 +1560,7 @@ def open_position(payload: OpenPositionPayload, mirror_remote: bool = True) -> d
         # outcome is written to the search log.
         result = submit_adapter_command(master_login, "open", {**payload_data, "defer_copy": True})
         if result.get("status") != "ok":
-            raise HTTPException(status_code=409, detail=str(result.get("message", "MT5 adapter command failed.")))
+            raise HTTPException(status_code=409, detail=str(result.get("message", "cTrader adapter command failed.")))
         side_label = str(payload.side).upper()
         if mirror_remote:
             remote_controller.broadcast_in_background("open", remote_data, f"{side_label} mirror", "[manual]")

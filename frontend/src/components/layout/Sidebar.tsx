@@ -33,7 +33,7 @@ export default function Sidebar({ activePage, onChangePage }: SidebarProps) {
           MT
         </span>
         <span className="text-sm font-black tracking-tight text-slate-950">
-          MT5 Trader
+          cTrader Trader
         </span>
       </div>
       <nav className="mt-6 grid gap-1">

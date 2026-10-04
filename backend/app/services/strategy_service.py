@@ -15,7 +15,6 @@ from uuid import uuid4
 from .mt5_compat import mt5, mt5_available
 from .env_utils import is_dev_mode
 from .mt5_lock import MT5_LOCK
-from .path_utils import resolve_terminal_path, sanitize_terminal_path
 from .remote_controller import remote_controller
 from .runtime_state import append_list, append_log, get, patch_path, replace_list, set_path
 from .session_service import list_sessions, submit_adapter_command
@@ -103,10 +102,6 @@ def _safe_int(value) -> int:
         return 0
 
 
-def _normalize_terminal_path(path_value: str) -> str:
-    return sanitize_terminal_path(path_value)
-
-
 def _resolve_master_account(cfg: dict) -> dict | None:
     accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
     master_login = _safe_int((cfg or {}).get("master_account_login"))
@@ -166,11 +161,10 @@ def _copy_targets_count() -> int:
 
 def _initialize_mt5_for_account(account: dict) -> tuple[bool, str]:
     login = _safe_int(account.get("user"))
-    password = str(account.get("password", "") or "")
+    access_token = str(account.get("password", "") or "")
     server = str(account.get("server", "") or "")
-    terminal_path = resolve_terminal_path(account.get("terminal_path", ""))
-    if login <= 0 or not password or not server or not terminal_path:
-        return False, f"missing account credentials/path for login={login}"
+    if login <= 0 or not access_token:
+        return False, f"missing cTrader account number/access token for login={login}"
     with MT5_LOCK:
         active = mt5.account_info()
         active_login = _safe_int(getattr(active, "login", 0)) if active is not None else 0
@@ -180,7 +174,7 @@ def _initialize_mt5_for_account(account: dict) -> tuple[bool, str]:
             mt5.shutdown()
         except Exception:
             pass
-        ok = mt5.initialize(login=login, password=password, server=server, path=terminal_path)
+        ok = mt5.initialize(login=login, password=access_token, server=server)
         if not ok:
             return False, str(mt5.last_error())
         return True, "ok"
@@ -229,7 +223,7 @@ def _ensure_symbol_ready(symbol: str, require_fresh_quote: bool = True) -> tuple
         if quote_age > MAX_QUOTE_AGE_SECONDS:
             return False, (
                 f"Stale prices for {symbol}. Last quote is {int(quote_age)} seconds old; "
-                "the MT5 terminal has not received a recent tick."
+                "cTrader has not pushed a recent quote."
             )
     return True, "ok"
 
@@ -338,7 +332,7 @@ def _ensure_master_session() -> tuple[bool, str, dict | None, dict]:
     ok, detail = _initialize_mt5_for_account(master)
     if not ok:
         login = _safe_int(master.get("user"))
-        return False, f"MT5 initialize failed for master {login}: {detail}", master, cfg
+        return False, f"cTrader login failed for master {login}: {detail}", master, cfg
     return True, "ok", master, cfg
 
 
@@ -348,7 +342,7 @@ def _verify_mt5_login(expected_login: int) -> tuple[bool, str]:
     info = mt5.account_info()
     actual_login = _safe_int(getattr(info, "login", 0)) if info is not None else 0
     if actual_login != int(expected_login):
-        return False, f"active MT5 login is {actual_login or 'unknown'}, expected {expected_login}"
+        return False, f"active cTrader login is {actual_login or 'unknown'}, expected {expected_login}"
     return True, "ok"
 
 

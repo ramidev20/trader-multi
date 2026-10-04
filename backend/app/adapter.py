@@ -8,10 +8,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import MetaTrader5 as mt5
-
-from backend.app.services.path_utils import resolve_terminal_path
-from backend.app.services.session_service import adapter_command_paths
+from backend.app.services.mt5_compat import mt5
+from backend.app.services.session_service import ACCESS_TOKEN_ENV, adapter_command_paths
 from backend.app.services.strategy_service import (
     _build_copy_request,
     close_positions_on_current_session,
@@ -25,17 +23,13 @@ def write_status(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def initialize_session(login: int, password: str, server: str, terminal_path: str) -> tuple[bool, str]:
+def initialize_session(login: int, access_token: str, server: str) -> tuple[bool, str]:
+    """Open this adapter's own cTrader Open API session (no terminal)."""
     try:
         mt5.shutdown()
     except Exception:
         pass
-    ok = mt5.initialize(
-        login=login,
-        password=password,
-        server=server,
-        path=terminal_path,
-    )
+    ok = mt5.initialize(login=login, password=access_token, server=server)
     return ok, str(mt5.last_error()) if not ok else "ok"
 
 
@@ -107,9 +101,9 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
             symbol = str(payload.get("symbol", "XAUUSD") or "XAUUSD").strip().upper()
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:
-                return {"status": "error", "message": f"Symbol {symbol} is unavailable in the connected MT5 terminal."}
+                return {"status": "error", "message": f"Symbol {symbol} is unavailable on the connected cTrader account."}
             if not bool(getattr(symbol_info, "visible", False)) and not mt5.symbol_select(symbol, True):
-                return {"status": "error", "message": f"Could not select {symbol} in Market Watch."}
+                return {"status": "error", "message": f"Could not subscribe to {symbol} quotes."}
             tick = mt5.symbol_info_tick(symbol)
             if tick is None:
                 return {"status": "error", "message": f"No live quote is available for {symbol}: {mt5.last_error()}"}
@@ -195,13 +189,13 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
 
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:
-                return {"status": "error", "message": f"Symbol {symbol} is unavailable in the connected MT5 terminal."}
+                return {"status": "error", "message": f"Symbol {symbol} is unavailable on the connected cTrader account."}
             if not bool(getattr(symbol_info, "visible", False)) and not mt5.symbol_select(symbol, True):
-                return {"status": "error", "message": f"Could not select {symbol} in Market Watch."}
+                return {"status": "error", "message": f"Could not subscribe to {symbol} quotes."}
 
             rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
             if rates is None or len(rates) == 0:
-                return {"status": "error", "message": f"MT5 returned no {timeframe_name} candles for {symbol}: {mt5.last_error()}"}
+                return {"status": "error", "message": f"cTrader returned no {timeframe_name} candles for {symbol}: {mt5.last_error()}"}
 
             tick = mt5.symbol_info_tick(symbol)
             chart_orders = []
@@ -354,7 +348,7 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
         try:
             info = mt5.account_info()
             if info is None:
-                return {"status": "error", "message": "MT5 account information is unavailable."}
+                return {"status": "error", "message": "cTrader account information is unavailable."}
             deals = mt5.history_deals_get(datetime(2000, 1, 1), datetime.now()) or []
             rows = []
             for deal in deals:
@@ -396,7 +390,7 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
             info = mt5.account_info()
             terminal = mt5.terminal_info()
             if info is None:
-                return {"status": "error", "message": "MT5 account information is unavailable."}
+                return {"status": "error", "message": "cTrader account information is unavailable."}
             positions = []
             for position in mt5.positions_get() or []:
                 positions.append(
@@ -533,7 +527,7 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
         return {
             "status": "ok",
             "ticket": int(getattr(result, "order", 0) or getattr(result, "position", 0) or 0),
-            "message": "Order sent by the connected MT5 adapter.",
+            "message": "Order sent by the connected cTrader adapter.",
             "copy_summary": copy_summary[0],
             "master_request": filled_request[0],
         }
@@ -572,12 +566,12 @@ def process_pending_commands(login: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--login", required=True, type=int)
-    parser.add_argument("--password", required=True)
-    parser.add_argument("--server", required=True)
-    parser.add_argument("--terminal-path", required=True)
+    parser.add_argument("--server", default="demo")
     parser.add_argument("--status-file", required=True)
     args = parser.parse_args()
-    terminal_path = resolve_terminal_path(args.terminal_path)
+    # The access token arrives through the environment rather than argv so it
+    # never shows up in process listings.
+    access_token = os.environ.pop(ACCESS_TOKEN_ENV, "")
 
     status_file = Path(args.status_file)
     write_status(
@@ -587,12 +581,11 @@ def main() -> None:
             "pid": os.getpid(),
             "login": args.login,
             "server": args.server,
-            "terminal_path": terminal_path,
             "updated_at": int(time.time()),
         },
     )
 
-    ok, init_detail = initialize_session(args.login, args.password, args.server, terminal_path)
+    ok, init_detail = initialize_session(args.login, access_token, args.server)
     if not ok:
         write_status(
             status_file,
@@ -601,7 +594,6 @@ def main() -> None:
                 "pid": os.getpid(),
                 "login": args.login,
                 "server": args.server,
-                "terminal_path": terminal_path,
                 "error": init_detail,
                 "updated_at": int(time.time()),
             },
@@ -610,7 +602,7 @@ def main() -> None:
 
     try:
         while True:
-            # This adapter is the single owner of MT5 commands for its account.
+            # This adapter is the single owner of trading commands for its account.
             process_pending_commands(args.login)
             terminal = mt5.terminal_info()
             ping_last = float(getattr(terminal, "ping_last", 0.0) or 0.0) if terminal is not None else 0.0
@@ -625,13 +617,12 @@ def main() -> None:
                         "pid": os.getpid(),
                         "login": args.login,
                         "server": args.server,
-                        "terminal_path": terminal_path,
                         "latency": round(ping_last / 1000.0, 2) if ping_last > 0 else 0.0,
                         "algo_enabled": algo_enabled,
                         "error": (
-                            f"Active MT5 login is {actual_login}, expected {args.login}"
+                            f"Active cTrader login is {actual_login}, expected {args.login}"
                             if actual_login
-                            else "MT5 terminal closed or account session lost"
+                            else "cTrader connection lost and could not be restored"
                         ),
                         "updated_at": int(time.time()),
                     },
@@ -649,12 +640,11 @@ def main() -> None:
                         "equity": float(getattr(info, "equity", 0.0) or 0.0),
                         "latency": round(ping_last / 1000.0, 2) if ping_last > 0 else 0.0,
                         "algo_enabled": algo_enabled,
-                        "terminal_path": terminal_path,
                         "updated_at": int(time.time()),
                     },
                 )
             # Keep account status on a two-second cadence while serving chart and
-            # trade commands promptly from the adapter-owned MT5 session. The
+            # trade commands promptly from the adapter-owned cTrader session. The
             # command scan is a cheap directory glob, so polling it at 50Hz
             # instead of 10Hz cuts up to 80ms of dead time off every hop --
             # which a manual open pays three times over (master + each sub).
@@ -672,7 +662,6 @@ def main() -> None:
                 "pid": os.getpid(),
                 "login": args.login,
                 "server": args.server,
-                "terminal_path": terminal_path,
                 "updated_at": int(time.time()),
             },
         )

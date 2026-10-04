@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -11,7 +12,6 @@ from uuid import uuid4
 
 from .env_utils import is_dev_mode
 from .runtime_state import append_log
-from .path_utils import resolve_terminal_path, sanitize_terminal_path
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 # Connection status is runtime state, not application source/log history.
@@ -19,6 +19,9 @@ RUNTIME_DIR = Path(tempfile.gettempdir()) / "trader-multi-runtime"
 STATUS_DIR = RUNTIME_DIR / "mt5_sessions"
 COMMAND_DIR = RUNTIME_DIR / "mt5_commands"
 WORKER_MODULE = "backend.app.adapter"
+# Environment variable carrying an account's cTrader access token into its
+# adapter process (kept out of argv so it is not visible in process lists).
+ACCESS_TOKEN_ENV = "CTRADER_ACCESS_TOKEN"
 
 _adapter_processes: dict[int, subprocess.Popen] = {}
 _STATUS_HEARTBEAT_SEC = 8
@@ -54,10 +57,10 @@ def adapter_command_paths(login: int, command_id: str) -> tuple[Path, Path]:
 
 
 def submit_adapter_command(login: int, action: str, payload: dict[str, Any], timeout_sec: float = 30.0) -> dict[str, Any]:
-    """Send work to the process that owns this account's MT5 connection."""
+    """Send work to the process that owns this account's cTrader connection."""
     login = _safe_int(login)
     if login <= 0 or not _has_active_adapter(login):
-        return {"status": "error", "message": f"MT5 adapter {login} is not connected."}
+        return {"status": "error", "message": f"cTrader adapter {login} is not connected."}
 
     command_id = uuid4().hex
     request_path, result_path = adapter_command_paths(login, command_id)
@@ -99,7 +102,7 @@ def submit_adapter_command(login: int, action: str, payload: dict[str, Any], tim
         time.sleep(0.01)
 
     request_path.unlink(missing_ok=True)
-    return {"status": "error", "message": "The MT5 adapter did not return a command result in time."}
+    return {"status": "error", "message": "The cTrader adapter did not return a command result in time."}
 
 
 def _write_status(login: int, payload: dict[str, Any]) -> None:
@@ -110,20 +113,10 @@ def _write_status(login: int, payload: dict[str, Any]) -> None:
     _status_path(login).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _normalize_terminal_path(path_value: str) -> str:
-    return sanitize_terminal_path(path_value)
-
-
-def _launch_terminal(terminal_path: str) -> tuple[bool, str]:
-    path = Path(terminal_path)
-    if not path.exists():
-        return False, f"Terminal executable not found: {terminal_path}"
-    try:
-        # Visible launch on purpose: user explicitly clicked Launch.
-        subprocess.Popen([str(path)])
-        return True, "Terminal launched."
-    except Exception as ex:
-        return False, f"Failed to launch terminal: {ex}"
+def _account_environment(account: dict[str, Any]) -> str:
+    """cTrader proxy to start on: "live" or "demo" (the adapter switches if the
+    account turns out to live on the other one)."""
+    return "live" if "live" in str(account.get("server", "") or "").lower() else "demo"
 
 
 def _read_status(login: int) -> dict[str, Any]:
@@ -189,8 +182,8 @@ def list_sessions(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if state == "connected" and not alive:
             state = "disconnected"
         if state in {"starting", "warning"} and alive:
-            # Keep UI optimistic while adapter is live and refreshing.
-            # Some MT5 sessions briefly return warning/None account_info during warmup.
+            # Keep UI optimistic while adapter is live and refreshing; the
+            # adapter reports warning/starting while its session warms up.
             state = "connected"
         sessions.append(
             {
@@ -238,7 +231,7 @@ def master_adapter_ready(config: dict[str, Any]) -> tuple[bool, str, int | None]
     state = str(target.get("state", "disconnected")).lower()
     alive = bool(target.get("alive"))
     # Treat live warning/starting states as ready to avoid false negatives while
-    # MT5 heartbeat is still stabilizing.
+    # the adapter heartbeat is still stabilizing.
     if state in {"warning", "starting"} and alive:
         state = "connected"
     if state != "connected":
@@ -256,7 +249,6 @@ def connect_account(account: dict[str, Any]) -> dict[str, Any]:
             {
                 "state": "connected",
                 "server": str(account.get("server", "") or ""),
-                "terminal_path": str(account.get("terminal_path", "") or ""),
                 "balance": float(account.get("balance", 0.0) or 0.0),
                 "equity": float(account.get("equity", account.get("balance", 0.0)) or 0.0),
                 "latency": 0.0,
@@ -265,36 +257,17 @@ def connect_account(account: dict[str, Any]) -> dict[str, Any]:
         )
         append_log("adapter", f"[INFO] Developer mode: mocked adapter connection for account {login}.")
         return {"status": "ok", "message": f"Developer mode connected account {login}"}
-    terminal_path = resolve_terminal_path(account.get("terminal_path", ""))
-    if not terminal_path:
-        return {"status": "error", "message": "Missing terminal path"}
+    access_token = str(account.get("password", "") or "").strip()
+    if not access_token:
+        return {"status": "error", "message": "Missing cTrader access token for this account."}
+    server = _account_environment(account)
 
     if _has_active_adapter(login):
         append_log("adapter", f"[INFO] Adapter already active for account {login}.")
         return {"status": "ok", "message": f"Adapter already active for {login}"}
 
     STATUS_DIR.mkdir(parents=True, exist_ok=True)
-    _write_status(
-        login,
-        {
-            "state": "starting",
-            "server": str(account.get("server", "") or ""),
-            "terminal_path": terminal_path,
-        },
-    )
-    launched, launch_message = _launch_terminal(terminal_path)
-    if not launched:
-        append_log("adapter", f"[ERROR] {launch_message}")
-        _write_status(
-            login,
-            {
-                "state": "error",
-                "server": str(account.get("server", "") or ""),
-                "terminal_path": terminal_path,
-                "error": launch_message,
-            },
-        )
-        return {"status": "error", "message": launch_message}
+    _write_status(login, {"state": "starting", "server": server})
 
     creation_flags = 0
     if sys.platform.startswith("win"):
@@ -306,12 +279,8 @@ def connect_account(account: dict[str, Any]) -> dict[str, Any]:
         WORKER_MODULE,
         "--login",
         str(login),
-        "--password",
-        str(account.get("password", "")),
         "--server",
-        str(account.get("server", "")),
-        "--terminal-path",
-        terminal_path,
+        server,
         "--status-file",
         str(_status_path(login)),
     ]
@@ -324,6 +293,7 @@ def connect_account(account: dict[str, Any]) -> dict[str, Any]:
             stdout=adapter_log,
             stderr=subprocess.STDOUT,
             creationflags=creation_flags,
+            env={**os.environ, ACCESS_TOKEN_ENV: access_token},
         )
     _adapter_processes[login] = proc
     time.sleep(0.25)
@@ -334,15 +304,14 @@ def connect_account(account: dict[str, Any]) -> dict[str, Any]:
             login,
             {
                 "state": "error",
-                "server": str(account.get("server", "") or ""),
-                "terminal_path": terminal_path,
+                "server": server,
                 "error": detail,
             },
         )
-        append_log("adapter", f"[ERROR] MT5 adapter for {login} stopped during startup: {detail}")
+        append_log("adapter", f"[ERROR] cTrader adapter for {login} stopped during startup: {detail}")
         return {"status": "error", "message": detail}
-    append_log("adapter", f"[INFO] {launch_message} Started MT5 adapter for account {login}.")
-    return {"status": "ok", "message": f"{launch_message} Started adapter for account {login}"}
+    append_log("adapter", f"[INFO] Started cTrader adapter for account {login} ({server}).")
+    return {"status": "ok", "message": f"Started cTrader adapter for account {login}"}
 
 
 def disconnect_account(login: int) -> dict[str, Any]:

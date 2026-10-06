@@ -1642,9 +1642,16 @@ class ZoneStrategyEngine:
                 "order_kind": order_kind,
                 "limit_price": placed.get("entry", entry_price) if order_kind == "LIMIT" else None,
                 "advanced": True,
-                # Already includes the spread, so none is added again.
-                "sl_price": placed.get("sl", final_sl),
-                "spread_pips": 0.0,
+                # The receiver adds the spread back, landing on the same
+                # final SL, and sizes the lot per its own "Include spread in
+                # risk" setting.
+                "sl_price": round(
+                    float(placed.get("sl", final_sl)) + self.spread_pips / 10.0
+                    if side == "BUY"
+                    else float(placed.get("sl", final_sl)) - self.spread_pips / 10.0,
+                    2,
+                ),
+                "spread_pips": self.spread_pips,
                 # With TP2 off, TP1 comes from `ratio`, not tp1_ratio.
                 "ratio": self.tp1_ratio,
                 "tp1_ratio": self.tp1_ratio,

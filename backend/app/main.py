@@ -88,6 +88,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "session_risk_amount": 0.0,
     "copy_trading_enabled": True,
     "stop_on_final_tp": True,
+    "spread_in_risk": True,
     "appearance": {
         "reduce_motion": False,
         "chart_candle_preset": "default",
@@ -121,6 +122,10 @@ class SessionRiskUpdate(BaseModel):
 
 
 class CopyTradingUpdate(BaseModel):
+    enabled: bool
+
+
+class SpreadRiskUpdate(BaseModel):
     enabled: bool
 
 
@@ -423,6 +428,9 @@ def _load_config() -> dict[str, Any]:
     config["session_risk_enabled"] = bool(config.get("session_risk_enabled", True)) and _session_risk_limit(config) > 0
     config["copy_trading_enabled"] = bool(config.get("copy_trading_enabled", True))
     config["stop_on_final_tp"] = bool(config.get("stop_on_final_tp", True))
+    config["spread_in_risk"] = bool(config.get("spread_in_risk", True))
+    config.pop("commission_enabled", None)
+    config.pop("commission_per_lot", None)
     config["appearance"] = _normalize_appearance(config.get("appearance"))
     config.pop("daily_risk_enabled", None)
     config.pop("daily_risk_percent", None)
@@ -1047,7 +1055,7 @@ def set_session_risk(payload: SessionRiskUpdate) -> dict[str, Any]:
         })
     elif _searches_running():
         if current_risk.get("active"):
-            # The running session keeps its starting equity; only the limit changes.
+            # The running session keeps its starting balance; only the limit changes.
             state_patch("session_risk", limits)
         else:
             _start_session_risk()
@@ -1100,6 +1108,21 @@ def set_final_tp_stop(payload: FinalTpStopUpdate) -> dict[str, Any]:
         else "[WARNING] Stop on final TP disabled: a scalping final TP no longer stops the search or closes positions.",
     )
     return {"status": "ok", "stop_on_final_tp": config["stop_on_final_tp"]}
+
+
+@app.patch("/settings/spread-risk")
+def set_spread_risk(payload: SpreadRiskUpdate) -> dict[str, Any]:
+    config = _load_config()
+    config["spread_in_risk"] = bool(payload.enabled)
+    _save_config(config)
+    _refresh_bootstrap_cache()
+    append_log(
+        "search",
+        "[INFO] Spread included in risk: lots are sized to the SL including the spread pips."
+        if payload.enabled
+        else "[WARNING] Spread excluded from risk: lots ignore the spread pips, so a stop-out loses more than the risk per trade.",
+    )
+    return {"status": "ok", "spread_in_risk": config["spread_in_risk"]}
 
 
 @app.patch("/settings/appearance")
@@ -1229,7 +1252,9 @@ def _searches_running() -> bool:
     )
 
 
-def _master_equity_snapshot() -> tuple[int, str, float]:
+def _master_balance_snapshot() -> tuple[int, str, float]:
+    """The master account's balance. Session risk is measured on balance, so
+    only closed trades count toward the limit; open positions don't."""
     config = _load_config()
     master_login = _safe_int(config.get("master_account_login"))
     master = next(
@@ -1242,14 +1267,14 @@ def _master_equity_snapshot() -> tuple[int, str, float]:
     if not master or master_login <= 0:
         raise RuntimeError("No master account is configured for session risk tracking.")
     if is_dev_mode():
-        equity = float(master.get("equity", master.get("balance", 0)) or 0)
+        balance = float(master.get("balance", 0) or 0)
     else:
         result = submit_adapter_command(master_login, "snapshot", {}, timeout_sec=5.0)
         account = result.get("account", {}) if result.get("status") == "ok" else {}
-        equity = float(account.get("equity", 0) or 0) if isinstance(account, dict) else 0.0
-    if equity <= 0:
-        raise RuntimeError("Could not verify master account equity for session risk tracking.")
-    return master_login, str(master.get("username") or master_login), equity
+        balance = float(account.get("balance", 0) or 0) if isinstance(account, dict) else 0.0
+    if balance <= 0:
+        raise RuntimeError("Could not verify master account balance for session risk tracking.")
+    return master_login, str(master.get("username") or master_login), balance
 
 
 def _start_session_risk() -> dict[str, Any]:
@@ -1264,7 +1289,7 @@ def _start_session_risk() -> dict[str, Any]:
         if previous.get("active") and _searches_running():
             return previous
         try:
-            login, name, equity = _master_equity_snapshot()
+            login, name, balance = _master_balance_snapshot()
         except Exception as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         session_id = secrets.token_hex(6)
@@ -1279,8 +1304,8 @@ def _start_session_risk() -> dict[str, Any]:
             "limit_amount": limit_amount,
             "session_id": session_id,
             "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "start_equity": equity,
-            "current_equity": equity,
+            "start_balance": balance,
+            "current_balance": balance,
             "loss_percent": 0.0,
             "loss_amount": 0.0,
             "reason": None,
@@ -1289,7 +1314,7 @@ def _start_session_risk() -> dict[str, Any]:
         }
         state_set("session_risk", status)
         limit_label = f"{limit_amount:.2f}" if mode == "amount" else f"{limit_percent:.2f}%"
-        append_log("search", f"[INFO] [session-risk] Session {session_id} started at master equity {equity:.2f}; limit {limit_label}.")
+        append_log("search", f"[INFO] [session-risk] Session {session_id} started at master balance {balance:.2f}; limit {limit_label}.")
         return status
 
 
@@ -1318,25 +1343,25 @@ def _session_risk_tick() -> None:
         state_patch("session_risk", {"active": False})
         return
     try:
-        login, name, equity = _master_equity_snapshot()
+        login, name, balance = _master_balance_snapshot()
     except Exception as exc:
-        # An unreadable equity (MT5 terminal disconnected, adapter busy past
+        # An unreadable balance (MT5 terminal disconnected, adapter busy past
         # the 5s snapshot timeout) is not a loss. Treating it as one used to
         # stop every search and close all positions on a mere disconnect.
         # Nothing can trade while the terminal is down, and the first
         # successful read afterwards still enforces the limit on real equity.
         if risk.get("verified", True):
-            append_log("search", f"[WARNING] [session-risk] Equity check paused: {exc} Searches keep running; retrying every 5s.")
+            append_log("search", f"[WARNING] [session-risk] Balance check paused: {exc} Searches keep running; retrying every 5s.")
         state_patch("session_risk", {"verified": False})
         return
     if not risk.get("verified", True):
-        append_log("search", f"[INFO] [session-risk] Equity readable again ({equity:.2f}); session risk check resumed.")
+        append_log("search", f"[INFO] [session-risk] Balance readable again ({balance:.2f}); session risk check resumed.")
         state_patch("session_risk", {"verified": True})
-    start_equity = float(risk.get("start_equity", 0) or 0)
-    loss_amount = max(0.0, start_equity - equity)
-    loss_percent = (loss_amount / start_equity * 100.0) if start_equity > 0 else 0.0
+    start_balance = float(risk.get("start_balance", 0) or 0)
+    loss_amount = max(0.0, start_balance - balance)
+    loss_percent = (loss_amount / start_balance * 100.0) if start_balance > 0 else 0.0
     state_patch("session_risk", {
-        "current_equity": equity,
+        "current_balance": balance,
         "loss_amount": loss_amount,
         "loss_percent": loss_percent,
         "mode": mode,
@@ -1350,7 +1375,7 @@ def _session_risk_tick() -> None:
     else:
         if loss_percent < limit_percent:
             return
-        reason = f"Session risk limit reached ({loss_percent:.2f}% loss of session starting equity). Searches stopped and connected account positions are being closed."
+        reason = f"Session risk limit reached ({loss_percent:.2f}% loss of session starting balance). Searches stopped and connected account positions are being closed."
     state_patch("session_risk", {
         "active": False,
         "hit": True,

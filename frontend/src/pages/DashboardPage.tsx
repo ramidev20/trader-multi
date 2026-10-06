@@ -1,7 +1,7 @@
 ﻿import React, { useMemo, useState } from "react";
 import {
   Activity,
-  CircleDollarSign,
+  Wallet,
   Gauge,
   Layers,
   Percent,
@@ -333,7 +333,7 @@ function AccountProgressTab({ accountsData }) {
           label="Balance"
           value={money(selected.balance)}
           hint=""
-          icon={CircleDollarSign}
+          icon={Wallet}
           tone="blue"
         />
         <MetricCard
@@ -461,7 +461,7 @@ export default function DashboardPage({
               label="Total Balance"
               value={money(totals.balance)}
               hint="Across master and sub accounts"
-              icon={CircleDollarSign}
+              icon={Wallet}
               tone="green"
             />
             <MetricCard

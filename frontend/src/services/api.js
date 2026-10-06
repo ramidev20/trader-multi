@@ -42,6 +42,7 @@ export const api = {
   saveZoom: (ui_zoom_percent) => request("/settings/zoom", { method: "PATCH", body: JSON.stringify({ ui_zoom_percent }) }),
   // payload: any of { mode: "percent" | "amount", session_risk_percent, session_risk_amount, enabled }
   saveSessionRisk: (payload) => request("/settings/session-risk", { method: "PATCH", body: JSON.stringify(payload) }),
+  saveSpreadRisk: (enabled) => request("/settings/spread-risk", { method: "PATCH", body: JSON.stringify({ enabled }) }),
   saveFinalTpStop: (enabled) => request("/settings/final-tp-stop", { method: "PATCH", body: JSON.stringify({ enabled }) }),
   saveCopyTrading: (enabled) => request("/settings/copy-trading", { method: "PATCH", body: JSON.stringify({ enabled }) }),
   saveAppearance: (payload) => request("/settings/appearance", { method: "PATCH", body: JSON.stringify(payload) }),

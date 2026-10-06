@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowRightLeft,
   Bell,
   CandlestickChart,
   Copy,
@@ -445,6 +446,7 @@ function PreferencesTab({
     receiver_url: "",
   });
   const [stopOnFinalTp, setStopOnFinalTp] = useState(true);
+  const [spreadInRisk, setSpreadInRisk] = useState(true);
   const [busy, setBusy] = useState("");
 
   useEffect(() => {
@@ -476,6 +478,7 @@ function PreferencesTab({
               }),
         });
         setStopOnFinalTp(settings?.stop_on_final_tp !== false);
+        setSpreadInRisk(settings?.spread_in_risk !== false);
         setRemote({
           enabled: Boolean(settings?.remote_control?.enabled),
           token: String(settings?.remote_control?.token || ""),
@@ -585,6 +588,24 @@ function PreferencesTab({
     }
   }
 
+  async function toggleSpreadInRisk(enabled) {
+    setBusy("spread");
+    setSpreadInRisk(enabled);
+    try {
+      await api.saveSpreadRisk(enabled);
+      notify(
+        enabled
+          ? "Spread included: lots are sized to the SL including the spread pips."
+          : "Spread excluded: a stop-out now loses more than the risk per trade.",
+      );
+    } catch (error) {
+      setSpreadInRisk(!enabled);
+      notify(errorText(error), "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function toggleCopyTrading(enabled) {
     setBusy("copy");
     onCopyTradingChange?.(enabled);
@@ -647,12 +668,6 @@ function PreferencesTab({
     }
   }
 
-  const subAccounts = accountsData.filter(
-    (account) => account.role !== "MASTER",
-  );
-  const connectedSubs = subAccounts.filter(
-    (account) => account.status === "Connected",
-  );
   const liveRisk = runtime?.session_risk;
   const logCounts = {
     search: runtime?.logs?.search?.length ?? 0,
@@ -666,11 +681,11 @@ function PreferencesTab({
       <Section
         icon={ShieldAlert}
         title="Session Risk Guard"
-        description="Tracks the master account from the start of a search session. On limit, every search stops and connected positions are closed. The session resets when all searches stop."
+        description="Tracks the master account's balance (closed trades) from the start of a search session. On limit, every search stops and connected positions are closed. The session resets when all searches stop."
         aside={<StatusPill on={sessionRisk.enabled} />}
         className="xl:col-span-2"
       >
-        <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-4 lg:grid-cols-2">
           <div className="flex flex-col rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -717,7 +732,7 @@ function PreferencesTab({
               <p className="mt-4 rounded-lg bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">
                 Live session: {money(Number(liveRisk.loss_amount || 0))} loss (
                 {Number(liveRisk.loss_percent || 0).toFixed(2)}%) from{" "}
-                {money(Number(liveRisk.start_equity || 0))} starting equity.
+                {money(Number(liveRisk.start_balance || 0))} starting balance.
               </p>
             ) : liveRisk?.hit ? (
               <p className="mt-4 rounded-lg bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">
@@ -730,8 +745,8 @@ function PreferencesTab({
             <p className="text-sm font-black text-slate-900">Limit type</p>
             <p className="mt-0.5 text-xs leading-5 text-slate-500">
               {isAmountMode
-                ? "Stop after losing a fixed amount of master equity."
-                : "Stop after losing a percent of the session's starting equity."}
+                ? "Stop after losing a fixed amount of master balance."
+                : "Stop after losing a percent of the session's starting balance."}
             </p>
             <div className="mt-2.5">
               <Segmented
@@ -746,17 +761,41 @@ function PreferencesTab({
               />
             </div>
           </div>
-          <div className="flex flex-col rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 lg:col-span-2 xl:col-span-1">
+        </div>
+      </Section>
+
+      <Section
+        icon={ArrowRightLeft}
+        title="Trade"
+        description="How trades are copied, sized and closed. Applies to manual, search and scalping trades."
+        className="xl:col-span-2"
+      >
+        <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(260px,1fr))]">
+          <div className="flex flex-col rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-black text-slate-900">Copy trades to sub accounts</p>
+                <p className="mt-0.5 text-xs leading-5 text-slate-500">
+                  Copy master trades to connected sub accounts, each sized by its own risk. Close-all still closes
+                  sub positions.
+                </p>
+              </div>
+              <Switch
+                label="Copy trades to sub accounts"
+                checked={copyTradingEnabled}
+                onChange={toggleCopyTrading}
+                disabled={busy === "copy"}
+              />
+            </div>
+          </div>
+          <div className="flex flex-col rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-sm font-black text-slate-900">
                   Stop scalping on final TP
                 </p>
                 <p className="mt-0.5 text-xs leading-5 text-slate-500">
-                  When a scalping position hits its final TP (not TP1/TP2
-                  partial closes), stop the scalping search and close all
-                  positions. When off, the search keeps running and other
-                  positions stay open.
+                  On a scalping final TP (not TP1/TP2), stop the search and close all positions.
                 </p>
               </div>
               <Switch
@@ -776,71 +815,27 @@ function PreferencesTab({
             >
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               {stopOnFinalTp
-                ? "Recommended: keep this on. It locks in the session after a winning trade."
-                : "Not recommended: with this off, scalping keeps opening trades after a final TP and open positions are not closed."}
+                ? "Recommended: keep this on."
+                : "Not recommended: scalping keeps trading and positions stay open."}
             </p>
           </div>
-        </div>
-      </Section>
-
-      <Section
-        icon={Copy}
-        title="Copy Trading"
-        description="Copies every master trade (manual, search and scalping) to connected sub accounts, each sized by its own risk per trade."
-        aside={<StatusPill on={copyTradingEnabled} />}
-      >
-        <ToggleRow
-          label="Copy trades to sub accounts"
-          description="When off, trades open on the master account only. Close-all still closes sub account positions."
-          checked={copyTradingEnabled}
-          onChange={toggleCopyTrading}
-          disabled={busy === "copy"}
-        />
-        <div className="mt-4 space-y-2">
-          {subAccounts.length === 0 ? (
-            <p className="text-xs font-semibold text-slate-500">
-              No sub accounts yet. Add one from the Dashboard.
-            </p>
-          ) : (
-            subAccounts.map((account) => (
-              <div
-                key={account.id}
-                className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-slate-900">
-                    {account.name}
-                  </p>
-                  <p className="text-[11px] font-semibold text-slate-500">
-                    Risk {riskLabel(account)} · delay{" "}
-                    {account.orderDelaySec ?? 0}s
-                  </p>
-                </div>
-                <span
-                  className={cx(
-                    "rounded-full px-2 py-0.5 text-[10px] font-black",
-                    !copyTradingEnabled
-                      ? "bg-slate-100 text-slate-500"
-                      : account.status === "Connected"
-                        ? "bg-emerald-50 text-emerald-700"
-                        : "bg-amber-50 text-amber-700",
-                  )}
-                >
-                  {!copyTradingEnabled
-                    ? "Paused"
-                    : account.status === "Connected"
-                      ? "Copying"
-                      : "Not connected"}
-                </span>
+          <div className="flex flex-col rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-black text-slate-900">Include spread in risk</p>
+                <p className="mt-0.5 text-xs leading-5 text-slate-500">
+                  Size the lot to the SL including spread pips, so a stop-out loses exactly your risk per trade. Off:
+                  you lose risk + spread.
+                </p>
               </div>
-            ))
-          )}
-          {subAccounts.length ? (
-            <p className="text-[11px] font-semibold text-slate-500">
-              {connectedSubs.length}/{subAccounts.length} sub account(s)
-              connected.
-            </p>
-          ) : null}
+              <Switch
+                label="Include spread in risk"
+                checked={spreadInRisk}
+                onChange={toggleSpreadInRisk}
+                disabled={!loaded || busy === "spread"}
+              />
+            </div>
+          </div>
         </div>
       </Section>
 
@@ -897,9 +892,8 @@ function PreferencesTab({
         icon={ScrollText}
         title="Logs"
         description="Each log keeps its latest 500 lines. Clearing removes them from this app only; trades and history are not affected."
-        className="xl:col-span-2"
       >
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3">
           {[
             [
               "search",

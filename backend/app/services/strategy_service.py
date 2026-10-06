@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -140,6 +141,13 @@ def account_risk_label(account: dict | None) -> str:
 
 def copy_trading_enabled(cfg: dict | None) -> bool:
     return bool((cfg or {}).get("copy_trading_enabled", True))
+
+
+def spread_in_risk_enabled(cfg: dict | None = None) -> bool:
+    """Settings > Preferences > Trade > Include spread in risk (default on):
+    size the lot to the SL including the spread pips added beyond it, so the
+    loss at the SL equals the risk per trade."""
+    return bool((cfg if cfg is not None else _load_config()).get("spread_in_risk", True))
 
 
 def stop_on_final_tp_enabled(cfg: dict | None = None) -> bool:
@@ -290,7 +298,9 @@ def _normalize_volume(symbol: str, volume: float) -> float:
     if step <= 0:
         step = 0.01
 
-    stepped = max(min_volume, (raw_volume // step) * step)
+    # Round down to the step, but with a tiny tolerance: 0.75 / 0.01 is
+    # 74.99999... in floating point, which a plain floor turned into 0.74.
+    stepped = max(min_volume, math.floor(raw_volume / step + 1e-9) * step)
     capped = min(stepped, max_volume)
     precision = 2
     step_text = f"{step:.10f}".rstrip("0").rstrip(".")
@@ -391,6 +401,7 @@ def _verify_mt5_login(expected_login: int) -> tuple[bool, str]:
 
 def _build_copy_request(master_request: dict, risk_percent: float, origin: str, risk_amount: float = 0.0) -> dict:
     req = dict(master_request)
+    sizing_spread_offset = float(req.pop("_spread_price_offset", 0.0) or 0.0)
     fallback_volume = float(master_request.get("volume", 0.01) or 0.01)
     req["comment"] = f"{origin} copy"
     req["magic"] = int(master_request.get("magic", 1000) or 1000) + 1
@@ -426,12 +437,16 @@ def _build_copy_request(master_request: dict, risk_percent: float, origin: str, 
             req["tp"] = round(price - (master_price - master_tp), 2)
         if master_sl:
             req["sl"] = round(price + (master_sl - master_price), 2)
+    copy_is_buy = order_type in {mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT}
+    sizing_sl = float(req.get("sl", master_sl) or master_sl)
+    if sizing_spread_offset > 0 and sizing_sl > 0:
+        sizing_sl = sizing_sl + sizing_spread_offset if copy_is_buy else sizing_sl - sizing_spread_offset
     req["volume"] = round(
         _risk_adjusted_volume(
             symbol,
-            mt5.ORDER_TYPE_BUY if order_type in {mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT} else mt5.ORDER_TYPE_SELL,
+            mt5.ORDER_TYPE_BUY if copy_is_buy else mt5.ORDER_TYPE_SELL,
             float(req.get("price", master_price) or master_price),
-            float(req.get("sl", master_sl) or master_sl),
+            sizing_sl,
             float(risk_percent or 0.0),
             fallback_volume,
             risk_amount=float(risk_amount or 0.0),
@@ -1154,13 +1169,22 @@ def open_manual_position(
     if risk_distance <= 0:
         raise RuntimeError("Stop Loss must be different from the entry price.")
 
+    # The SL always sits beyond the spread pips. With "Include spread in
+    # risk" off, the lot is sized as if the spread weren't there, so the loss
+    # at the SL is the risk plus the spread part.
+    exclude_spread = spread_price_offset > 0 and not spread_in_risk_enabled()
+    sizing_stop = (
+        (stop_loss + spread_price_offset if is_buy else stop_loss - spread_price_offset)
+        if exclude_spread
+        else stop_loss
+    )
     effective_lot = float(lot_size or 0.0)
     if risk_amount > 0 or (risk_percent is not None and float(risk_percent) > 0):
         effective_lot = _risk_adjusted_volume(
             symbol,
             mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
             entry_price,
-            stop_loss,
+            sizing_stop,
             float(risk_percent or 0.0),
             effective_lot or 0.01,
             risk_amount=risk_amount,
@@ -1267,10 +1291,13 @@ def open_manual_position(
             },
             order_sink,
         )
+        copy_request = dict(request)
+        if exclude_spread:
+            copy_request["_spread_price_offset"] = spread_price_offset
         if after_master_order is not None:
-            copy_summary = after_master_order(dict(request))
+            copy_summary = after_master_order(copy_request)
         elif copy_to_sub_accounts:
-            copy_summary = _clone_trade_to_sub_accounts(request, origin="manual")
+            copy_summary = _clone_trade_to_sub_accounts(copy_request, origin="manual")
         else:
             copy_summary = None
         copy_suffix = f" ({copy_summary})" if copy_summary else ""

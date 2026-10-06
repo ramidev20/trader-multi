@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import asyncio
 from copy import deepcopy
@@ -32,6 +33,8 @@ from .services.strategy_service import (
     close_all_positions,
     calculate_manual_lot,
     copy_to_sub_adapters_in_background,
+    account_risk,
+    account_risk_label,
     _tick_for,
 )
 from .services.task_manager import set_runtime_logger, start_task, stop_task
@@ -80,7 +83,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "theme_mode": "LIGHT",
     "ui_zoom_percent": 100,
     "session_risk_enabled": True,
+    "session_risk_mode": "percent",
     "session_risk_percent": 2.0,
+    "session_risk_amount": 0.0,
+    "copy_trading_enabled": True,
+    "appearance": {
+        "reduce_motion": False,
+        "chart_candle_preset": "default",
+        "chart_up_color": "",
+        "chart_down_color": "",
+        "chart_grid": True,
+        "chart_crosshair": "normal",
+    },
     "notification_settings": {
         "enabled": True,
         "show_warnings": True,
@@ -99,8 +113,23 @@ class ZoomUpdate(BaseModel):
 
 
 class SessionRiskUpdate(BaseModel):
-    session_risk_percent: float
+    session_risk_percent: float | None = None
+    session_risk_amount: float | None = None
+    mode: str | None = None
     enabled: bool | None = None
+
+
+class CopyTradingUpdate(BaseModel):
+    enabled: bool
+
+
+class AppearanceUpdate(BaseModel):
+    reduce_motion: bool | None = None
+    chart_candle_preset: str | None = None
+    chart_up_color: str | None = None
+    chart_down_color: str | None = None
+    chart_grid: bool | None = None
+    chart_crosshair: str | None = None
 
 
 class SearchConfigUpdate(BaseModel):
@@ -148,6 +177,8 @@ class AccountPayload(BaseModel):
     color: str | None = None
     risk_percent: float | None = None
     risk_multiplier: float | None = None
+    risk_mode: str = "percent"
+    risk_amount: float | None = None
     order_delay_sec: int = 0
 
 
@@ -174,6 +205,7 @@ class OpenPositionPayload(BaseModel):
     tp_in_pips: bool = False
     sl_in_pips: bool = False
     risk_percent: float | None = None
+    risk_amount: float | None = None
     advanced: bool = False
     sl_price: float | None = None
     spread_pips: float = 0.0
@@ -220,7 +252,7 @@ def _execute_remote_command(action_name: str, data: dict[str, Any]) -> dict[str,
     raise ValueError(f"Unsupported remote action: {action_name}")
 
 
-def _receiver_open_settings(data: dict[str, Any]) -> tuple[dict[str, Any], int, float, int]:
+def _receiver_open_settings(data: dict[str, Any]) -> tuple[dict[str, Any], int, str, int]:
     """Force remote opens to use this receiver's account configuration."""
     config = _load_config()
     accounts = config.get("trading_accounts", [])
@@ -238,12 +270,13 @@ def _receiver_open_settings(data: dict[str, Any]) -> tuple[dict[str, Any], int, 
     if not master:
         raise RuntimeError("No receiver master account is configured.")
     receiver_login = int(master.get("user", 0) or 0)
-    risk_percent = float(master.get("risk_percent", master.get("risk_multiplier", 1.0)) or 1.0)
+    risk_percent, risk_amount = account_risk(master)
     delay_seconds = max(0, int(master.get("order_delay_sec", master.get("orderDelaySec", 0)) or 0))
     receiver_data = dict(data)
     receiver_data["risk_percent"] = risk_percent
+    receiver_data["risk_amount"] = risk_amount
     receiver_data["lot"] = None
-    return receiver_data, receiver_login, risk_percent, delay_seconds
+    return receiver_data, receiver_login, account_risk_label(master), delay_seconds
 
 
 class LotCalculationPayload(BaseModel):
@@ -359,6 +392,8 @@ def _load_config() -> dict[str, Any]:
         account.pop("risk_multiplier", None)
         account.pop("orderDelaySec", None)
         account["order_delay_sec"] = int(account.get("order_delay_sec", 0) or 0)
+        account["risk_mode"] = "amount" if str(account.get("risk_mode", "percent")).lower() == "amount" else "percent"
+        account["risk_amount"] = max(0.0, _safe_float(account.get("risk_amount")))
     if not isinstance(config.get("search_config"), dict):
         config["search_config"] = dict(DEFAULT_CONFIG["search_config"])
     if not isinstance(config.get("remote_control"), dict):
@@ -377,11 +412,12 @@ def _load_config() -> dict[str, Any]:
         "show_info": bool(config["notification_settings"].get("show_info", False)),
     }
     config["ui_zoom_percent"] = min(150, max(70, int(config.get("ui_zoom_percent", 100) or 100)))
-    try:
-        config["session_risk_percent"] = min(100.0, max(0.0, float(config.get("session_risk_percent", 0) or 0)))
-    except (TypeError, ValueError):
-        config["session_risk_percent"] = 0.0
-    config["session_risk_enabled"] = bool(config.get("session_risk_enabled", True)) and config["session_risk_percent"] > 0
+    config["session_risk_percent"] = min(100.0, max(0.0, _safe_float(config.get("session_risk_percent"))))
+    config["session_risk_amount"] = max(0.0, _safe_float(config.get("session_risk_amount")))
+    config["session_risk_mode"] = "amount" if str(config.get("session_risk_mode", "percent")).lower() == "amount" else "percent"
+    config["session_risk_enabled"] = bool(config.get("session_risk_enabled", True)) and _session_risk_limit(config) > 0
+    config["copy_trading_enabled"] = bool(config.get("copy_trading_enabled", True))
+    config["appearance"] = _normalize_appearance(config.get("appearance"))
     config.pop("daily_risk_enabled", None)
     config.pop("daily_risk_percent", None)
     config.pop("daily_risk_hit_day", None)
@@ -399,6 +435,41 @@ def _load_config() -> dict[str, Any]:
     config.pop("terminal_path", None)
     config.pop("copy_accounts", None)
     return config
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _session_risk_limit(config: dict[str, Any]) -> float:
+    """The active session loss limit: an amount or a percent, per the mode."""
+    if config.get("session_risk_mode") == "amount":
+        return _safe_float(config.get("session_risk_amount"))
+    return _safe_float(config.get("session_risk_percent"))
+
+
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+CHART_CANDLE_PRESETS = {"default", "classic", "teal", "mono", "blue", "custom"}
+
+
+def _normalize_appearance(value: Any) -> dict[str, Any]:
+    defaults = DEFAULT_CONFIG["appearance"]
+    source = value if isinstance(value, dict) else {}
+    preset = str(source.get("chart_candle_preset", defaults["chart_candle_preset"]) or "default").lower()
+    up_color = str(source.get("chart_up_color", "") or "")
+    down_color = str(source.get("chart_down_color", "") or "")
+    crosshair = str(source.get("chart_crosshair", defaults["chart_crosshair"]) or "normal").lower()
+    return {
+        "reduce_motion": bool(source.get("reduce_motion", defaults["reduce_motion"])),
+        "chart_candle_preset": preset if preset in CHART_CANDLE_PRESETS else "default",
+        "chart_up_color": up_color if _HEX_COLOR.match(up_color) else "",
+        "chart_down_color": down_color if _HEX_COLOR.match(down_color) else "",
+        "chart_grid": bool(source.get("chart_grid", defaults["chart_grid"])),
+        "chart_crosshair": crosshair if crosshair in {"normal", "magnet"} else "normal",
+    }
 
 
 def _save_config(config: dict[str, Any]) -> None:
@@ -471,6 +542,8 @@ def _to_front_account(index: int, account: dict[str, Any], session: dict[str, An
         "equity": equity,
         "pnl": pnl,
         "risk": float(account.get("risk_percent", account.get("risk_multiplier", 1.0)) or 1.0),
+        "riskMode": "amount" if str(account.get("risk_mode", "percent")).lower() == "amount" else "percent",
+        "riskAmount": _safe_float(account.get("risk_amount")),
         "orderDelaySec": int(account.get("order_delay_sec", account.get("orderDelaySec", 0)) or 0),
         "latency": float((session or {}).get("latency", 0.0) or 0.0) or None,
         "algoEnabled": (session or {}).get("algo_enabled"),
@@ -899,8 +972,8 @@ def get_settings() -> dict[str, Any]:
 @app.patch("/settings/theme")
 def set_theme(payload: ThemeUpdate) -> dict[str, str]:
     mode = payload.theme_mode.upper()
-    if mode not in {"LIGHT", "DARK"}:
-        raise HTTPException(status_code=400, detail="theme_mode must be LIGHT or DARK")
+    if mode not in {"LIGHT", "DARK", "SYSTEM"}:
+        raise HTTPException(status_code=400, detail="theme_mode must be LIGHT, DARK or SYSTEM")
     config = _load_config()
     config["theme_mode"] = mode
     _save_config(config)
@@ -929,46 +1002,93 @@ def set_ui_zoom(payload: ZoomUpdate) -> dict[str, str | int]:
 
 @app.patch("/settings/session-risk")
 def set_session_risk(payload: SessionRiskUpdate) -> dict[str, Any]:
-    value = float(payload.session_risk_percent)
-    if not 0 <= value <= 100:
-        raise HTTPException(status_code=400, detail="Session risk must be between 0 and 100 percent.")
     config = _load_config()
-    config["session_risk_percent"] = value
+    if payload.mode is not None:
+        mode = str(payload.mode).lower()
+        if mode not in {"percent", "amount"}:
+            raise HTTPException(status_code=400, detail="Session risk mode must be 'percent' or 'amount'.")
+        config["session_risk_mode"] = mode
+    if payload.session_risk_percent is not None:
+        value = float(payload.session_risk_percent)
+        if not 0 <= value <= 100:
+            raise HTTPException(status_code=400, detail="Session risk must be between 0 and 100 percent.")
+        config["session_risk_percent"] = value
+    if payload.session_risk_amount is not None:
+        amount = float(payload.session_risk_amount)
+        if amount < 0:
+            raise HTTPException(status_code=400, detail="Session risk amount cannot be negative.")
+        config["session_risk_amount"] = amount
     enabled = payload.enabled if payload.enabled is not None else bool(config.get("session_risk_enabled", True))
-    config["session_risk_enabled"] = bool(enabled and value > 0)
+    config["session_risk_enabled"] = bool(enabled and _session_risk_limit(config) > 0)
     _save_config(config)
     _refresh_bootstrap_cache()
     current_risk = _session_risk_state()
+    limits = {
+        "mode": config["session_risk_mode"],
+        "limit_percent": config["session_risk_percent"],
+        "limit_amount": config["session_risk_amount"],
+    }
     if not config["session_risk_enabled"]:
         state_patch("session_risk", {
             **current_risk,
+            **limits,
             "enabled": False,
             "active": False,
             "hit": False,
             "master_hit": False,
             "verified": False,
-            "limit_percent": value,
             "reason": None,
         })
     elif _searches_running():
-        _start_session_risk()
+        if current_risk.get("active"):
+            # The running session keeps its starting equity; only the limit changes.
+            state_patch("session_risk", limits)
+        else:
+            _start_session_risk()
     else:
         state_patch("session_risk", {
             **current_risk,
+            **limits,
             "enabled": True,
             "active": False,
             "hit": False,
             "master_hit": False,
             "verified": False,
-            "limit_percent": value,
             "reason": None,
         })
     return {
         "status": "ok",
-        "session_risk_percent": value,
+        "session_risk_mode": config["session_risk_mode"],
+        "session_risk_percent": config["session_risk_percent"],
+        "session_risk_amount": config["session_risk_amount"],
         "session_risk_enabled": config["session_risk_enabled"],
         "session_risk": _session_risk_state(),
     }
+
+
+@app.patch("/settings/copy-trading")
+def set_copy_trading(payload: CopyTradingUpdate) -> dict[str, Any]:
+    config = _load_config()
+    config["copy_trading_enabled"] = bool(payload.enabled)
+    _save_config(config)
+    _refresh_bootstrap_cache()
+    append_log(
+        "search",
+        "[INFO] Copy trading enabled: master trades are copied to connected sub accounts."
+        if payload.enabled
+        else "[WARNING] Copy trading disabled: master trades are no longer copied to sub accounts.",
+    )
+    return {"status": "ok", "copy_trading_enabled": config["copy_trading_enabled"]}
+
+
+@app.patch("/settings/appearance")
+def set_appearance(payload: AppearanceUpdate) -> dict[str, Any]:
+    config = _load_config()
+    changes = {key: value for key, value in payload.model_dump().items() if value is not None}
+    config["appearance"] = _normalize_appearance({**config["appearance"], **changes})
+    _save_config(config)
+    _refresh_bootstrap_cache()
+    return {"status": "ok", "appearance": config["appearance"]}
 
 
 @app.patch("/settings/notifications")
@@ -1014,6 +1134,10 @@ def save_account(payload: AccountPayload) -> dict[str, Any]:
         else (payload.risk_multiplier or 1.0)
     )
     account_data.pop("risk_multiplier", None)
+    account_data["risk_mode"] = "amount" if str(payload.risk_mode).lower() == "amount" else "percent"
+    account_data["risk_amount"] = max(0.0, float(payload.risk_amount or 0.0))
+    if account_data["risk_mode"] == "amount" and account_data["risk_amount"] <= 0:
+        raise HTTPException(status_code=400, detail="Enter a risk amount above 0, or switch the account back to percent risk.")
     account_data["terminal_path"] = _sanitize_terminal_path(account_data.get("terminal_path", ""))
 
     for idx, existing in enumerate(accounts):
@@ -1109,9 +1233,11 @@ def _master_equity_snapshot() -> tuple[int, str, float]:
 
 def _start_session_risk() -> dict[str, Any]:
     config = _load_config()
-    limit_percent = float(config.get("session_risk_percent", 0) or 0)
-    if not config.get("session_risk_enabled", False) or limit_percent <= 0:
+    if not config.get("session_risk_enabled", False) or _session_risk_limit(config) <= 0:
         return _session_risk_state()
+    mode = config["session_risk_mode"]
+    limit_percent = float(config["session_risk_percent"])
+    limit_amount = float(config["session_risk_amount"])
     with _session_risk_lock:
         previous = _session_risk_state()
         if previous.get("active") and _searches_running():
@@ -1127,7 +1253,9 @@ def _start_session_risk() -> dict[str, Any]:
             "hit": False,
             "master_hit": False,
             "verified": True,
+            "mode": mode,
             "limit_percent": limit_percent,
+            "limit_amount": limit_amount,
             "session_id": session_id,
             "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "start_equity": equity,
@@ -1139,7 +1267,8 @@ def _start_session_risk() -> dict[str, Any]:
             "hit_accounts": [],
         }
         state_set("session_risk", status)
-        append_log("search", f"[INFO] [session-risk] Session {session_id} started at master equity {equity:.2f}; limit {limit_percent:.2f}%.")
+        limit_label = f"{limit_amount:.2f}" if mode == "amount" else f"{limit_percent:.2f}%"
+        append_log("search", f"[INFO] [session-risk] Session {session_id} started at master equity {equity:.2f}; limit {limit_label}.")
         return status
 
 
@@ -1153,8 +1282,10 @@ def _finish_session_risk_if_idle() -> dict[str, Any]:
 
 def _session_risk_tick() -> None:
     config = _load_config()
-    limit_percent = float(config.get("session_risk_percent", 0) or 0)
-    if not config.get("session_risk_enabled", False) or limit_percent <= 0:
+    mode = config["session_risk_mode"]
+    limit_percent = float(config["session_risk_percent"])
+    limit_amount = float(config["session_risk_amount"])
+    if not config.get("session_risk_enabled", False) or _session_risk_limit(config) <= 0:
         risk = _session_risk_state()
         if risk.get("enabled") or risk.get("active"):
             state_patch("session_risk", {"enabled": False, "active": False, "hit": False, "master_hit": False})
@@ -1187,11 +1318,18 @@ def _session_risk_tick() -> None:
         "current_equity": equity,
         "loss_amount": loss_amount,
         "loss_percent": loss_percent,
+        "mode": mode,
         "limit_percent": limit_percent,
+        "limit_amount": limit_amount,
     })
-    if loss_percent < limit_percent:
-        return
-    reason = f"Session risk limit reached ({loss_percent:.2f}% loss of session starting equity). Searches stopped and connected account positions are being closed."
+    if mode == "amount":
+        if loss_amount < limit_amount:
+            return
+        reason = f"Session risk limit reached ({loss_amount:.2f} loss of the {limit_amount:.2f} session limit). Searches stopped and connected account positions are being closed."
+    else:
+        if loss_percent < limit_percent:
+            return
+        reason = f"Session risk limit reached ({loss_percent:.2f}% loss of session starting equity). Searches stopped and connected account positions are being closed."
     state_patch("session_risk", {
         "active": False,
         "hit": True,
@@ -1248,6 +1386,7 @@ def account_snapshots() -> dict[str, Any]:
             "balance": float(account_data.get("balance", 0.0) or 0.0),
             "equity": float(account_data.get("equity", 0.0) or 0.0),
             "floating_pnl": floating_pnl,
+            "open_positions": sum(1 for position in positions if isinstance(position, dict)),
             "realized_today": float(account_data.get("realized_today", 0.0) or 0.0),
             "daily_history_available": bool(account_data.get("daily_history_available", False)),
             "latency": account_data.get("latency"),
@@ -1553,7 +1692,7 @@ def open_position(payload: OpenPositionPayload, mirror_remote: bool = True) -> d
     except TypeError:
         payload_data = payload.model_dump()
     # Receivers size the lot from their own Risk % (_receiver_open_settings).
-    remote_data = {key: value for key, value in payload_data.items() if key not in {"risk_percent", "lot"}}
+    remote_data = {key: value for key, value in payload_data.items() if key not in {"risk_percent", "risk_amount", "lot"}}
     if not is_dev_mode():
         # Never initialize MT5 from the API process. Doing so can take over the
         # terminal session that belongs to the long-running adapter process.
@@ -1587,6 +1726,7 @@ def open_position(payload: OpenPositionPayload, mirror_remote: bool = True) -> d
             tp_in_pips=bool(payload.tp_in_pips),
             sl_in_pips=bool(payload.sl_in_pips),
             risk_percent=payload.risk_percent,
+            risk_amount=payload.risk_amount,
             advanced=bool(payload.advanced),
             sl_price=payload.sl_price,
             spread_pips=float(payload.spread_pips or 0.0),
@@ -1829,11 +1969,11 @@ async def remote_command_socket(websocket: WebSocket) -> None:
         try:
             if action_name == "open":
                 data, receiver_login, receiver_risk, receiver_delay = _receiver_open_settings(data)
-                append_log("adapter", f"[REMOTE] Using receiver account {receiver_login} risk {receiver_risk:.2f}% for {command_id}.")
+                append_log("adapter", f"[REMOTE] Using receiver account {receiver_login} risk {receiver_risk} for {command_id}.")
                 await send_safe({
                     "type": "log",
                     "level": "info",
-                    "message": f"Receiver account {receiver_login} risk {receiver_risk:.2f}% selected for the remote order.",
+                    "message": f"Receiver account {receiver_login} risk {receiver_risk} selected for the remote order.",
                 })
                 await send_safe({
                     "type": "log",

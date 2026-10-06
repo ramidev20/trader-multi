@@ -2,8 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* CSS `zoom` on <html> (Settings > Appearance > Interface scale) scales vh
+   units too, so a plain 100vh layout stopped short of the window bottom
+   below 100% and left a blank strip. --app-zoom is set by App. */
+:root {
+  --app-vh: calc(100vh / var(--app-zoom, 1));
+}
+
 body {
   font-family: "Inter", "Segoe UI", sans-serif;
+  background: #f1f5f9;
 }
 
 /* Neutral charcoal palette (VS Code / TradingView dark, not the previous
@@ -361,4 +369,20 @@ html[data-theme="DARK"] .topo-line {
    the selection band against the dialog; use the source's dark band colour. */
 html[data-theme="DARK"] .ios-time-picker-band {
   background-color: #2c2c2f !important;
+}
+
+/* Settings > Appearance > Reduce motion: drop UI transitions and animations
+   (framer-motion page transitions are turned off separately in App). */
+html[data-reduce-motion="true"] *,
+html[data-reduce-motion="true"] *::before,
+html[data-reduce-motion="true"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+/* Loading spinners still need to spin to read as "working". */
+html[data-reduce-motion="true"] .animate-spin {
+  animation-duration: 1s !important;
+  animation-iteration-count: infinite !important;
 }

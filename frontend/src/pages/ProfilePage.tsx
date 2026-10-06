@@ -1,6 +1,6 @@
 import React from "react";
 import { Card } from "../components/ui/Primitives";
-import { cx, money } from "../utils/format";
+import { cx, money, riskLabel } from "../utils/format";
 
 export function ProfilePage({
   accountsData = [],
@@ -112,7 +112,7 @@ export function ProfilePage({
                   <span>
                     Risk:{" "}
                     <strong className="text-slate-700">
-                      {Number(account.risk || 0).toFixed(2)}%
+                      {riskLabel(account)}
                     </strong>
                   </span>
                   <span>

@@ -3,6 +3,7 @@ import {
   Activity,
   CircleDollarSign,
   Gauge,
+  Layers,
   Percent,
   Play,
   RefreshCcw,
@@ -31,12 +32,12 @@ function TradingViewProgressChart({ data }) {
         textColor: palette.text,
       },
       grid: {
-        vertLines: { color: palette.grid },
-        horzLines: { color: palette.grid },
+        vertLines: { color: palette.grid, visible: palette.gridVisible },
+        horzLines: { color: palette.grid, visible: palette.gridVisible },
       },
       rightPriceScale: { borderColor: palette.border, autoScale: true },
       timeScale: { borderColor: palette.border, timeVisible: false, rightOffset: 6 },
-      crosshair: { mode: 0 },
+      crosshair: { mode: palette.crosshairMode },
     });
     const balance = chart.addSeries(LineSeries, {
       color: "#2563eb",
@@ -61,9 +62,10 @@ function TradingViewProgressChart({ data }) {
           textColor: nextPalette.text,
         },
         grid: {
-          vertLines: { color: nextPalette.grid },
-          horzLines: { color: nextPalette.grid },
+          vertLines: { color: nextPalette.grid, visible: nextPalette.gridVisible },
+          horzLines: { color: nextPalette.grid, visible: nextPalette.gridVisible },
         },
+        crosshair: { mode: nextPalette.crosshairMode },
         rightPriceScale: { borderColor: nextPalette.border },
         timeScale: { borderColor: nextPalette.border },
       });
@@ -463,10 +465,10 @@ export default function DashboardPage({
               tone="green"
             />
             <MetricCard
-              label="Total Equity"
-              value={money(totals.equity)}
-              hint="Real-time terminal snapshot"
-              icon={Gauge}
+              label="Open Positions"
+              value={String(totals.positions ?? 0)}
+              hint={`${totals.masterPositions ?? 0} master · ${Math.max(0, (totals.positions ?? 0) - (totals.masterPositions ?? 0))} copied on sub accounts`}
+              icon={Layers}
               tone="amber"
             />
             <MetricCard

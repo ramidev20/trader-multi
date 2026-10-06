@@ -83,9 +83,11 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
   const [spreadPips, setSpreadPips] = useState(
     () => savedTradeForm.spreadPips ?? "0",
   );
-  const [sessionRiskPercent, setSessionRiskPercent] = useState(
-    () => savedTradeForm.sessionRiskPercent ?? savedTradeForm.dailyRiskPercent ?? "2",
+  const [sessionRiskValue, setSessionRiskValue] = useState(
+    () => savedTradeForm.sessionRiskValue ?? savedTradeForm.sessionRiskPercent ?? savedTradeForm.dailyRiskPercent ?? "2",
   );
+  // "percent" or "amount" -- chosen in Settings > Preferences > Session risk.
+  const [sessionRiskMode, setSessionRiskMode] = useState("percent");
   const [searchPips, setSearchPips] = useState(
     () => savedTradeForm.searchPips ?? "10",
   );
@@ -153,13 +155,29 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     let active = true;
     api.settings()
       .then((settings) => {
-        if (active) setSessionRiskPercent(String(settings?.session_risk_percent ?? 2));
+        if (!active) return;
+        const mode = settings?.session_risk_mode === "amount" ? "amount" : "percent";
+        setSessionRiskMode(mode);
+        setSessionRiskValue(String(mode === "amount" ? settings?.session_risk_amount ?? 0 : settings?.session_risk_percent ?? 2));
       })
       .catch((error) => showBanner(error?.message || String(error), "error", error?.code));
     return () => {
       active = false;
     };
   }, []);
+
+  // This page stays mounted across navigation, so follow later changes made
+  // in Settings (mode switch or a new limit) from the polled runtime too.
+  const savedRiskSettings = runtime?.bootstrap_cache?.settings;
+  const savedRiskMode = savedRiskSettings?.session_risk_mode;
+  const savedRiskPercent = savedRiskSettings?.session_risk_percent;
+  const savedRiskAmount = savedRiskSettings?.session_risk_amount;
+  useEffect(() => {
+    if (!savedRiskMode) return;
+    const mode = savedRiskMode === "amount" ? "amount" : "percent";
+    setSessionRiskMode(mode);
+    setSessionRiskValue(String(mode === "amount" ? savedRiskAmount ?? 0 : savedRiskPercent ?? 2));
+  }, [savedRiskMode, savedRiskPercent, savedRiskAmount]);
 
   useEffect(() => {
     const risk = runtime?.session_risk;
@@ -184,15 +202,16 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     }
   }, [runtime?.session_risk]);
 
-  async function saveSessionRiskPercent() {
-    const value = Number(sessionRiskPercent);
-    if (!Number.isFinite(value) || value < 0 || value > 100) {
-      showBanner("Session Risk must be between 0 and 100 percent.", "error");
+  async function saveSessionRiskValue() {
+    const value = Number(sessionRiskValue);
+    const isAmount = sessionRiskMode === "amount";
+    if (!Number.isFinite(value) || value < 0 || (!isAmount && value > 100)) {
+      showBanner(isAmount ? "Session Risk amount cannot be negative." : "Session Risk must be between 0 and 100 percent.", "error");
       return;
     }
     try {
-      await api.saveSessionRisk(value);
-      setSessionRiskPercent(String(value));
+      await api.saveSessionRisk(isAmount ? { session_risk_amount: value } : { session_risk_percent: value });
+      setSessionRiskValue(String(value));
     } catch (error) {
       reportError(error);
     }
@@ -306,7 +325,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
           tp,
           sl,
           spreadPips,
-          sessionRiskPercent,
+          sessionRiskValue,
           searchPips,
           searchEnabled,
           searchArmed,
@@ -336,7 +355,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     tp,
     sl,
     spreadPips,
-    sessionRiskPercent,
+    sessionRiskValue,
     searchPips,
     searchEnabled,
     searchArmed,
@@ -367,7 +386,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
             tp,
             sl,
             spreadPips,
-            sessionRiskPercent,
+            sessionRiskValue,
             searchPips,
             searchEnabled,
             searchArmed,
@@ -406,7 +425,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     tp,
     sl,
     spreadPips,
-    sessionRiskPercent,
+    sessionRiskValue,
     searchPips,
     searchEnabled,
     searchArmed,
@@ -1009,16 +1028,16 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
             </div>
             <div className="flex items-center gap-2">
               <label className="flex w-28 flex-col gap-0.5" title="0 disables the session loss limit">
-                <span className="text-[9px] font-black uppercase leading-3 tracking-wide text-slate-500">Session Risk (%)</span>
+                <span className="text-[9px] font-black uppercase leading-3 tracking-wide text-slate-500">Session Risk ({sessionRiskMode === "amount" ? "$" : "%"})</span>
                 <input
                   type="number"
                   min="0"
-                  max="100"
+                  max={sessionRiskMode === "amount" ? undefined : "100"}
                   step="0.1"
                   inputMode="decimal"
-                  value={sessionRiskPercent}
-                  onChange={(event) => setSessionRiskPercent(decimalInput(event.target.value))}
-                  onBlur={saveSessionRiskPercent}
+                  value={sessionRiskValue}
+                  onChange={(event) => setSessionRiskValue(decimalInput(event.target.value))}
+                  onBlur={saveSessionRiskValue}
                   className="h-7 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900 outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
                 />
               </label>

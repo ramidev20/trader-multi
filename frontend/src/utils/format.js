@@ -24,3 +24,10 @@ export function signedDecimalInput(value, digits = 2) {
   if (!cleaned) return negative ? "-" : "";
   return negative ? `-${cleaned}` : cleaned;
 }
+
+// An account's per-trade risk: a fixed amount or a percent of equity.
+export function riskLabel(account) {
+  return account?.riskMode === "amount"
+    ? `${money(Number(account.riskAmount || 0))} / trade`
+    : `${Number(account?.risk || 0).toFixed(2)}%`;
+}

@@ -120,9 +120,35 @@ def _resolve_master_account(cfg: dict) -> dict | None:
     return None
 
 
+def account_risk(account: dict | None) -> tuple[float, float]:
+    """(risk_percent, risk_amount) configured for an account. risk_amount is
+    above 0 only when the account risks a fixed amount per trade; otherwise
+    lots are sized from risk_percent of equity."""
+    account = account or {}
+    risk_percent = float(account.get("risk_percent", account.get("risk_multiplier", 1.0)) or 1.0)
+    if str(account.get("risk_mode", "percent")).lower() == "amount":
+        risk_amount = float(account.get("risk_amount", 0) or 0)
+        if risk_amount > 0:
+            return risk_percent, risk_amount
+    return risk_percent, 0.0
+
+
+def account_risk_label(account: dict | None) -> str:
+    risk_percent, risk_amount = account_risk(account)
+    return f"{risk_amount:.2f} per trade" if risk_amount > 0 else f"{risk_percent:.2f}%"
+
+
+def copy_trading_enabled(cfg: dict | None) -> bool:
+    return bool((cfg or {}).get("copy_trading_enabled", True))
+
+
 def _copy_targets(cfg: dict, master_login: int) -> list[tuple[dict, float]]:
     accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
     targets: list[tuple[dict, float]] = []
+    # Settings > Preferences > Copy trading: when off, master trades stay on
+    # the master account only.
+    if not copy_trading_enabled(cfg):
+        return targets
 
     # A sub account only merely *configured* here (added on the Dashboard but
     # never actually connected) must not get logged into and traded on just
@@ -299,22 +325,27 @@ def _risk_adjusted_volume(
     stop_loss: float,
     risk_percent: float,
     fallback_lot: float,
+    risk_amount: float | None = None,
 ) -> float:
+    """Lot that loses the risk at the stop: a fixed risk_amount when given,
+    otherwise risk_percent of the account's equity."""
     if not mt5_available():
         return _normalize_volume(symbol, fallback_lot)
 
-    account_info = mt5.account_info()
-    equity = float(
-        getattr(account_info, "equity", 0.0) or getattr(account_info, "balance", 0.0) or 0.0
-    )
-    if equity <= 0 or risk_percent <= 0:
-        return _normalize_volume(symbol, fallback_lot)
+    fixed_amount = float(risk_amount or 0.0)
+    if fixed_amount <= 0:
+        account_info = mt5.account_info()
+        equity = float(
+            getattr(account_info, "equity", 0.0) or getattr(account_info, "balance", 0.0) or 0.0
+        )
+        if equity <= 0 or risk_percent <= 0:
+            return _normalize_volume(symbol, fallback_lot)
 
     loss_per_lot = _loss_per_lot(symbol, order_type, entry_price, stop_loss)
     if loss_per_lot <= 0:
         return _normalize_volume(symbol, fallback_lot)
 
-    risk_amount = equity * (float(risk_percent) / 100.0)
+    risk_amount = fixed_amount if fixed_amount > 0 else equity * (float(risk_percent) / 100.0)
     if risk_amount <= 0:
         return _normalize_volume(symbol, fallback_lot)
 
@@ -352,7 +383,7 @@ def _verify_mt5_login(expected_login: int) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _build_copy_request(master_request: dict, risk_percent: float, origin: str) -> dict:
+def _build_copy_request(master_request: dict, risk_percent: float, origin: str, risk_amount: float = 0.0) -> dict:
     req = dict(master_request)
     fallback_volume = float(master_request.get("volume", 0.01) or 0.01)
     req["comment"] = f"{origin} copy"
@@ -397,6 +428,7 @@ def _build_copy_request(master_request: dict, risk_percent: float, origin: str) 
             float(req.get("sl", master_sl) or master_sl),
             float(risk_percent or 0.0),
             fallback_volume,
+            risk_amount=float(risk_amount or 0.0),
         ),
         2,
     )
@@ -420,6 +452,7 @@ def _copy_trade_to_sub_adapter(
         {
             "master_request": master_request,
             "risk_percent": float(risk_percent),
+            "risk_amount": account_risk(account)[1],
             "order_delay_sec": delay_seconds,
             "origin": origin,
         },
@@ -445,6 +478,8 @@ def _clone_trade_to_sub_accounts(master_request: dict, origin: str) -> str | Non
     if not master_session_ok:
         append_log("search", f"[ERROR] Copy disabled: {master_session_detail}")
         return None
+    if not copy_trading_enabled(cfg):
+        return "Copy trading is disabled; sub accounts skipped"
     targets = _copy_targets(cfg, master_login)
     if not targets:
         return "Copied master trade to 0/0 sub account(s)"
@@ -471,6 +506,8 @@ def copy_to_sub_adapters_and_wait(master_request: dict, origin: str = "manual") 
     and the adapters), so the API process can run it alongside the remote
     mirror instead of the master adapter running it before replying."""
     config = _load_config()
+    if not copy_trading_enabled(config):
+        return "Copy trading is disabled; sub accounts skipped"
     master_login = _safe_int(config.get("master_account_login"))
     targets = _copy_targets(config, master_login)
     if not targets:
@@ -488,6 +525,7 @@ def copy_to_sub_adapters_and_wait(master_request: dict, origin: str = "manual") 
             {
                 "master_request": master_request,
                 "risk_percent": float(risk_percent),
+                "risk_amount": account_risk(account)[1],
                 "order_delay_sec": delay_seconds,
                 "origin": origin,
             },
@@ -524,7 +562,7 @@ def copy_to_sub_adapters_in_background(master_request: dict, origin: str, log_pr
     outcome goes to the search log (failures also become notifications)."""
     def run() -> None:
         summary = copy_to_sub_adapters_and_wait(master_request, origin)
-        if summary.startswith("Copied master trade to 0/0"):
+        if summary.startswith(("Copied master trade to 0/0", "Copy trading is disabled")):
             return
         level = "WARNING" if summary.startswith("Copied master trade to 0/") else "SUCCESS"
         append_log("search", f"[{level}] {log_prefix} {summary}.")
@@ -1012,6 +1050,7 @@ def open_manual_position(
     sl_price: float | None = None,
     spread_pips: float = 0.0,
     ratio: float = 3.0,
+    risk_amount: float | None = None,
     tp1_ratio: float = 1.0,
     tp2_ratio: float = 1.0,
     tp3_ratio: float = 1.0,
@@ -1080,13 +1119,14 @@ def open_manual_position(
     else:
         entry_price = market_entry_price
 
-    # Risk is configured per account. Keep accepting an explicit value for
-    # backwards compatibility, but use the master account setting by default.
+    # Risk is configured per account (a percent of equity or a fixed amount).
+    # Keep accepting an explicit value for backwards compatibility, but use
+    # the master account setting by default.
     if risk_percent is None:
-        master_account = _master or {}
-        risk_percent = master_account.get(
-            "risk_percent", master_account.get("risk_multiplier", 1.0)
-        )
+        risk_percent, master_risk_amount = account_risk(_master)
+        if risk_amount is None:
+            risk_amount = master_risk_amount
+    risk_amount = float(risk_amount or 0.0)
 
     if advanced:
         if sl_price is None or float(sl_price) <= 0:
@@ -1109,14 +1149,15 @@ def open_manual_position(
         raise RuntimeError("Stop Loss must be different from the entry price.")
 
     effective_lot = float(lot_size or 0.0)
-    if risk_percent is not None and float(risk_percent) > 0:
+    if risk_amount > 0 or (risk_percent is not None and float(risk_percent) > 0):
         effective_lot = _risk_adjusted_volume(
             symbol,
             mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
             entry_price,
             stop_loss,
-            float(risk_percent),
+            float(risk_percent or 0.0),
             effective_lot or 0.01,
+            risk_amount=risk_amount,
         )
     if effective_lot <= 0:
         raise RuntimeError("Enter a valid Risk % or Lot size.")
@@ -1211,6 +1252,7 @@ def open_manual_position(
                     + ([tp3_ratio] if tp3_enabled else [])
                 )), 4) if advanced else 0.0,
                 "risk_percent": float(risk_percent or 0),
+                "risk_amount": risk_amount,
                 "balance_before": balance_before,
                 "status": "open",
                 "origin": "manual",
@@ -1258,11 +1300,9 @@ def calculate_manual_lot(
     master_ok, master_detail, _master, _cfg = _ensure_master_session()
     if not master_ok:
         raise RuntimeError(f"Connect the master account from Dashboard before calculating lot size: {master_detail}")
+    risk_amount = 0.0
     if risk_percent is None:
-        cfg = _load_config()
-        master = _resolve_master_account(cfg)
-        master = master or {}
-        risk_percent = master.get("risk_percent", master.get("risk_multiplier", 1.0))
+        risk_percent, risk_amount = account_risk(_resolve_master_account(_load_config()))
     if mt5_available() and mt5.account_info() is None:
         raise RuntimeError("Connect the master account from Dashboard before calculating lot size.")
     symbol_ok, symbol_detail = _ensure_symbol_ready(symbol)
@@ -1290,8 +1330,10 @@ def calculate_manual_lot(
         stop_loss,
         float(risk_percent),
         0.01,
+        risk_amount=risk_amount,
     )
-    return lot, f"Lot calculated from {float(risk_percent):.2f}% risk and {abs(entry_price - stop_loss):.2f} price distance."
+    risk_text = f"{risk_amount:.2f} risk" if risk_amount > 0 else f"{float(risk_percent):.2f}% risk"
+    return lot, f"Lot calculated from {risk_text} and {abs(entry_price - stop_loss):.2f} price distance."
 
 
 def close_positions_on_current_session(side: str, symbol: str | None) -> dict[str, Any]:
@@ -1498,10 +1540,7 @@ def open_order_strategy(config_data):
     min_pips = config_data.get("min_pips", config_data.get("pips"))
     max_pips = config_data["max_pips"]
     fallback_lot = float(config_data.get("lot", 0.01) or 0.01)
-    master_risk_percent = (_master or {}).get(
-        "risk_percent", (_master or {}).get("risk_multiplier", 1.0)
-    )
-    risk_percent = float(master_risk_percent or 0.0)
+    risk_percent, risk_amount = account_risk(_master)
     max_positions = int(config_data.get("max_positions", 0) or 0)
     enable_buy = bool(config_data.get("enable_buy", True))
     enable_sell = bool(config_data.get("enable_sell", True))
@@ -1567,7 +1606,7 @@ def open_order_strategy(config_data):
     sl = (entry_price - (sl_val / 10)) if sl_type and order_type == mt5.ORDER_TYPE_BUY else (
         (entry_price + (sl_val / 10)) if sl_type else float(sl_val)
     )
-    lot = _risk_adjusted_volume(symbol, order_type, entry_price, sl, risk_percent, fallback_lot)
+    lot = _risk_adjusted_volume(symbol, order_type, entry_price, sl, risk_percent, fallback_lot, risk_amount=risk_amount)
     side_label = "BUY" if order_type == mt5.ORDER_TYPE_BUY else "SELL"
 
     request = {
@@ -2025,9 +2064,7 @@ def start_strategy_system(
     initial_log_timer = threading.Timer(initial_log_delay, log_initial_cycle_message)
     initial_log_timer.daemon = True
     initial_log_timer.start()
-    master_risk_percent = float(
-        (_master or {}).get("risk_percent", (_master or {}).get("risk_multiplier", 1.0)) or 0.0
-    )
+    master_risk_label = account_risk_label(_master)
     lot_value = base_config_data.get("lot", "auto")
     tp_unit = "pips" if bool(base_config_data.get("tp_type", True)) else "price"
     sl_unit = "pips" if bool(base_config_data.get("sl_type", True)) else "price"
@@ -2037,7 +2074,7 @@ def start_strategy_system(
     append_log(
         "search",
         "[INFO] Search started "
-        f"(risk: {master_risk_percent:.2f}%; "
+        f"(risk: {master_risk_label}; "
         f"tp: {base_config_data.get('tp')}; sl: {base_config_data.get('sl')}; "
         f"mode: {mode_label}) start: {start_label}- end: {end_label}",
     )

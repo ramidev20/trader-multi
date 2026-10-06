@@ -4,7 +4,6 @@ import {
   Play,
   Plus,
   ShieldCheck,
-  SlidersHorizontal,
   StopCircle,
   Trash2,
   Zap,
@@ -15,7 +14,6 @@ import { cx, decimalInput } from "../utils/format";
 import {
   AppButton,
   Card,
-  Dialog,
   Field,
   SelectBox,
 } from "../components/ui/Primitives";
@@ -37,7 +35,6 @@ export default function SearchPage({
   const didHydrateDefaults = useRef(false);
   const strategyCommand = useRef(null);
   const [activeTab, setActiveTab] = useState("search");
-  const [showDefaultsDialog, setShowDefaultsDialog] = useState(false);
   const [strategyRunning, setStrategyRunning] = useState(false);
   const [leqList, setLeqList] = useState([]);
   const [leqPrice, setLeqPrice] = useState("3348.20");
@@ -118,7 +115,8 @@ export default function SearchPage({
       Array.isArray(runtime?.liquidity_levels) ? runtime.liquidity_levels : [],
     );
 
-    // Route switching remounts this page; hydrate once from saved backend defaults.
+    // Route switching remounts this page; hydrate once from the values saved
+    // (debounced below) the last time the form was edited.
     if (!didHydrateDefaults.current) {
       const saved = runtime?.bootstrap_cache?.settings?.search_config;
       if (saved) {
@@ -412,9 +410,6 @@ export default function SearchPage({
           Log
         </button>
         <div className="ml-auto flex flex-wrap items-center gap-2 py-2">
-          <AppButton variant="soft" onClick={() => setShowDefaultsDialog(true)}>
-            <SlidersHorizontal className="h-4 w-4" /> Load Defaults
-          </AppButton>
           <AppButton
             variant="green"
             disabled={strategyRunning}
@@ -696,83 +691,6 @@ export default function SearchPage({
           </Card>
         </div>
       </div>
-
-      <Dialog
-        open={showDefaultsDialog}
-        title="Search Default Settings"
-        onClose={() => setShowDefaultsDialog(false)}
-      >
-        <div className="grid gap-4 md:grid-cols-3">
-          <Field
-            label="Min Pips"
-            value={minPipsValue}
-            type="number"
-            min="0"
-            step="1"
-            inputMode="numeric"
-            onChange={(e) => setMinPipsValue(e.target.value)}
-          />
-          <Field
-            label="Max Pips"
-            value={maxPipsValue}
-            type="number"
-            min="1"
-            step="1"
-            inputMode="numeric"
-            onChange={(e) => setMaxPipsValue(e.target.value)}
-          />
-          <Field
-            label="Max Positions"
-            value={maxPositionsValue}
-            type="number"
-            min="1"
-            step="1"
-            inputMode="numeric"
-            onChange={(e) => setMaxPositionsValue(e.target.value)}
-          />
-          <Field
-            label="TP"
-            value={tpValue}
-            type="number"
-            min={tpPips ? "1" : "0.01"}
-            step={tpPips ? "1" : "0.01"}
-            inputMode={tpPips ? "numeric" : "decimal"}
-            onChange={(e) =>
-              setTpValue(tpPips ? e.target.value : decimalInput(e.target.value))
-            }
-          />
-          <Field
-            label="SL"
-            value={slValue}
-            type="number"
-            min={slPips ? "1" : "0.01"}
-            step={slPips ? "1" : "0.01"}
-            inputMode={slPips ? "numeric" : "decimal"}
-            onChange={(e) =>
-              setSlValue(slPips ? e.target.value : decimalInput(e.target.value))
-            }
-          />
-        </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <AppButton
-            variant="soft"
-            onClick={() => setShowDefaultsDialog(false)}
-          >
-            Cancel
-          </AppButton>
-          <AppButton
-            variant="blue"
-            onClick={() => {
-              applySavedSearchConfig(
-                runtime?.bootstrap_cache?.settings?.search_config,
-              );
-              setShowDefaultsDialog(false);
-            }}
-          >
-            Apply
-          </AppButton>
-        </div>
-      </Dialog>
     </LocalizationProvider>
   );
 }

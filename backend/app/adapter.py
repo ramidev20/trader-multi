@@ -82,6 +82,7 @@ def _execute_copy_open(payload: dict[str, Any]) -> dict[str, Any]:
             master_request,
             float(payload.get("risk_percent", 1.0) or 1.0),
             str(payload.get("origin", "manual")),
+            risk_amount=float(payload.get("risk_amount", 0.0) or 0.0),
         )
         result = mt5.order_send(request)
         if result is None or getattr(result, "retcode", None) != mt5.TRADE_RETCODE_DONE:
@@ -511,6 +512,7 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
             tp_in_pips=bool(payload.get("tp_in_pips")),
             sl_in_pips=bool(payload.get("sl_in_pips")),
             risk_percent=payload.get("risk_percent"),
+            risk_amount=payload.get("risk_amount"),
             advanced=bool(payload.get("advanced")),
             sl_price=payload.get("sl_price"),
             spread_pips=float(payload.get("spread_pips", 0.0) or 0.0),

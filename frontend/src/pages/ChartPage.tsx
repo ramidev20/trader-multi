@@ -450,10 +450,10 @@ function ChartPageView() {
         textColor: palette.text,
       },
       grid: {
-        vertLines: { color: palette.grid },
-        horzLines: { color: palette.grid },
+        vertLines: { color: palette.grid, visible: palette.gridVisible },
+        horzLines: { color: palette.grid, visible: palette.gridVisible },
       },
-      crosshair: { mode: 0 },
+      crosshair: { mode: palette.crosshairMode },
       rightPriceScale: { borderColor: palette.border },
       timeScale: {
         borderColor: palette.border,
@@ -567,9 +567,10 @@ function ChartPageView() {
           textColor: nextPalette.text,
         },
         grid: {
-          vertLines: { color: nextPalette.grid },
-          horzLines: { color: nextPalette.grid },
+          vertLines: { color: nextPalette.grid, visible: nextPalette.gridVisible },
+          horzLines: { color: nextPalette.grid, visible: nextPalette.gridVisible },
         },
+        crosshair: { mode: nextPalette.crosshairMode },
         rightPriceScale: { borderColor: nextPalette.border },
         timeScale: { borderColor: nextPalette.border },
       });

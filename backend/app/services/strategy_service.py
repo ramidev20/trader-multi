@@ -142,6 +142,12 @@ def copy_trading_enabled(cfg: dict | None) -> bool:
     return bool((cfg or {}).get("copy_trading_enabled", True))
 
 
+def stop_on_final_tp_enabled(cfg: dict | None = None) -> bool:
+    """Settings > Preferences > Session risk: when a scalping position hits
+    its final TP, stop the search and close every position (default on)."""
+    return bool((cfg if cfg is not None else _load_config()).get("stop_on_final_tp", True))
+
+
 def _copy_targets(cfg: dict, master_login: int) -> list[tuple[dict, float]]:
     accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
     targets: list[tuple[dict, float]] = []

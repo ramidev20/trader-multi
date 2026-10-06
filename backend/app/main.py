@@ -87,6 +87,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "session_risk_percent": 2.0,
     "session_risk_amount": 0.0,
     "copy_trading_enabled": True,
+    "stop_on_final_tp": True,
     "appearance": {
         "reduce_motion": False,
         "chart_candle_preset": "default",
@@ -120,6 +121,10 @@ class SessionRiskUpdate(BaseModel):
 
 
 class CopyTradingUpdate(BaseModel):
+    enabled: bool
+
+
+class FinalTpStopUpdate(BaseModel):
     enabled: bool
 
 
@@ -417,6 +422,7 @@ def _load_config() -> dict[str, Any]:
     config["session_risk_mode"] = "amount" if str(config.get("session_risk_mode", "percent")).lower() == "amount" else "percent"
     config["session_risk_enabled"] = bool(config.get("session_risk_enabled", True)) and _session_risk_limit(config) > 0
     config["copy_trading_enabled"] = bool(config.get("copy_trading_enabled", True))
+    config["stop_on_final_tp"] = bool(config.get("stop_on_final_tp", True))
     config["appearance"] = _normalize_appearance(config.get("appearance"))
     config.pop("daily_risk_enabled", None)
     config.pop("daily_risk_percent", None)
@@ -1079,6 +1085,21 @@ def set_copy_trading(payload: CopyTradingUpdate) -> dict[str, Any]:
         else "[WARNING] Copy trading disabled: master trades are no longer copied to sub accounts.",
     )
     return {"status": "ok", "copy_trading_enabled": config["copy_trading_enabled"]}
+
+
+@app.patch("/settings/final-tp-stop")
+def set_final_tp_stop(payload: FinalTpStopUpdate) -> dict[str, Any]:
+    config = _load_config()
+    config["stop_on_final_tp"] = bool(payload.enabled)
+    _save_config(config)
+    _refresh_bootstrap_cache()
+    append_log(
+        "search",
+        "[INFO] Stop on final TP enabled: a scalping final TP stops the search and closes all positions."
+        if payload.enabled
+        else "[WARNING] Stop on final TP disabled: a scalping final TP no longer stops the search or closes positions.",
+    )
+    return {"status": "ok", "stop_on_final_tp": config["stop_on_final_tp"]}
 
 
 @app.patch("/settings/appearance")

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Bell,
   CandlestickChart,
   Copy,
@@ -26,7 +27,12 @@ import {
 import { AppButton, Card } from "../components/ui/Primitives";
 import { cx, decimalInput, money, riskLabel } from "../utils/format";
 import { api } from "../services/api";
-import { CANDLE_PRESETS, CHART_PALETTE, DEFAULT_APPEARANCE, candleColors } from "../utils/chartTheme";
+import {
+  CANDLE_PRESETS,
+  CHART_PALETTE,
+  DEFAULT_APPEARANCE,
+  candleColors,
+} from "../utils/chartTheme";
 
 const SETTINGS_TABS = [
   { id: "accounts", label: "Accounts", icon: Users },
@@ -75,16 +81,24 @@ export function SettingsPlaceholder({
   onCopyTradingChange,
   onRefreshRuntime,
 }) {
-  const [settingsTab, setSettingsTab] = useState(() => normalizeSettingsTab(initialTab));
+  const [settingsTab, setSettingsTab] = useState(() =>
+    normalizeSettingsTab(initialTab),
+  );
   const [notice, setNotice] = useState(null);
   const noticeTimer = useRef(null);
-  useEffect(() => setSettingsTab(normalizeSettingsTab(initialTab)), [initialTab]);
+  useEffect(
+    () => setSettingsTab(normalizeSettingsTab(initialTab)),
+    [initialTab],
+  );
   useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
 
   function notify(text, tone = "success") {
     setNotice({ text, tone });
     window.clearTimeout(noticeTimer.current);
-    noticeTimer.current = window.setTimeout(() => setNotice(null), tone === "error" ? 8000 : 4000);
+    noticeTimer.current = window.setTimeout(
+      () => setNotice(null),
+      tone === "error" ? 8000 : 4000,
+    );
   }
 
   return (
@@ -114,7 +128,9 @@ export function SettingsPlaceholder({
             role="status"
             className={cx(
               "rounded-lg px-3 py-1.5 text-xs font-bold",
-              notice.tone === "error" ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700",
+              notice.tone === "error"
+                ? "bg-rose-50 text-rose-700"
+                : "bg-emerald-50 text-emerald-700",
             )}
           >
             {notice.text}
@@ -123,7 +139,11 @@ export function SettingsPlaceholder({
       </div>
 
       {settingsTab === "accounts" ? (
-        <AccountsTab accountsData={accountsData} onEdit={onEdit} onDelete={onDelete} />
+        <AccountsTab
+          accountsData={accountsData}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
       ) : null}
       {settingsTab === "preferences" ? (
         <PreferencesTab
@@ -162,7 +182,14 @@ export function SettingsPlaceholder({
 /* Shared building blocks                                              */
 /* ------------------------------------------------------------------ */
 
-function Section({ icon: Icon, title, description = null, aside = null, children, className = "" }) {
+function Section({
+  icon: Icon,
+  title,
+  description = null,
+  aside = null,
+  children,
+  className = "",
+}) {
   return (
     <Card className={className}>
       <div className="flex items-start justify-between gap-4">
@@ -172,7 +199,11 @@ function Section({ icon: Icon, title, description = null, aside = null, children
           </span>
           <div className="min-w-0">
             <h3 className="text-base font-black text-slate-950">{title}</h3>
-            {description ? <p className="mt-0.5 text-xs leading-5 text-slate-500">{description}</p> : null}
+            {description ? (
+              <p className="mt-0.5 text-xs leading-5 text-slate-500">
+                {description}
+              </p>
+            ) : null}
           </div>
         </div>
         {aside}
@@ -206,14 +237,29 @@ function Switch({ checked, onChange, disabled = false, label }) {
   );
 }
 
-function ToggleRow({ label, description = null, checked, onChange, disabled = false }) {
+function ToggleRow({
+  label,
+  description = null,
+  checked,
+  onChange,
+  disabled = false,
+}) {
   return (
     <div className="flex items-start justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
       <div>
         <p className="text-sm font-black text-slate-900">{label}</p>
-        {description ? <p className="mt-0.5 text-xs leading-5 text-slate-500">{description}</p> : null}
+        {description ? (
+          <p className="mt-0.5 text-xs leading-5 text-slate-500">
+            {description}
+          </p>
+        ) : null}
       </div>
-      <Switch checked={checked} onChange={onChange} disabled={disabled} label={label} />
+      <Switch
+        checked={checked}
+        onChange={onChange}
+        disabled={disabled}
+        label={label}
+      />
     </div>
   );
 }
@@ -223,8 +269,13 @@ function Segmented({ value, options, onChange, disabled = false, label }) {
     <div
       role="radiogroup"
       aria-label={label}
-      className={cx("inline-grid gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1", disabled && "opacity-60")}
-      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
+      className={cx(
+        "inline-grid gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1",
+        disabled && "opacity-60",
+      )}
+      style={{
+        gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`,
+      }}
     >
       {options.map(({ value: optionValue, label: optionLabel, icon: Icon }) => (
         <button
@@ -236,7 +287,9 @@ function Segmented({ value, options, onChange, disabled = false, label }) {
           onClick={() => onChange(optionValue)}
           className={cx(
             "inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-black transition disabled:cursor-not-allowed",
-            value === optionValue ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-900",
+            value === optionValue
+              ? "bg-white text-blue-700 shadow-sm"
+              : "text-slate-500 hover:text-slate-900",
           )}
         >
           {Icon ? <Icon className="h-3.5 w-3.5" /> : null}
@@ -271,7 +324,10 @@ function AccountsTab({ accountsData, onEdit, onDelete }) {
   // Master on top, the rest in their saved order -- switching an account to
   // master moves its row to the first position.
   const orderedAccounts = useMemo(
-    () => [...accountsData].sort((a, b) => Number(b.role === "MASTER") - Number(a.role === "MASTER")),
+    () =>
+      [...accountsData].sort(
+        (a, b) => Number(b.role === "MASTER") - Number(a.role === "MASTER"),
+      ),
     [accountsData],
   );
   return (
@@ -289,7 +345,10 @@ function AccountsTab({ accountsData, onEdit, onDelete }) {
           </thead>
           <tbody className="divide-y divide-slate-100 bg-white">
             {orderedAccounts.map((account) => (
-              <tr key={account.login} className="border-t border-slate-100 hover:bg-slate-50/70">
+              <tr
+                key={account.login}
+                className="border-t border-slate-100 hover:bg-slate-50/70"
+              >
                 <td className="py-4 pl-4 pr-3">
                   <div className="flex items-center gap-3">
                     <div
@@ -302,11 +361,15 @@ function AccountsTab({ accountsData, onEdit, onDelete }) {
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <p className="font-semibold text-slate-950">{account.name}</p>
+                        <p className="font-semibold text-slate-950">
+                          {account.name}
+                        </p>
                         <span
                           className={cx(
                             "rounded-full px-2 py-0.5 text-[10px] font-bold",
-                            account.role === "MASTER" ? "bg-blue-100 text-blue-700" : "bg-emerald-100 text-emerald-700",
+                            account.role === "MASTER"
+                              ? "bg-blue-100 text-blue-700"
+                              : "bg-emerald-100 text-emerald-700",
                           )}
                         >
                           {account.role}
@@ -315,8 +378,12 @@ function AccountsTab({ accountsData, onEdit, onDelete }) {
                     </div>
                   </div>
                 </td>
-                <td className="break-words px-3 py-4 text-sm text-slate-700">{account.server}</td>
-                <td className="px-3 py-4 text-sm font-semibold text-slate-800">{money(account.balance)}</td>
+                <td className="break-words px-3 py-4 text-sm text-slate-700">
+                  {account.server}
+                </td>
+                <td className="px-3 py-4 text-sm font-semibold text-slate-800">
+                  {money(account.balance)}
+                </td>
                 <td className="px-3 py-4 text-sm font-semibold text-slate-800">
                   {riskLabel(account)}
                   <span className="ml-2 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-500">
@@ -366,8 +433,18 @@ function PreferencesTab({
   onRefreshRuntime,
 }) {
   const [loaded, setLoaded] = useState(false);
-  const [sessionRisk, setSessionRisk] = useState({ enabled: true, mode: "percent", percent: "2", amount: "" });
-  const [remote, setRemote] = useState({ enabled: false, token: "", receiver_url: "" });
+  const [sessionRisk, setSessionRisk] = useState({
+    enabled: true,
+    mode: "percent",
+    percent: "2",
+    amount: "",
+  });
+  const [remote, setRemote] = useState({
+    enabled: false,
+    token: "",
+    receiver_url: "",
+  });
+  const [stopOnFinalTp, setStopOnFinalTp] = useState(true);
   const [busy, setBusy] = useState("");
 
   useEffect(() => {
@@ -380,8 +457,25 @@ function PreferencesTab({
           enabled: Boolean(settings?.session_risk_enabled ?? true),
           mode: settings?.session_risk_mode === "amount" ? "amount" : "percent",
           percent: String(settings?.session_risk_percent ?? 2),
-          amount: Number(settings?.session_risk_amount || 0) > 0 ? String(settings.session_risk_amount) : "",
+          amount:
+            Number(settings?.session_risk_amount || 0) > 0
+              ? String(settings.session_risk_amount)
+              : "",
         });
+        lastSavedSessionRisk.current = JSON.stringify({
+          enabled: Boolean(settings?.session_risk_enabled ?? true),
+          mode: settings?.session_risk_mode === "amount" ? "amount" : "percent",
+          ...(settings?.session_risk_mode === "amount"
+            ? {
+                session_risk_amount: Number(settings?.session_risk_amount || 0),
+              }
+            : {
+                session_risk_percent: Number(
+                  settings?.session_risk_percent ?? 2,
+                ),
+              }),
+        });
+        setStopOnFinalTp(settings?.stop_on_final_tp !== false);
         setRemote({
           enabled: Boolean(settings?.remote_control?.enabled),
           token: String(settings?.remote_control?.token || ""),
@@ -395,31 +489,96 @@ function PreferencesTab({
     };
   }, []);
 
-  async function saveSessionRisk() {
-    const isAmount = sessionRisk.mode === "amount";
-    const value = Number(isAmount ? sessionRisk.amount : sessionRisk.percent);
+  // Session risk saves itself: the switch and the limit type at once, the
+  // loss limit shortly after typing stops (or on blur / Enter).
+  const sessionSaveTimer = useRef(null);
+  const pendingSessionRisk = useRef(null);
+  const lastSavedSessionRisk = useRef("");
+
+  async function persistSessionRisk(next) {
+    pendingSessionRisk.current = null;
+    const isAmount = next.mode === "amount";
+    const raw = isAmount ? next.amount : next.percent;
+    // Mid-edit (empty field): wait for a value instead of erroring.
+    if (String(raw).trim() === "" && next.enabled) return;
+    const value = Number(raw || 0);
     if (!Number.isFinite(value) || value < 0 || (!isAmount && value > 100)) {
-      notify(isAmount ? "Session loss limit must be an amount of 0 or more." : "Session loss limit must be between 0 and 100 percent.", "error");
-      return;
-    }
-    if (sessionRisk.enabled && value <= 0) {
-      notify("Set a session loss limit above 0, or turn the session risk guard off.", "error");
-      return;
-    }
-    setBusy("session");
-    try {
-      await api.saveSessionRisk({
-        enabled: sessionRisk.enabled,
-        mode: sessionRisk.mode,
-        ...(isAmount ? { session_risk_amount: value } : { session_risk_percent: value }),
-      });
       notify(
-        sessionRisk.enabled
-          ? `Session risk guard on: stops at ${isAmount ? money(value) : `${value}%`} loss.`
+        isAmount
+          ? "Session loss limit must be an amount of 0 or more."
+          : "Session loss limit must be between 0 and 100 percent.",
+        "error",
+      );
+      return;
+    }
+    if (next.enabled && value <= 0) {
+      notify(
+        "Enter a session loss limit above 0 to turn the session risk guard on.",
+        "error",
+      );
+      return;
+    }
+    const payload = {
+      enabled: next.enabled,
+      mode: next.mode,
+      ...(isAmount
+        ? { session_risk_amount: value }
+        : { session_risk_percent: value }),
+    };
+    const key = JSON.stringify(payload);
+    if (key === lastSavedSessionRisk.current) return;
+    try {
+      await api.saveSessionRisk(payload);
+      lastSavedSessionRisk.current = key;
+      notify(
+        next.enabled
+          ? `Session risk saved: stops at ${isAmount ? money(value) : `${value}%`} loss.`
           : "Session risk guard turned off.",
       );
       onRefreshRuntime?.({ silent: true });
     } catch (error) {
+      notify(errorText(error), "error");
+    }
+  }
+
+  function updateSessionRisk(patch, { immediate = true } = {}) {
+    const next = { ...sessionRisk, ...patch };
+    setSessionRisk(next);
+    window.clearTimeout(sessionSaveTimer.current);
+    if (immediate) {
+      persistSessionRisk(next);
+    } else {
+      pendingSessionRisk.current = next;
+      sessionSaveTimer.current = window.setTimeout(
+        () => persistSessionRisk(next),
+        900,
+      );
+    }
+  }
+
+  function flushSessionRisk() {
+    window.clearTimeout(sessionSaveTimer.current);
+    if (pendingSessionRisk.current)
+      persistSessionRisk(pendingSessionRisk.current);
+  }
+
+  // Leaving the tab mid-edit still saves the last typed limit.
+  const flushOnUnmount = useRef(flushSessionRisk);
+  flushOnUnmount.current = flushSessionRisk;
+  useEffect(() => () => flushOnUnmount.current(), []);
+
+  async function toggleStopOnFinalTp(enabled) {
+    setBusy("final-tp");
+    setStopOnFinalTp(enabled);
+    try {
+      await api.saveFinalTpStop(enabled);
+      notify(
+        enabled
+          ? "Final TP stop on: a scalping final TP stops the search and closes all positions."
+          : "Final TP stop off: scalping keeps searching after a final TP and positions stay open.",
+      );
+    } catch (error) {
+      setStopOnFinalTp(!enabled);
       notify(errorText(error), "error");
     } finally {
       setBusy("");
@@ -431,7 +590,11 @@ function PreferencesTab({
     onCopyTradingChange?.(enabled);
     try {
       await api.saveCopyTrading(enabled);
-      notify(enabled ? "Copy trading on: master trades copy to connected sub accounts." : "Copy trading off: trades stay on the master account.");
+      notify(
+        enabled
+          ? "Copy trading on: master trades copy to connected sub accounts."
+          : "Copy trading off: trades stay on the master account.",
+      );
     } catch (error) {
       onCopyTradingChange?.(!enabled);
       notify(errorText(error), "error");
@@ -442,14 +605,21 @@ function PreferencesTab({
 
   async function toggleRemoteReceiver(enabled) {
     if (enabled && !remote.token.trim()) {
-      notify("Generate a receiver token on the Remote Control page before accepting trades.", "error");
+      notify(
+        "Generate a receiver token on the Remote Control page before accepting trades.",
+        "error",
+      );
       return;
     }
     setBusy("remote");
     try {
       await api.saveRemoteControlSettings({ ...remote, enabled });
       setRemote((current) => ({ ...current, enabled }));
-      notify(enabled ? "This PC now accepts trades from an authenticated controller." : "Remote receiver turned off.");
+      notify(
+        enabled
+          ? "This PC now accepts trades from an authenticated controller."
+          : "Remote receiver turned off.",
+      );
     } catch (error) {
       notify(errorText(error), "error");
     } finally {
@@ -461,8 +631,15 @@ function PreferencesTab({
     setBusy(`log-${kind}`);
     try {
       await api.clearLogs(kind);
-      await onRefreshRuntime?.({ silent: true, replaceSearchLogs: kind === "search" });
-      notify(kind === "search" ? "Strategy & trade log cleared." : "Account & remote log cleared.");
+      await onRefreshRuntime?.({
+        silent: true,
+        replaceSearchLogs: kind === "search",
+      });
+      notify(
+        kind === "search"
+          ? "Strategy & trade log cleared."
+          : "Account & remote log cleared.",
+      );
     } catch (error) {
       notify(errorText(error), "error");
     } finally {
@@ -470,8 +647,12 @@ function PreferencesTab({
     }
   }
 
-  const subAccounts = accountsData.filter((account) => account.role !== "MASTER");
-  const connectedSubs = subAccounts.filter((account) => account.status === "Connected");
+  const subAccounts = accountsData.filter(
+    (account) => account.role !== "MASTER",
+  );
+  const connectedSubs = subAccounts.filter(
+    (account) => account.status === "Connected",
+  );
   const liveRisk = runtime?.session_risk;
   const logCounts = {
     search: runtime?.logs?.search?.length ?? 0,
@@ -489,25 +670,75 @@ function PreferencesTab({
         aside={<StatusPill on={sessionRisk.enabled} />}
         className="xl:col-span-2"
       >
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <ToggleRow
-            label="Enable session risk guard"
-            description="Turning this off removes the session loss stop."
-            checked={sessionRisk.enabled}
-            onChange={(enabled) => setSessionRisk((current) => ({ ...current, enabled }))}
-            disabled={!loaded}
-          />
+        <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+          <div className="flex flex-col rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-black text-slate-900">
+                  Enable session risk guard
+                </p>
+                <p className="mt-0.5 text-xs leading-5 text-slate-500">
+                  Turning this off removes the session loss stop.
+                </p>
+              </div>
+              <Switch
+                label="Enable session risk guard"
+                checked={sessionRisk.enabled}
+                onChange={(enabled) => updateSessionRisk({ enabled })}
+                disabled={!loaded}
+              />
+            </div>
+            <label className="mt-4 block max-w-xs text-xs font-black uppercase tracking-wide text-slate-500">
+              Session loss limit ({isAmountMode ? "$" : "%"})
+              <input
+                type="number"
+                min="0"
+                max={isAmountMode ? undefined : "100"}
+                step={isAmountMode ? "1" : "0.1"}
+                inputMode="decimal"
+                placeholder={isAmountMode ? "e.g. 500" : "e.g. 2"}
+                value={isAmountMode ? sessionRisk.amount : sessionRisk.percent}
+                onChange={(event) => {
+                  const value = decimalInput(event.target.value);
+                  updateSessionRisk(
+                    isAmountMode ? { amount: value } : { percent: value },
+                    { immediate: false },
+                  );
+                }}
+                onBlur={flushSessionRisk}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") flushSessionRisk();
+                }}
+                className={inputClass}
+                disabled={!sessionRisk.enabled || !loaded}
+              />
+            </label>
+            {liveRisk?.active ? (
+              <p className="mt-4 rounded-lg bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">
+                Live session: {money(Number(liveRisk.loss_amount || 0))} loss (
+                {Number(liveRisk.loss_percent || 0).toFixed(2)}%) from{" "}
+                {money(Number(liveRisk.start_equity || 0))} starting equity.
+              </p>
+            ) : liveRisk?.hit ? (
+              <p className="mt-4 rounded-lg bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">
+                {liveRisk.reason ||
+                  "Session risk limit reached. Start a new search session to reset it."}
+              </p>
+            ) : null}
+          </div>
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
             <p className="text-sm font-black text-slate-900">Limit type</p>
             <p className="mt-0.5 text-xs leading-5 text-slate-500">
-              {isAmountMode ? "Stop after losing a fixed amount of master equity." : "Stop after losing a percent of the session's starting equity."}
+              {isAmountMode
+                ? "Stop after losing a fixed amount of master equity."
+                : "Stop after losing a percent of the session's starting equity."}
             </p>
             <div className="mt-2.5">
               <Segmented
                 label="Session limit type"
                 value={sessionRisk.mode}
                 disabled={!sessionRisk.enabled || !loaded}
-                onChange={(mode) => setSessionRisk((current) => ({ ...current, mode }))}
+                onChange={(mode) => updateSessionRisk({ mode })}
                 options={[
                   { value: "percent", label: "Percent (%)" },
                   { value: "amount", label: "Amount ($)" },
@@ -515,40 +746,41 @@ function PreferencesTab({
               />
             </div>
           </div>
+          <div className="flex flex-col rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 lg:col-span-2 xl:col-span-1">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-black text-slate-900">
+                  Stop scalping on final TP
+                </p>
+                <p className="mt-0.5 text-xs leading-5 text-slate-500">
+                  When a scalping position hits its final TP (not TP1/TP2
+                  partial closes), stop the scalping search and close all
+                  positions. When off, the search keeps running and other
+                  positions stay open.
+                </p>
+              </div>
+              <Switch
+                label="Stop scalping on final TP"
+                checked={stopOnFinalTp}
+                onChange={toggleStopOnFinalTp}
+                disabled={!loaded || busy === "final-tp"}
+              />
+            </div>
+            <p
+              className={cx(
+                "mt-2.5 flex items-start gap-2 rounded-lg px-3 py-2 text-xs font-semibold leading-5",
+                stopOnFinalTp
+                  ? "bg-amber-50 text-amber-700"
+                  : "bg-rose-50 text-rose-700",
+              )}
+            >
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {stopOnFinalTp
+                ? "Recommended: keep this on. It locks in the session after a winning trade."
+                : "Not recommended: with this off, scalping keeps opening trades after a final TP and open positions are not closed."}
+            </p>
+          </div>
         </div>
-        <div className="mt-4 flex flex-wrap items-end gap-4">
-          <label className="block w-full max-w-xs text-xs font-black uppercase tracking-wide text-slate-500">
-            Session loss limit ({isAmountMode ? "$" : "%"})
-            <input
-              type="number"
-              min="0"
-              max={isAmountMode ? undefined : "100"}
-              step={isAmountMode ? "1" : "0.1"}
-              inputMode="decimal"
-              placeholder={isAmountMode ? "e.g. 500" : "e.g. 2"}
-              value={isAmountMode ? sessionRisk.amount : sessionRisk.percent}
-              onChange={(event) => {
-                const value = decimalInput(event.target.value);
-                setSessionRisk((current) => (isAmountMode ? { ...current, amount: value } : { ...current, percent: value }));
-              }}
-              className={inputClass}
-              disabled={!sessionRisk.enabled || !loaded}
-            />
-          </label>
-          <AppButton variant="blue" onClick={saveSessionRisk} disabled={!loaded || busy === "session"}>
-            Save Session Risk
-          </AppButton>
-        </div>
-        {liveRisk?.active ? (
-          <p className="mt-4 rounded-lg bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">
-            Live session: {money(Number(liveRisk.loss_amount || 0))} loss ({Number(liveRisk.loss_percent || 0).toFixed(2)}%) from{" "}
-            {money(Number(liveRisk.start_equity || 0))} starting equity.
-          </p>
-        ) : liveRisk?.hit ? (
-          <p className="mt-4 rounded-lg bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">
-            {liveRisk.reason || "Session risk limit reached. Start a new search session to reset it."}
-          </p>
-        ) : null}
       </Section>
 
       <Section
@@ -566,13 +798,23 @@ function PreferencesTab({
         />
         <div className="mt-4 space-y-2">
           {subAccounts.length === 0 ? (
-            <p className="text-xs font-semibold text-slate-500">No sub accounts yet. Add one from the Dashboard.</p>
+            <p className="text-xs font-semibold text-slate-500">
+              No sub accounts yet. Add one from the Dashboard.
+            </p>
           ) : (
             subAccounts.map((account) => (
-              <div key={account.id} className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2">
+              <div
+                key={account.id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2"
+              >
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-slate-900">{account.name}</p>
-                  <p className="text-[11px] font-semibold text-slate-500">Risk {riskLabel(account)} · delay {account.orderDelaySec ?? 0}s</p>
+                  <p className="truncate text-sm font-bold text-slate-900">
+                    {account.name}
+                  </p>
+                  <p className="text-[11px] font-semibold text-slate-500">
+                    Risk {riskLabel(account)} · delay{" "}
+                    {account.orderDelaySec ?? 0}s
+                  </p>
                 </div>
                 <span
                   className={cx(
@@ -584,14 +826,19 @@ function PreferencesTab({
                         : "bg-amber-50 text-amber-700",
                   )}
                 >
-                  {!copyTradingEnabled ? "Paused" : account.status === "Connected" ? "Copying" : "Not connected"}
+                  {!copyTradingEnabled
+                    ? "Paused"
+                    : account.status === "Connected"
+                      ? "Copying"
+                      : "Not connected"}
                 </span>
               </div>
             ))
           )}
           {subAccounts.length ? (
             <p className="text-[11px] font-semibold text-slate-500">
-              {connectedSubs.length}/{subAccounts.length} sub account(s) connected.
+              {connectedSubs.length}/{subAccounts.length} sub account(s)
+              connected.
             </p>
           ) : null}
         </div>
@@ -601,28 +848,47 @@ function PreferencesTab({
         icon={RadioTower}
         title="Remote"
         description="Let a controller PC send trades to this PC. Tokens, the receiver URL and controller targets are managed on the Remote Control page."
-        aside={<StatusPill on={remote.enabled} onText="Receiving" offText="Off" />}
+        aside={
+          <StatusPill on={remote.enabled} onText="Receiving" offText="Off" />
+        }
       >
         <ToggleRow
           label="Accept trades from a controller"
-          description={remote.token ? "Only controllers with this PC's token can connect." : "No receiver token yet. Create one on the Remote Control page."}
+          description={
+            remote.token
+              ? "Only controllers with this PC's token can connect."
+              : "No receiver token yet. Create one on the Remote Control page."
+          }
           checked={remote.enabled}
           onChange={toggleRemoteReceiver}
           disabled={!loaded || busy === "remote"}
         />
         <dl className="mt-4 grid gap-2 text-xs sm:grid-cols-2">
           <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-            <dt className="font-bold uppercase tracking-wide text-slate-500">Receiver URL</dt>
-            <dd className="mt-0.5 truncate font-semibold text-slate-900" title={remote.receiver_url}>
+            <dt className="font-bold uppercase tracking-wide text-slate-500">
+              Receiver URL
+            </dt>
+            <dd
+              className="mt-0.5 truncate font-semibold text-slate-900"
+              title={remote.receiver_url}
+            >
               {remote.receiver_url || "Not set"}
             </dd>
           </div>
           <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-            <dt className="font-bold uppercase tracking-wide text-slate-500">Controller connections</dt>
-            <dd className="mt-0.5 font-semibold text-slate-900">{remoteConnections}</dd>
+            <dt className="font-bold uppercase tracking-wide text-slate-500">
+              Controller connections
+            </dt>
+            <dd className="mt-0.5 font-semibold text-slate-900">
+              {remoteConnections}
+            </dd>
           </div>
         </dl>
-        <AppButton variant="soft" className="mt-4" onClick={() => onOpenPage?.("remote")}>
+        <AppButton
+          variant="soft"
+          className="mt-4"
+          onClick={() => onOpenPage?.("remote")}
+        >
           <ExternalLink className="h-4 w-4" /> Open Remote Control
         </AppButton>
       </Section>
@@ -635,16 +901,35 @@ function PreferencesTab({
       >
         <div className="grid gap-3 md:grid-cols-2">
           {[
-            ["search", "Strategy & trade log", "Search, scalping, orders, copy trading and session risk."],
-            ["adapter", "Account & remote log", "MT5 account connections and remote control activity."],
+            [
+              "search",
+              "Strategy & trade log",
+              "Search, scalping, orders, copy trading and session risk.",
+            ],
+            [
+              "adapter",
+              "Account & remote log",
+              "MT5 account connections and remote control activity.",
+            ],
           ].map(([kind, label, help]) => (
-            <div key={kind} className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div
+              key={kind}
+              className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3"
+            >
               <div className="min-w-0">
                 <p className="text-sm font-black text-slate-900">{label}</p>
-                <p className="mt-0.5 text-xs leading-5 text-slate-500">{help}</p>
-                <p className="mt-1 text-[11px] font-bold text-slate-500">{logCounts[kind]} line(s)</p>
+                <p className="mt-0.5 text-xs leading-5 text-slate-500">
+                  {help}
+                </p>
+                <p className="mt-1 text-[11px] font-bold text-slate-500">
+                  {logCounts[kind]} line(s)
+                </p>
               </div>
-              <AppButton variant="soft" onClick={() => clearLog(kind)} disabled={busy === `log-${kind}` || logCounts[kind] === 0}>
+              <AppButton
+                variant="soft"
+                onClick={() => clearLog(kind)}
+                disabled={busy === `log-${kind}` || logCounts[kind] === 0}
+              >
                 <Trash2 className="h-4 w-4" /> Clear
               </AppButton>
             </div>
@@ -659,7 +944,11 @@ function PreferencesTab({
 /* Notifications                                                       */
 /* ------------------------------------------------------------------ */
 
-function NotificationsTab({ notificationSettings, onNotificationSettingsChange, notify }) {
+function NotificationsTab({
+  notificationSettings,
+  onNotificationSettingsChange,
+  notify,
+}) {
   async function save(nextSettings) {
     try {
       await api.saveNotificationSettings(nextSettings);
@@ -671,13 +960,33 @@ function NotificationsTab({ notificationSettings, onNotificationSettingsChange, 
   }
 
   return (
-    <Section icon={Bell} title="Notification Preferences" description="Choose which events appear in the notification bell. Errors are always shown.">
+    <Section
+      icon={Bell}
+      title="Notification Preferences"
+      description="Choose which events appear in the notification bell. Errors are always shown."
+    >
       <div className="grid gap-3 lg:grid-cols-2">
         {[
-          ["enabled", "Enable notifications", "Show notifications from account, search, remote, and risk events."],
-          ["show_warnings", "Show warnings", "Include account disconnects, blocked commands, and warning events."],
-          ["show_success", "Show successful actions", "Include successful orders, connections, and completed commands."],
-          ["show_info", "Show informational updates", "Include routine system information messages."],
+          [
+            "enabled",
+            "Enable notifications",
+            "Show notifications from account, search, remote, and risk events.",
+          ],
+          [
+            "show_warnings",
+            "Show warnings",
+            "Include account disconnects, blocked commands, and warning events.",
+          ],
+          [
+            "show_success",
+            "Show successful actions",
+            "Include successful orders, connections, and completed commands.",
+          ],
+          [
+            "show_info",
+            "Show informational updates",
+            "Include routine system information messages.",
+          ],
         ].map(([key, label, help]) => (
           <ToggleRow
             key={key}
@@ -685,7 +994,9 @@ function NotificationsTab({ notificationSettings, onNotificationSettingsChange, 
             description={help}
             checked={Boolean(notificationSettings[key])}
             disabled={key !== "enabled" && !notificationSettings.enabled}
-            onChange={(checked) => save({ ...notificationSettings, [key]: checked })}
+            onChange={(checked) =>
+              save({ ...notificationSettings, [key]: checked })
+            }
           />
         ))}
       </div>
@@ -698,26 +1009,59 @@ function NotificationsTab({ notificationSettings, onNotificationSettingsChange, 
 /* ------------------------------------------------------------------ */
 
 const THEME_OPTIONS = [
-  { mode: "LIGHT", label: "Light", help: "Clean, high-contrast workspace for daytime trading.", icon: Sun },
-  { mode: "DARK", label: "Dark", help: "Reduced glare for low-light trading sessions.", icon: Moon },
-  { mode: "SYSTEM", label: "System", help: "Follow your operating system's light or dark setting.", icon: Monitor },
+  {
+    mode: "LIGHT",
+    label: "Light",
+    help: "Clean, high-contrast workspace for daytime trading.",
+    icon: Sun,
+  },
+  {
+    mode: "DARK",
+    label: "Dark",
+    help: "Reduced glare for low-light trading sessions.",
+    icon: Moon,
+  },
+  {
+    mode: "SYSTEM",
+    label: "System",
+    help: "Follow your operating system's light or dark setting.",
+    icon: Monitor,
+  },
 ];
 
 // Fixed colors on purpose: each card previews its own theme, whatever the
 // current one is.
 const THEME_PREVIEW = {
-  LIGHT: { shell: "#f1f5f9", side: "#ffffff", card: "#ffffff", line: "#e2e8f0", accent: "#2563eb" },
-  DARK: { shell: "#1e1e1e", side: "#252526", card: "#2d2d2d", line: "#3c3c3c", accent: "#0e639c" },
+  LIGHT: {
+    shell: "#f1f5f9",
+    side: "#ffffff",
+    card: "#ffffff",
+    line: "#e2e8f0",
+    accent: "#2563eb",
+  },
+  DARK: {
+    shell: "#1e1e1e",
+    side: "#252526",
+    card: "#2d2d2d",
+    line: "#3c3c3c",
+    accent: "#0e639c",
+  },
 };
 
 function ThemePreview({ mode }) {
   if (mode === "SYSTEM") {
     return (
       <div className="relative h-20 overflow-hidden rounded-md border border-slate-200">
-        <div className="absolute inset-0" style={{ clipPath: "polygon(0 0, 100% 0, 0 100%)" }}>
+        <div
+          className="absolute inset-0"
+          style={{ clipPath: "polygon(0 0, 100% 0, 0 100%)" }}
+        >
           <MiniShell colors={THEME_PREVIEW.LIGHT} />
         </div>
-        <div className="absolute inset-0" style={{ clipPath: "polygon(100% 0, 100% 100%, 0 100%)" }}>
+        <div
+          className="absolute inset-0"
+          style={{ clipPath: "polygon(100% 0, 100% 100%, 0 100%)" }}
+        >
           <MiniShell colors={THEME_PREVIEW.DARK} />
         </div>
       </div>
@@ -733,16 +1077,43 @@ function ThemePreview({ mode }) {
 function MiniShell({ colors }) {
   return (
     <div className="flex h-full w-full" style={{ background: colors.shell }}>
-      <div className="w-1/5 space-y-1.5 p-2" style={{ background: colors.side }}>
-        <div className="h-1.5 rounded-full" style={{ background: colors.accent }} />
-        <div className="h-1.5 rounded-full" style={{ background: colors.line }} />
-        <div className="h-1.5 rounded-full" style={{ background: colors.line }} />
+      <div
+        className="w-1/5 space-y-1.5 p-2"
+        style={{ background: colors.side }}
+      >
+        <div
+          className="h-1.5 rounded-full"
+          style={{ background: colors.accent }}
+        />
+        <div
+          className="h-1.5 rounded-full"
+          style={{ background: colors.line }}
+        />
+        <div
+          className="h-1.5 rounded-full"
+          style={{ background: colors.line }}
+        />
       </div>
       <div className="flex-1 space-y-1.5 p-2">
-        <div className="h-2 w-1/2 rounded-full" style={{ background: colors.line }} />
+        <div
+          className="h-2 w-1/2 rounded-full"
+          style={{ background: colors.line }}
+        />
         <div className="grid grid-cols-2 gap-1.5">
-          <div className="h-8 rounded" style={{ background: colors.card, border: `1px solid ${colors.line}` }} />
-          <div className="h-8 rounded" style={{ background: colors.card, border: `1px solid ${colors.line}` }} />
+          <div
+            className="h-8 rounded"
+            style={{
+              background: colors.card,
+              border: `1px solid ${colors.line}`,
+            }}
+          />
+          <div
+            className="h-8 rounded"
+            style={{
+              background: colors.card,
+              border: `1px solid ${colors.line}`,
+            }}
+          />
         </div>
       </div>
     </div>
@@ -751,9 +1122,20 @@ function MiniShell({ colors }) {
 
 // [open, close, high, low] for the static preview chart.
 const PREVIEW_CANDLES = [
-  [40, 46, 48, 37], [46, 43, 49, 41], [43, 50, 52, 42], [50, 55, 58, 48], [55, 52, 57, 49],
-  [52, 47, 54, 45], [47, 49, 52, 44], [49, 56, 59, 48], [56, 61, 63, 54], [61, 58, 64, 55],
-  [58, 64, 66, 57], [64, 60, 67, 58], [60, 66, 69, 59], [66, 71, 74, 64],
+  [40, 46, 48, 37],
+  [46, 43, 49, 41],
+  [43, 50, 52, 42],
+  [50, 55, 58, 48],
+  [55, 52, 57, 49],
+  [52, 47, 54, 45],
+  [47, 49, 52, 44],
+  [49, 56, 59, 48],
+  [56, 61, 63, 54],
+  [61, 58, 64, 55],
+  [58, 64, 66, 57],
+  [64, 60, 67, 58],
+  [60, 66, 69, 59],
+  [66, 71, 74, 64],
 ];
 
 function ChartPreview({ appearance, dark }) {
@@ -764,16 +1146,37 @@ function ChartPreview({ appearance, dark }) {
   const toY = (value) => height - 10 - ((value - 34) / 42) * (height - 20);
   const step = width / PREVIEW_CANDLES.length;
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full rounded-md" role="img" aria-label="Chart style preview">
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      className="h-full w-full rounded-md"
+      role="img"
+      aria-label="Chart style preview"
+    >
       <rect width={width} height={height} fill={base.background} />
       {appearance.chart_grid !== false
         ? [1, 2, 3].map((row) => (
-            <line key={`h${row}`} x1="0" x2={width} y1={(height / 4) * row} y2={(height / 4) * row} stroke={base.grid} strokeWidth="1" />
+            <line
+              key={`h${row}`}
+              x1="0"
+              x2={width}
+              y1={(height / 4) * row}
+              y2={(height / 4) * row}
+              stroke={base.grid}
+              strokeWidth="1"
+            />
           ))
         : null}
       {appearance.chart_grid !== false
         ? [1, 2, 3, 4, 5].map((col) => (
-            <line key={`v${col}`} y1="0" y2={height} x1={(width / 6) * col} x2={(width / 6) * col} stroke={base.grid} strokeWidth="1" />
+            <line
+              key={`v${col}`}
+              y1="0"
+              y2={height}
+              x1={(width / 6) * col}
+              x2={(width / 6) * col}
+              stroke={base.grid}
+              strokeWidth="1"
+            />
           ))
         : null}
       {PREVIEW_CANDLES.map(([open, close, high, low], index) => {
@@ -783,16 +1186,53 @@ function ChartPreview({ appearance, dark }) {
         const bottom = toY(Math.min(open, close));
         return (
           <g key={index}>
-            <line x1={x} x2={x} y1={toY(high)} y2={toY(low)} stroke={color} strokeWidth="1.5" />
-            <rect x={x - step * 0.3} y={top} width={step * 0.6} height={Math.max(2, bottom - top)} fill={color} rx="1" />
+            <line
+              x1={x}
+              x2={x}
+              y1={toY(high)}
+              y2={toY(low)}
+              stroke={color}
+              strokeWidth="1.5"
+            />
+            <rect
+              x={x - step * 0.3}
+              y={top}
+              width={step * 0.6}
+              height={Math.max(2, bottom - top)}
+              fill={color}
+              rx="1"
+            />
           </g>
         );
       })}
       {appearance.chart_crosshair === "magnet" ? (
-        <circle cx={step * 9.5} cy={toY(58)} r="3.5" fill="none" stroke={base.text} strokeWidth="1.5" />
+        <circle
+          cx={step * 9.5}
+          cy={toY(58)}
+          r="3.5"
+          fill="none"
+          stroke={base.text}
+          strokeWidth="1.5"
+        />
       ) : null}
-      <line x1={step * 9.5} x2={step * 9.5} y1="0" y2={height} stroke={base.text} strokeDasharray="3 3" strokeOpacity="0.5" />
-      <line x1="0" x2={width} y1={toY(appearance.chart_crosshair === "magnet" ? 58 : 62)} y2={toY(appearance.chart_crosshair === "magnet" ? 58 : 62)} stroke={base.text} strokeDasharray="3 3" strokeOpacity="0.5" />
+      <line
+        x1={step * 9.5}
+        x2={step * 9.5}
+        y1="0"
+        y2={height}
+        stroke={base.text}
+        strokeDasharray="3 3"
+        strokeOpacity="0.5"
+      />
+      <line
+        x1="0"
+        x2={width}
+        y1={toY(appearance.chart_crosshair === "magnet" ? 58 : 62)}
+        y2={toY(appearance.chart_crosshair === "magnet" ? 58 : 62)}
+        stroke={base.text}
+        strokeDasharray="3 3"
+        strokeOpacity="0.5"
+      />
     </svg>
   );
 }
@@ -810,8 +1250,12 @@ function AppearanceTab({
   const draggingZoom = useRef(false);
   const pendingAppearance = useRef({});
   const appearanceTimer = useRef(null);
-  const prefersDark = useMemo(() => Boolean(window.matchMedia?.("(prefers-color-scheme: dark)").matches), [themeMode]);
-  const previewDark = themeMode === "DARK" || (themeMode === "SYSTEM" && prefersDark);
+  const prefersDark = useMemo(
+    () => Boolean(window.matchMedia?.("(prefers-color-scheme: dark)").matches),
+    [themeMode],
+  );
+  const previewDark =
+    themeMode === "DARK" || (themeMode === "SYSTEM" && prefersDark);
 
   useEffect(() => {
     if (!draggingZoom.current) setZoomDraft(uiZoomPercent);
@@ -823,7 +1267,9 @@ function AppearanceTab({
     onThemeModeChange?.(mode);
     try {
       await api.saveTheme(mode);
-      notify(`${THEME_OPTIONS.find((item) => item.mode === mode)?.label} theme saved.`);
+      notify(
+        `${THEME_OPTIONS.find((item) => item.mode === mode)?.label} theme saved.`,
+      );
     } catch (error) {
       onThemeModeChange?.(previous);
       notify(errorText(error), "error");
@@ -855,12 +1301,24 @@ function AppearanceTab({
     if (zoom !== uiZoomPercent) onUiZoomPercentChange?.(zoom);
   }
 
-  const customColors = candleColors({ ...appearance, chart_candle_preset: "custom" }, previewDark);
+  const customColors = candleColors(
+    { ...appearance, chart_candle_preset: "custom" },
+    previewDark,
+  );
 
   return (
     <div className="grid gap-5 xl:grid-cols-2">
-      <Section icon={Palette} title="Theme" description="Applies to the whole app, including charts." className="xl:col-span-2">
-        <div className="grid gap-3 sm:grid-cols-3" role="radiogroup" aria-label="Theme">
+      <Section
+        icon={Palette}
+        title="Theme"
+        description="Applies to the whole app, including charts."
+        className="xl:col-span-2"
+      >
+        <div
+          className="grid gap-3 sm:grid-cols-3"
+          role="radiogroup"
+          aria-label="Theme"
+        >
           {THEME_OPTIONS.map(({ mode, label, help, icon: Icon }) => (
             <button
               key={mode}
@@ -870,14 +1328,18 @@ function AppearanceTab({
               onClick={() => themeMode !== mode && saveTheme(mode)}
               className={cx(
                 "rounded-lg border p-3 text-left transition",
-                themeMode === mode ? "border-blue-500 bg-blue-50 ring-2 ring-blue-100" : "border-slate-200 bg-white hover:border-slate-300",
+                themeMode === mode
+                  ? "border-blue-500 bg-blue-50 ring-2 ring-blue-100"
+                  : "border-slate-200 bg-white hover:border-slate-300",
               )}
             >
               <ThemePreview mode={mode} />
               <span className="mt-3 flex items-center gap-2 text-sm font-black text-slate-950">
                 <Icon className="h-4 w-4" /> {label}
               </span>
-              <span className="mt-1 block text-xs leading-5 text-slate-500">{help}</span>
+              <span className="mt-1 block text-xs leading-5 text-slate-500">
+                {help}
+              </span>
             </button>
           ))}
         </div>
@@ -937,7 +1399,9 @@ function AppearanceTab({
               onClick={() => commitZoom(preset)}
               className={cx(
                 "rounded-lg border px-3 py-1.5 text-xs font-black transition",
-                uiZoomPercent === preset ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300",
+                uiZoomPercent === preset
+                  ? "border-blue-500 bg-blue-50 text-blue-700"
+                  : "border-slate-200 bg-white text-slate-600 hover:border-slate-300",
               )}
             >
               {preset}%
@@ -953,14 +1417,24 @@ function AppearanceTab({
         </div>
         <p className="mt-4 flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-slate-500">
           <Keyboard className="h-3.5 w-3.5" /> Shortcuts:
-          <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">Ctrl +</kbd>
-          <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">Ctrl −</kbd>
-          <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">Ctrl 0</kbd>
+          <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">
+            Ctrl +
+          </kbd>
+          <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">
+            Ctrl −
+          </kbd>
+          <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">
+            Ctrl 0
+          </kbd>
           reset
         </p>
       </Section>
 
-      <Section icon={Sparkles} title="Motion" description="Animations used for page changes, menus and toggles.">
+      <Section
+        icon={Sparkles}
+        title="Motion"
+        description="Animations used for page changes, menus and toggles."
+      >
         <ToggleRow
           label="Reduce motion"
           description="Turns off page transitions and UI animations. Loading spinners keep spinning."
@@ -978,27 +1452,51 @@ function AppearanceTab({
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
           <div className="space-y-5">
             <div>
-              <p className="text-xs font-black uppercase tracking-wide text-slate-500">Candle colors</p>
+              <p className="text-xs font-black uppercase tracking-wide text-slate-500">
+                Candle colors
+              </p>
               <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {CANDLE_PRESETS.map((preset) => {
-                  const colors = candleColors({ ...appearance, chart_candle_preset: preset.id }, previewDark);
-                  const selected = (appearance.chart_candle_preset || "default") === preset.id;
+                  const colors = candleColors(
+                    { ...appearance, chart_candle_preset: preset.id },
+                    previewDark,
+                  );
+                  const selected =
+                    (appearance.chart_candle_preset || "default") === preset.id;
                   return (
                     <button
                       key={preset.id}
                       type="button"
-                      onClick={() => updateAppearance({ chart_candle_preset: preset.id })}
+                      onClick={() =>
+                        updateAppearance({ chart_candle_preset: preset.id })
+                      }
                       className={cx(
                         "flex items-center gap-3 rounded-lg border px-3 py-2 text-left transition",
-                        selected ? "border-blue-500 bg-blue-50 ring-2 ring-blue-100" : "border-slate-200 bg-white hover:border-slate-300",
+                        selected
+                          ? "border-blue-500 bg-blue-50 ring-2 ring-blue-100"
+                          : "border-slate-200 bg-white hover:border-slate-300",
                       )}
                     >
-                      <span className="flex items-end gap-0.5" aria-hidden="true">
-                        <span className="h-5 w-2 rounded-sm" style={{ background: colors.upColor }} />
-                        <span className="h-3.5 w-2 rounded-sm" style={{ background: colors.downColor }} />
-                        <span className="h-4 w-2 rounded-sm" style={{ background: colors.upColor }} />
+                      <span
+                        className="flex items-end gap-0.5"
+                        aria-hidden="true"
+                      >
+                        <span
+                          className="h-5 w-2 rounded-sm"
+                          style={{ background: colors.upColor }}
+                        />
+                        <span
+                          className="h-3.5 w-2 rounded-sm"
+                          style={{ background: colors.downColor }}
+                        />
+                        <span
+                          className="h-4 w-2 rounded-sm"
+                          style={{ background: colors.upColor }}
+                        />
                       </span>
-                      <span className="text-xs font-black text-slate-800">{preset.label}</span>
+                      <span className="text-xs font-black text-slate-800">
+                        {preset.label}
+                      </span>
                     </button>
                   );
                 })}
@@ -1009,15 +1507,22 @@ function AppearanceTab({
                     ["chart_up_color", "Up candle", customColors.upColor],
                     ["chart_down_color", "Down candle", customColors.downColor],
                   ].map(([key, label, value]) => (
-                    <label key={key} className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700">
+                    <label
+                      key={key}
+                      className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700"
+                    >
                       <input
                         type="color"
                         value={value}
-                        onChange={(event) => updateAppearance({ [key]: event.target.value })}
+                        onChange={(event) =>
+                          updateAppearance({ [key]: event.target.value })
+                        }
                         className="h-7 w-9 cursor-pointer rounded border-0 bg-transparent p-0"
                       />
                       {label}
-                      <span className="font-mono text-[11px] text-slate-500">{value}</span>
+                      <span className="font-mono text-[11px] text-slate-500">
+                        {value}
+                      </span>
                     </label>
                   ))}
                 </div>
@@ -1032,12 +1537,20 @@ function AppearanceTab({
               />
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
                 <p className="text-sm font-black text-slate-900">Crosshair</p>
-                <p className="mt-0.5 text-xs leading-5 text-slate-500">Magnet snaps to the candle's close.</p>
+                <p className="mt-0.5 text-xs leading-5 text-slate-500">
+                  Magnet snaps to the candle's close.
+                </p>
                 <div className="mt-2.5">
                   <Segmented
                     label="Crosshair mode"
-                    value={appearance.chart_crosshair === "magnet" ? "magnet" : "normal"}
-                    onChange={(chart_crosshair) => updateAppearance({ chart_crosshair })}
+                    value={
+                      appearance.chart_crosshair === "magnet"
+                        ? "magnet"
+                        : "normal"
+                    }
+                    onChange={(chart_crosshair) =>
+                      updateAppearance({ chart_crosshair })
+                    }
                     options={[
                       { value: "normal", label: "Free" },
                       { value: "magnet", label: "Magnet" },
@@ -1048,7 +1561,9 @@ function AppearanceTab({
             </div>
           </div>
           <div>
-            <p className="text-xs font-black uppercase tracking-wide text-slate-500">Preview</p>
+            <p className="text-xs font-black uppercase tracking-wide text-slate-500">
+              Preview
+            </p>
             <div className="mt-2 h-[150px] overflow-hidden rounded-lg border border-slate-200">
               <ChartPreview appearance={appearance} dark={previewDark} />
             </div>

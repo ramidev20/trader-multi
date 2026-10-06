@@ -24,6 +24,7 @@ from .strategy_service import (
     _close_mt5_pending_order,
     close_all_positions,
     open_manual_position,
+    stop_on_final_tp_enabled,
     wait_for_new_candle,
 )
 
@@ -110,6 +111,8 @@ from .strategy_service import (
 # A position closed by its final TP (the broker TP -- partial TP1/TP2
 # withdrawals are closed by the app and don't count) ends the session: both
 # sides' searches stop and every open position on the symbol is closed.
+# With "Stop on final TP" turned off in Settings, a final TP is handled like
+# any other TP/SL close instead: the search keeps going and nothing is closed.
 #   - Candles that fail either minimum are skipped and the walk continues to
 #     the next deeper low/high. Only if no candle in the lookback qualifies
 #     does the stop fall back to entry -/+ min SL.
@@ -1765,7 +1768,7 @@ class ZoneStrategyEngine:
         return None
 
     def _restart_search_after_close(self, closed_reason: str) -> None:
-        if closed_reason == "TP":
+        if closed_reason == "TP" and stop_on_final_tp_enabled():
             _stop_all_and_close(
                 self.symbol,
                 f"[SUCCESS] [scalping:{self.side}] Position hit its final TP; stopping scalping "

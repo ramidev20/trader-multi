@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   Bell,
   ChevronDown,
-  Copy,
+  History,
   CheckCircle2,
   AlertTriangle,
   Info,
@@ -49,7 +49,7 @@ const mobileNavItems = [
   { key: "dashboard", label: "Dashboard", icon: null },
   { key: "search", label: "Search", icon: null },
   { key: "trade", label: "Trade", icon: Terminal },
-  { key: "history", label: "History", icon: Copy },
+  { key: "history", label: "History", icon: History },
 ];
 
 export default function TopBar({

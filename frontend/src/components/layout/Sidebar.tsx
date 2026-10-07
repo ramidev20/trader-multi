@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import {
-  Copy,
+  History,
   Home,
   ChevronsLeft,
   ChevronsRight,
@@ -36,7 +36,7 @@ export default function Sidebar({ activePage, onChangePage }: SidebarProps) {
     { key: "dashboard", label: "Dashboard", icon: Home },
     { key: "search", label: "Search", icon: Search },
     { key: "trade", label: "Trade", icon: Terminal },
-    { key: "history", label: "Trade History", icon: Copy },
+    { key: "history", label: "Trade History", icon: History },
     { key: "remote", label: "Remote Control", icon: Radio },
     { key: "settings", label: "Settings", icon: Settings },
   ];

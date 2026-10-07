@@ -14,6 +14,7 @@ import {
   Plus,
   RadioTower,
   RotateCcw,
+  Save,
   ScrollText,
   ShieldAlert,
   SlidersHorizontal,
@@ -56,6 +57,25 @@ function normalizeSettingsTab(tab) {
 
 function errorText(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+// What the session risk form saves for its current mode. An empty profit
+// limit means no profit stop.
+function sessionRiskPayload(risk) {
+  const isAmount = risk.mode === "amount";
+  return {
+    enabled: risk.enabled,
+    mode: risk.mode,
+    ...(isAmount
+      ? {
+          session_risk_amount: Number(risk.amount || 0),
+          session_profit_amount: Number(risk.profitAmount || 0),
+        }
+      : {
+          session_risk_percent: Number(risk.percent || 0),
+          session_profit_percent: Number(risk.profitPercent || 0),
+        }),
+  };
 }
 
 export function SettingsPlaceholder({
@@ -439,6 +459,8 @@ function PreferencesTab({
     mode: "percent",
     percent: "2",
     amount: "",
+    profitPercent: "",
+    profitAmount: "",
   });
   const [remote, setRemote] = useState({
     enabled: false,
@@ -455,28 +477,18 @@ function PreferencesTab({
       .settings()
       .then((settings) => {
         if (!active) return;
-        setSessionRisk({
+        const positive = (value) =>
+          Number(value || 0) > 0 ? String(value) : "";
+        const loadedRisk = {
           enabled: Boolean(settings?.session_risk_enabled ?? true),
           mode: settings?.session_risk_mode === "amount" ? "amount" : "percent",
           percent: String(settings?.session_risk_percent ?? 2),
-          amount:
-            Number(settings?.session_risk_amount || 0) > 0
-              ? String(settings.session_risk_amount)
-              : "",
-        });
-        lastSavedSessionRisk.current = JSON.stringify({
-          enabled: Boolean(settings?.session_risk_enabled ?? true),
-          mode: settings?.session_risk_mode === "amount" ? "amount" : "percent",
-          ...(settings?.session_risk_mode === "amount"
-            ? {
-                session_risk_amount: Number(settings?.session_risk_amount || 0),
-              }
-            : {
-                session_risk_percent: Number(
-                  settings?.session_risk_percent ?? 2,
-                ),
-              }),
-        });
+          amount: positive(settings?.session_risk_amount),
+          profitPercent: positive(settings?.session_profit_percent),
+          profitAmount: positive(settings?.session_profit_amount),
+        };
+        setSessionRisk(loadedRisk);
+        setSavedSessionRiskKey(JSON.stringify(sessionRiskPayload(loadedRisk)));
         setStopOnFinalTp(settings?.stop_on_final_tp !== false);
         setSpreadInRisk(settings?.spread_in_risk !== false);
         setRemote({
@@ -492,19 +504,17 @@ function PreferencesTab({
     };
   }, []);
 
-  // Session risk saves itself: the switch and the limit type at once, the
-  // loss limit shortly after typing stops (or on blur / Enter).
-  const sessionSaveTimer = useRef(null);
-  const pendingSessionRisk = useRef(null);
-  const lastSavedSessionRisk = useRef("");
+  // The switch saves at once; the limit type and the limits are a draft
+  // saved by the Update button (or Enter in a limit field).
+  const [savedSessionRiskKey, setSavedSessionRiskKey] = useState("");
+  const sessionRiskDirty =
+    loaded &&
+    JSON.stringify(sessionRiskPayload(sessionRisk)) !== savedSessionRiskKey;
 
   async function persistSessionRisk(next) {
-    pendingSessionRisk.current = null;
     const isAmount = next.mode === "amount";
-    const raw = isAmount ? next.amount : next.percent;
-    // Mid-edit (empty field): wait for a value instead of erroring.
-    if (String(raw).trim() === "" && next.enabled) return;
-    const value = Number(raw || 0);
+    const value = Number((isAmount ? next.amount : next.percent) || 0);
+    const profit = Number((isAmount ? next.profitAmount : next.profitPercent) || 0);
     if (!Number.isFinite(value) || value < 0 || (!isAmount && value > 100)) {
       notify(
         isAmount
@@ -514,6 +524,10 @@ function PreferencesTab({
       );
       return;
     }
+    if (!Number.isFinite(profit) || profit < 0) {
+      notify("Session profit limit must be 0 or more.", "error");
+      return;
+    }
     if (next.enabled && value <= 0) {
       notify(
         "Enter a session loss limit above 0 to turn the session risk guard on.",
@@ -521,54 +535,45 @@ function PreferencesTab({
       );
       return;
     }
-    const payload = {
-      enabled: next.enabled,
-      mode: next.mode,
-      ...(isAmount
-        ? { session_risk_amount: value }
-        : { session_risk_percent: value }),
-    };
+    const payload = sessionRiskPayload(next);
     const key = JSON.stringify(payload);
-    if (key === lastSavedSessionRisk.current) return;
+    if (key === savedSessionRiskKey) return true;
+    const label = (amount: number) => (isAmount ? money(amount) : `${amount}%`);
+    setBusy("session-risk");
     try {
       await api.saveSessionRisk(payload);
-      lastSavedSessionRisk.current = key;
+      setSavedSessionRiskKey(key);
       notify(
         next.enabled
-          ? `Session risk saved: stops at ${isAmount ? money(value) : `${value}%`} loss.`
+          ? `Session risk saved: stops at ${label(value)} loss${profit > 0 ? ` or ${label(profit)} profit` : ""}.`
           : "Session risk guard turned off.",
       );
       onRefreshRuntime?.({ silent: true });
+      return true;
     } catch (error) {
       notify(errorText(error), "error");
+      return false;
+    } finally {
+      setBusy("");
     }
   }
 
-  function updateSessionRisk(patch, { immediate = true } = {}) {
-    const next = { ...sessionRisk, ...patch };
+  async function toggleSessionRisk(enabled: boolean) {
+    const next = { ...sessionRisk, enabled };
     setSessionRisk(next);
-    window.clearTimeout(sessionSaveTimer.current);
-    if (immediate) {
-      persistSessionRisk(next);
-    } else {
-      pendingSessionRisk.current = next;
-      sessionSaveTimer.current = window.setTimeout(
-        () => persistSessionRisk(next),
-        900,
-      );
+    if (!(await persistSessionRisk(next))) {
+      setSessionRisk((current) => ({ ...current, enabled: !enabled }));
     }
   }
 
-  function flushSessionRisk() {
-    window.clearTimeout(sessionSaveTimer.current);
-    if (pendingSessionRisk.current)
-      persistSessionRisk(pendingSessionRisk.current);
+  function editSessionRisk(patch: Partial<typeof sessionRisk>) {
+    setSessionRisk((current) => ({ ...current, ...patch }));
   }
 
-  // Leaving the tab mid-edit still saves the last typed limit.
-  const flushOnUnmount = useRef(flushSessionRisk);
-  flushOnUnmount.current = flushSessionRisk;
-  useEffect(() => () => flushOnUnmount.current(), []);
+  function saveSessionRiskLimits() {
+    if (sessionRiskDirty && busy !== "session-risk")
+      persistSessionRisk(sessionRisk);
+  }
 
   async function toggleStopOnFinalTp(enabled) {
     setBusy("final-tp");
@@ -681,7 +686,7 @@ function PreferencesTab({
       <Section
         icon={ShieldAlert}
         title="Session Risk Guard"
-        description="Tracks the master account's balance (closed trades) from the start of a search session. On limit, every search stops and connected positions are closed. The session resets when all searches stop."
+        description="Tracks the master account's balance (closed trades) from the start of a search session. On the loss or profit limit, every search stops and connected positions are closed. The session resets when all searches stop."
         aside={<StatusPill on={sessionRisk.enabled} />}
         className="xl:col-span-2"
       >
@@ -699,43 +704,93 @@ function PreferencesTab({
               <Switch
                 label="Enable session risk guard"
                 checked={sessionRisk.enabled}
-                onChange={(enabled) => updateSessionRisk({ enabled })}
-                disabled={!loaded}
+                onChange={toggleSessionRisk}
+                disabled={!loaded || busy === "session-risk"}
               />
             </div>
-            <label className="mt-4 block max-w-xs text-xs font-black uppercase tracking-wide text-slate-500">
-              Session loss limit ({isAmountMode ? "$" : "%"})
-              <input
-                type="number"
-                min="0"
-                max={isAmountMode ? undefined : "100"}
-                step={isAmountMode ? "1" : "0.1"}
-                inputMode="decimal"
-                placeholder={isAmountMode ? "e.g. 500" : "e.g. 2"}
-                value={isAmountMode ? sessionRisk.amount : sessionRisk.percent}
-                onChange={(event) => {
-                  const value = decimalInput(event.target.value);
-                  updateSessionRisk(
-                    isAmountMode ? { amount: value } : { percent: value },
-                    { immediate: false },
-                  );
-                }}
-                onBlur={flushSessionRisk}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") flushSessionRisk();
-                }}
-                className={inputClass}
-                disabled={!sessionRisk.enabled || !loaded}
-              />
-            </label>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {(
+                [
+                  {
+                    label: "Session loss limit",
+                    field: isAmountMode ? "amount" : "percent",
+                    placeholder: isAmountMode ? "e.g. 500" : "e.g. 2",
+                    max: isAmountMode ? undefined : "100",
+                  },
+                  {
+                    label: "Session profit limit",
+                    field: isAmountMode ? "profitAmount" : "profitPercent",
+                    placeholder: isAmountMode ? "Off, e.g. 1000" : "Off, e.g. 4",
+                    max: undefined,
+                  },
+                ] as const
+              ).map(({ label, field, placeholder, max }) => (
+                <label
+                  key={label}
+                  className="block text-xs font-black uppercase tracking-wide text-slate-500"
+                >
+                  {label} ({isAmountMode ? "$" : "%"})
+                  <input
+                    type="number"
+                    min="0"
+                    max={max}
+                    step={isAmountMode ? "1" : "0.1"}
+                    inputMode="decimal"
+                    placeholder={placeholder}
+                    value={sessionRisk[field]}
+                    onChange={(event) =>
+                      editSessionRisk({
+                        [field]: decimalInput(event.target.value),
+                      })
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") saveSessionRiskLimits();
+                    }}
+                    className={inputClass}
+                    disabled={!sessionRisk.enabled || !loaded}
+                  />
+                </label>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[11px] leading-5 text-slate-500">
+              Leave the profit limit empty to keep trading after any profit.
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <AppButton
+                onClick={saveSessionRiskLimits}
+                disabled={
+                  !sessionRisk.enabled ||
+                  !sessionRiskDirty ||
+                  busy === "session-risk"
+                }
+              >
+                <Save className="h-4 w-4" />
+                {busy === "session-risk" ? "Saving..." : "Update limits"}
+              </AppButton>
+              {sessionRisk.enabled && sessionRiskDirty ? (
+                <span className="text-xs font-bold text-amber-600">
+                  Unsaved changes
+                </span>
+              ) : null}
+            </div>
             {liveRisk?.active ? (
               <p className="mt-4 rounded-lg bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">
-                Live session: {money(Number(liveRisk.loss_amount || 0))} loss (
-                {Number(liveRisk.loss_percent || 0).toFixed(2)}%) from{" "}
-                {money(Number(liveRisk.start_balance || 0))} starting balance.
+                Live session:{" "}
+                {Number(liveRisk.profit_amount || 0) > 0
+                  ? `${money(Number(liveRisk.profit_amount))} profit (${Number(liveRisk.profit_percent || 0).toFixed(2)}%)`
+                  : `${money(Number(liveRisk.loss_amount || 0))} loss (${Number(liveRisk.loss_percent || 0).toFixed(2)}%)`}{" "}
+                from {money(Number(liveRisk.start_balance || 0))} starting
+                balance.
               </p>
             ) : liveRisk?.hit ? (
-              <p className="mt-4 rounded-lg bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">
+              <p
+                className={cx(
+                  "mt-4 rounded-lg px-3 py-2 text-xs font-bold",
+                  liveRisk.hit_type === "profit"
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-rose-50 text-rose-700",
+                )}
+              >
                 {liveRisk.reason ||
                   "Session risk limit reached. Start a new search session to reset it."}
               </p>
@@ -745,15 +800,15 @@ function PreferencesTab({
             <p className="text-sm font-black text-slate-900">Limit type</p>
             <p className="mt-0.5 text-xs leading-5 text-slate-500">
               {isAmountMode
-                ? "Stop after losing a fixed amount of master balance."
-                : "Stop after losing a percent of the session's starting balance."}
+                ? "Limits are fixed amounts of master balance."
+                : "Limits are a percent of the session's starting balance."}
             </p>
             <div className="mt-2.5">
               <Segmented
                 label="Session limit type"
                 value={sessionRisk.mode}
                 disabled={!sessionRisk.enabled || !loaded}
-                onChange={(mode) => updateSessionRisk({ mode })}
+                onChange={(mode) => editSessionRisk({ mode })}
                 options={[
                   { value: "percent", label: "Percent (%)" },
                   { value: "amount", label: "Amount ($)" },

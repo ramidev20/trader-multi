@@ -86,6 +86,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "session_risk_mode": "percent",
     "session_risk_percent": 2.0,
     "session_risk_amount": 0.0,
+    # Optional profit target per session, in the same mode as the loss limit.
+    # 0 means no profit stop.
+    "session_profit_percent": 0.0,
+    "session_profit_amount": 0.0,
     "copy_trading_enabled": True,
     "stop_on_final_tp": True,
     "spread_in_risk": True,
@@ -117,6 +121,8 @@ class ZoomUpdate(BaseModel):
 class SessionRiskUpdate(BaseModel):
     session_risk_percent: float | None = None
     session_risk_amount: float | None = None
+    session_profit_percent: float | None = None
+    session_profit_amount: float | None = None
     mode: str | None = None
     enabled: bool | None = None
 
@@ -424,6 +430,8 @@ def _load_config() -> dict[str, Any]:
     config["ui_zoom_percent"] = min(150, max(70, int(config.get("ui_zoom_percent", 100) or 100)))
     config["session_risk_percent"] = min(100.0, max(0.0, _safe_float(config.get("session_risk_percent"))))
     config["session_risk_amount"] = max(0.0, _safe_float(config.get("session_risk_amount")))
+    config["session_profit_percent"] = max(0.0, _safe_float(config.get("session_profit_percent")))
+    config["session_profit_amount"] = max(0.0, _safe_float(config.get("session_profit_amount")))
     config["session_risk_mode"] = "amount" if str(config.get("session_risk_mode", "percent")).lower() == "amount" else "percent"
     config["session_risk_enabled"] = bool(config.get("session_risk_enabled", True)) and _session_risk_limit(config) > 0
     config["copy_trading_enabled"] = bool(config.get("copy_trading_enabled", True))
@@ -463,6 +471,23 @@ def _session_risk_limit(config: dict[str, Any]) -> float:
     if config.get("session_risk_mode") == "amount":
         return _safe_float(config.get("session_risk_amount"))
     return _safe_float(config.get("session_risk_percent"))
+
+
+def _session_profit_limit(config: dict[str, Any]) -> float:
+    """The active session profit target (0 = none), in the loss limit's mode."""
+    if config.get("session_risk_mode") == "amount":
+        return _safe_float(config.get("session_profit_amount"))
+    return _safe_float(config.get("session_profit_percent"))
+
+
+def _session_risk_limits(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "mode": config["session_risk_mode"],
+        "limit_percent": config["session_risk_percent"],
+        "limit_amount": config["session_risk_amount"],
+        "profit_limit_percent": config["session_profit_percent"],
+        "profit_limit_amount": config["session_profit_amount"],
+    }
 
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -1032,16 +1057,22 @@ def set_session_risk(payload: SessionRiskUpdate) -> dict[str, Any]:
         if amount < 0:
             raise HTTPException(status_code=400, detail="Session risk amount cannot be negative.")
         config["session_risk_amount"] = amount
+    if payload.session_profit_percent is not None:
+        profit_percent = float(payload.session_profit_percent)
+        if profit_percent < 0:
+            raise HTTPException(status_code=400, detail="Session profit limit cannot be negative.")
+        config["session_profit_percent"] = profit_percent
+    if payload.session_profit_amount is not None:
+        profit_amount = float(payload.session_profit_amount)
+        if profit_amount < 0:
+            raise HTTPException(status_code=400, detail="Session profit amount cannot be negative.")
+        config["session_profit_amount"] = profit_amount
     enabled = payload.enabled if payload.enabled is not None else bool(config.get("session_risk_enabled", True))
     config["session_risk_enabled"] = bool(enabled and _session_risk_limit(config) > 0)
     _save_config(config)
     _refresh_bootstrap_cache()
     current_risk = _session_risk_state()
-    limits = {
-        "mode": config["session_risk_mode"],
-        "limit_percent": config["session_risk_percent"],
-        "limit_amount": config["session_risk_amount"],
-    }
+    limits = _session_risk_limits(config)
     if not config["session_risk_enabled"]:
         state_patch("session_risk", {
             **current_risk,
@@ -1051,6 +1082,7 @@ def set_session_risk(payload: SessionRiskUpdate) -> dict[str, Any]:
             "hit": False,
             "master_hit": False,
             "verified": False,
+            "hit_type": None,
             "reason": None,
         })
     elif _searches_running():
@@ -1068,6 +1100,7 @@ def set_session_risk(payload: SessionRiskUpdate) -> dict[str, Any]:
             "hit": False,
             "master_hit": False,
             "verified": False,
+            "hit_type": None,
             "reason": None,
         })
     return {
@@ -1075,6 +1108,8 @@ def set_session_risk(payload: SessionRiskUpdate) -> dict[str, Any]:
         "session_risk_mode": config["session_risk_mode"],
         "session_risk_percent": config["session_risk_percent"],
         "session_risk_amount": config["session_risk_amount"],
+        "session_profit_percent": config["session_profit_percent"],
+        "session_profit_amount": config["session_profit_amount"],
         "session_risk_enabled": config["session_risk_enabled"],
         "session_risk": _session_risk_state(),
     }
@@ -1281,9 +1316,8 @@ def _start_session_risk() -> dict[str, Any]:
     config = _load_config()
     if not config.get("session_risk_enabled", False) or _session_risk_limit(config) <= 0:
         return _session_risk_state()
-    mode = config["session_risk_mode"]
-    limit_percent = float(config["session_risk_percent"])
-    limit_amount = float(config["session_risk_amount"])
+    limits = _session_risk_limits(config)
+    mode = limits["mode"]
     with _session_risk_lock:
         previous = _session_risk_state()
         if previous.get("active") and _searches_running():
@@ -1299,22 +1333,28 @@ def _start_session_risk() -> dict[str, Any]:
             "hit": False,
             "master_hit": False,
             "verified": True,
-            "mode": mode,
-            "limit_percent": limit_percent,
-            "limit_amount": limit_amount,
+            **limits,
             "session_id": session_id,
             "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "start_balance": balance,
             "current_balance": balance,
             "loss_percent": 0.0,
             "loss_amount": 0.0,
+            "profit_percent": 0.0,
+            "profit_amount": 0.0,
+            "hit_type": None,
             "reason": None,
             "accounts": [{"login": login, "name": name, "hit": False}],
             "hit_accounts": [],
         }
         state_set("session_risk", status)
-        limit_label = f"{limit_amount:.2f}" if mode == "amount" else f"{limit_percent:.2f}%"
-        append_log("search", f"[INFO] [session-risk] Session {session_id} started at master balance {balance:.2f}; limit {limit_label}.")
+        def label(amount: float, percent: float) -> str:
+            return f"{amount:.2f}" if mode == "amount" else f"{percent:.2f}%"
+
+        limit_label = f"loss limit {label(limits['limit_amount'], limits['limit_percent'])}"
+        if _session_profit_limit(config) > 0:
+            limit_label += f", profit limit {label(limits['profit_limit_amount'], limits['profit_limit_percent'])}"
+        append_log("search", f"[INFO] [session-risk] Session {session_id} started at master balance {balance:.2f}; {limit_label}.")
         return status
 
 
@@ -1328,9 +1368,12 @@ def _finish_session_risk_if_idle() -> dict[str, Any]:
 
 def _session_risk_tick() -> None:
     config = _load_config()
-    mode = config["session_risk_mode"]
-    limit_percent = float(config["session_risk_percent"])
-    limit_amount = float(config["session_risk_amount"])
+    limits = _session_risk_limits(config)
+    mode = limits["mode"]
+    limit_percent = float(limits["limit_percent"])
+    limit_amount = float(limits["limit_amount"])
+    profit_limit_percent = float(limits["profit_limit_percent"])
+    profit_limit_amount = float(limits["profit_limit_amount"])
     if not config.get("session_risk_enabled", False) or _session_risk_limit(config) <= 0:
         risk = _session_risk_state()
         if risk.get("enabled") or risk.get("active"):
@@ -1360,26 +1403,35 @@ def _session_risk_tick() -> None:
     start_balance = float(risk.get("start_balance", 0) or 0)
     loss_amount = max(0.0, start_balance - balance)
     loss_percent = (loss_amount / start_balance * 100.0) if start_balance > 0 else 0.0
+    profit_amount = max(0.0, balance - start_balance)
+    profit_percent = (profit_amount / start_balance * 100.0) if start_balance > 0 else 0.0
     state_patch("session_risk", {
         "current_balance": balance,
         "loss_amount": loss_amount,
         "loss_percent": loss_percent,
-        "mode": mode,
-        "limit_percent": limit_percent,
-        "limit_amount": limit_amount,
+        "profit_amount": profit_amount,
+        "profit_percent": profit_percent,
+        **limits,
     })
+    closing = "Searches stopped and connected account positions are being closed."
     if mode == "amount":
-        if loss_amount < limit_amount:
-            return
-        reason = f"Session risk limit reached ({loss_amount:.2f} loss of the {limit_amount:.2f} session limit). Searches stopped and connected account positions are being closed."
+        loss_hit = loss_amount >= limit_amount
+        profit_hit = profit_limit_amount > 0 and profit_amount >= profit_limit_amount
+        loss_reason = f"Session risk limit reached ({loss_amount:.2f} loss of the {limit_amount:.2f} session limit). {closing}"
+        profit_reason = f"Session profit limit reached ({profit_amount:.2f} profit of the {profit_limit_amount:.2f} session target). {closing}"
     else:
-        if loss_percent < limit_percent:
-            return
-        reason = f"Session risk limit reached ({loss_percent:.2f}% loss of session starting balance). Searches stopped and connected account positions are being closed."
+        loss_hit = loss_percent >= limit_percent
+        profit_hit = profit_limit_percent > 0 and profit_percent >= profit_limit_percent
+        loss_reason = f"Session risk limit reached ({loss_percent:.2f}% loss of session starting balance). {closing}"
+        profit_reason = f"Session profit limit reached ({profit_percent:.2f}% profit on session starting balance). {closing}"
+    if not loss_hit and not profit_hit:
+        return
+    reason = loss_reason if loss_hit else profit_reason
     state_patch("session_risk", {
         "active": False,
         "hit": True,
         "master_hit": True,
+        "hit_type": "loss" if loss_hit else "profit",
         "reason": reason,
         "accounts": [{"login": login, "name": name, "hit": True}],
         "hit_accounts": [login],

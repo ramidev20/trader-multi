@@ -11,7 +11,7 @@ import { ConsoleLogPanel } from "../components/ui/ConsoleLogPanel";
 import ChartPage from "./ChartPage";
 import ScalpingPage from "./ScalpingPage";
 import { ORDER_KIND_OPTIONS, IconSelect } from "./shared/IconSelect";
-import { cx, decimalInput, signedDecimalInput } from "../utils/format";
+import { cx, decimalInput, money, signedDecimalInput } from "../utils/format";
 import { clearBanner, showBanner } from "../utils/banner";
 import { parseSearchLogLine } from "../utils/logFeed";
 import { api } from "../services/api";
@@ -36,6 +36,30 @@ function SectionTag({ tone = "slate", children }) {
       )}
     >
       {children}
+    </span>
+  );
+}
+
+// A light tint per limit: [pill, value].
+const RISK_LIMIT_TONES = {
+  risk: ["border-rose-100 bg-rose-50/70", "text-rose-600"],
+  profit: ["border-blue-100 bg-blue-50/70", "text-blue-600"],
+  muted: ["border-slate-200 bg-slate-50", "text-slate-400"],
+};
+
+function RiskLimitLabel({ label, value, tone }) {
+  const [pill, text] = RISK_LIMIT_TONES[tone];
+  return (
+    <span
+      className={cx(
+        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-1",
+        pill,
+      )}
+    >
+      <span className="text-[10px] font-black uppercase tracking-wide text-slate-500">
+        {label}
+      </span>
+      <span className={cx("text-xs font-black", text)}>{value}</span>
     </span>
   );
 }
@@ -83,11 +107,9 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
   const [spreadPips, setSpreadPips] = useState(
     () => savedTradeForm.spreadPips ?? "0",
   );
-  const [sessionRiskValue, setSessionRiskValue] = useState(
-    () => savedTradeForm.sessionRiskValue ?? savedTradeForm.sessionRiskPercent ?? savedTradeForm.dailyRiskPercent ?? "2",
-  );
-  // "percent" or "amount" -- chosen in Settings > Preferences > Session risk.
-  const [sessionRiskMode, setSessionRiskMode] = useState("percent");
+  // Session loss/profit limits, shown read-only here; they are set in
+  // Settings > Preferences > Session Risk Guard.
+  const [riskSettings, setRiskSettings] = useState(null);
   const [searchPips, setSearchPips] = useState(
     () => savedTradeForm.searchPips ?? "10",
   );
@@ -155,10 +177,7 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     let active = true;
     api.settings()
       .then((settings) => {
-        if (!active) return;
-        const mode = settings?.session_risk_mode === "amount" ? "amount" : "percent";
-        setSessionRiskMode(mode);
-        setSessionRiskValue(String(mode === "amount" ? settings?.session_risk_amount ?? 0 : settings?.session_risk_percent ?? 2));
+        if (active) setRiskSettings(settings);
       })
       .catch((error) => showBanner(error?.message || String(error), "error", error?.code));
     return () => {
@@ -167,17 +186,27 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
   }, []);
 
   // This page stays mounted across navigation, so follow later changes made
-  // in Settings (mode switch or a new limit) from the polled runtime too.
-  const savedRiskSettings = runtime?.bootstrap_cache?.settings;
-  const savedRiskMode = savedRiskSettings?.session_risk_mode;
-  const savedRiskPercent = savedRiskSettings?.session_risk_percent;
-  const savedRiskAmount = savedRiskSettings?.session_risk_amount;
+  // in Settings from the polled runtime too.
+  const cachedSettings = runtime?.bootstrap_cache?.settings;
   useEffect(() => {
-    if (!savedRiskMode) return;
-    const mode = savedRiskMode === "amount" ? "amount" : "percent";
-    setSessionRiskMode(mode);
-    setSessionRiskValue(String(mode === "amount" ? savedRiskAmount ?? 0 : savedRiskPercent ?? 2));
-  }, [savedRiskMode, savedRiskPercent, savedRiskAmount]);
+    if (cachedSettings?.session_risk_mode) setRiskSettings(cachedSettings);
+  }, [cachedSettings]);
+  const riskLimits = useMemo(() => {
+    const isAmount = riskSettings?.session_risk_mode === "amount";
+    const format = (value) => {
+      const number = Number(value || 0);
+      return isAmount ? money(number) : `${number}%`;
+    };
+    const loss = Number(isAmount ? riskSettings?.session_risk_amount : riskSettings?.session_risk_percent) || 0;
+    const profit = Number(isAmount ? riskSettings?.session_profit_amount : riskSettings?.session_profit_percent) || 0;
+    const enabled = Boolean(riskSettings?.session_risk_enabled) && loss > 0;
+    return {
+      loaded: Boolean(riskSettings),
+      enabled,
+      loss: format(loss),
+      profit: enabled && profit > 0 ? format(profit) : null,
+    };
+  }, [riskSettings]);
 
   useEffect(() => {
     const risk = runtime?.session_risk;
@@ -202,20 +231,6 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     }
   }, [runtime?.session_risk]);
 
-  async function saveSessionRiskValue() {
-    const value = Number(sessionRiskValue);
-    const isAmount = sessionRiskMode === "amount";
-    if (!Number.isFinite(value) || value < 0 || (!isAmount && value > 100)) {
-      showBanner(isAmount ? "Session Risk amount cannot be negative." : "Session Risk must be between 0 and 100 percent.", "error");
-      return;
-    }
-    try {
-      await api.saveSessionRisk(isAmount ? { session_risk_amount: value } : { session_risk_percent: value });
-      setSessionRiskValue(String(value));
-    } catch (error) {
-      reportError(error);
-    }
-  }
   // Minute index the search was armed in. The trigger is the wall clock, the
   // same source the countdown uses, so the two can never disagree -- and it does
   // not depend on how the backend stamps candle times.
@@ -325,7 +340,6 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
           tp,
           sl,
           spreadPips,
-          sessionRiskValue,
           searchPips,
           searchEnabled,
           searchArmed,
@@ -355,7 +369,6 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     tp,
     sl,
     spreadPips,
-    sessionRiskValue,
     searchPips,
     searchEnabled,
     searchArmed,
@@ -386,7 +399,6 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
             tp,
             sl,
             spreadPips,
-            sessionRiskValue,
             searchPips,
             searchEnabled,
             searchArmed,
@@ -425,7 +437,6 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
     tp,
     sl,
     spreadPips,
-    sessionRiskValue,
     searchPips,
     searchEnabled,
     searchArmed,
@@ -1027,20 +1038,25 @@ export function ManualTradePage({ runtime, onRefreshRuntime }) {
               ))}
             </div>
             <div className="flex items-center gap-2">
-              <label className="flex w-28 flex-col gap-0.5" title="0 disables the session loss limit">
-                <span className="text-[9px] font-black uppercase leading-3 tracking-wide text-slate-500">Session Risk ({sessionRiskMode === "amount" ? "$" : "%"})</span>
-                <input
-                  type="number"
-                  min="0"
-                  max={sessionRiskMode === "amount" ? undefined : "100"}
-                  step="0.1"
-                  inputMode="decimal"
-                  value={sessionRiskValue}
-                  onChange={(event) => setSessionRiskValue(decimalInput(event.target.value))}
-                  onBlur={saveSessionRiskValue}
-                  className="h-7 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900 outline-none focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
-                />
-              </label>
+              {riskLimits.loaded ? (
+                <div
+                  className="flex items-center gap-1.5"
+                  title="Set in Settings > Preferences > Session Risk Guard"
+                >
+                  <RiskLimitLabel
+                    label="Session Risk"
+                    value={riskLimits.enabled ? riskLimits.loss : "Off"}
+                    tone={riskLimits.enabled ? "risk" : "muted"}
+                  />
+                  {riskLimits.profit ? (
+                    <RiskLimitLabel
+                      label="Profit Limit"
+                      value={riskLimits.profit}
+                      tone="profit"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
               <button
                 type="button"
                 onClick={() => setCloseConfirmOpen(true)}

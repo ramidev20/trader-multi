@@ -111,8 +111,9 @@ from .strategy_service import (
 # A position closed by its final TP (the broker TP -- partial TP1/TP2
 # withdrawals are closed by the app and don't count) ends the session: both
 # sides' searches stop and every open position on the symbol is closed.
-# With "Stop on final TP" turned off in Settings, a final TP is handled like
-# any other TP/SL close instead: the search keeps going and nothing is closed.
+# With "Stop on final TP" turned off in Settings, nothing is closed and that
+# side starts a fresh 5-minute zone search (the old zone is dropped even if
+# it was never breached). An SL keeps searching 1-minute on the same zone.
 #   - Candles that fail either minimum are skipped and the walk continues to
 #     the next deeper low/high. Only if no candle in the lookback qualifies
 #     does the stop fall back to entry -/+ min SL.
@@ -1787,6 +1788,13 @@ class ZoneStrategyEngine:
         # A breach during the trade already restarted the M5 search.
         if self._search_resumed_during_trade:
             append_log("search", f"{prefix}; 5-minute search already running after the zone breach.")
+            return
+        if closed_reason == "TP":
+            # A final TP retires its 5-minute zone even though price never
+            # breached it: the next trade needs a new zone, not another M1
+            # entry on the one that just paid out.
+            append_log("search", f"{prefix}; starting a new 5-minute search.")
+            self._start_m5_search(fresh=True, announce=False)
             return
         sl_candle_time: Optional[int] = None
         if closed_reason == "SL":

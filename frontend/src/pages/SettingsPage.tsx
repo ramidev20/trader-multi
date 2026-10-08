@@ -850,7 +850,7 @@ function PreferencesTab({
                   Stop scalping on final TP
                 </p>
                 <p className="mt-0.5 text-xs leading-5 text-slate-500">
-                  On a scalping final TP (not TP1/TP2), stop the search and close all positions.
+                  On a scalping final TP (not TP1/TP2), stop the search and close all positions. When off, that side starts a new 5-minute zone search.
                 </p>
               </div>
               <Switch

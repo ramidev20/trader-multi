@@ -58,13 +58,21 @@ The root `.env` file controls developer mode. With `TRADER_DEV_MODE=true`, the a
    CTRADER_CLIENT_SECRET=...
    ```
 
-3. From the application's page, generate an **access token** (the *Playground* flow is enough) with the `trading` scope for the cTrader ID that owns your accounts.
-4. In the app, add each account with:
-   - **cTrader Account Number** -- the number shown in cTrader (the internal Open API account id also works);
-   - **Environment** -- `demo` or `live` (the adapter switches automatically if the account lives on the other server);
-   - **Open API Access Token** -- the token from step 3.
+3. In the application's settings on openapi.ctrader.com, add this **Redirect URI**:
 
-Access tokens expire (about 30 days); when an account stops connecting with an `ACCESS_TOKEN` error, generate a new token and update the account.
+   ```
+   http://127.0.0.1:8000/ctrader/callback
+   ```
+
+   If the backend runs on another port, use that port here and set `CTRADER_REDIRECT_URI` in `.env` to the same value.
+
+4. In the app, open **Add Account** and click **Connect with cTrader**. Sign in in the browser with the cTrader ID that owns the trading accounts and approve access. Back in the app, pick the account from the list; the account number and environment are filled in. Name it and save.
+
+The same application credentials work on every PC and for every person: each user connects with their own cTrader ID and gets their own tokens. Access tokens last about 30 days; for accounts added through **Connect with cTrader** the backend renews them automatically a week before they expire, including on running connections. If renewal fails (for example after access was revoked at id.ctrader.com), the adapter log says so; open the account's settings and click **Reconnect with cTrader**.
+
+A token can still be pasted by hand into **Open API Access Token** (for example one from the app's *Playground*); such tokens are not renewed automatically.
+
+Do not connect the same account on two PCs at the same time: each PC would place its own trades on it.
 
 ## Configuration
 

@@ -219,6 +219,7 @@ class CTraderMT5:
         self._latency_us = 0.0
         self._disconnected_since: float | None = None
         self._fatal_error = ""
+        self._token_swapped_at = 0.0
 
     # ------------------------------------------------------------------
     # connection / session
@@ -332,6 +333,23 @@ class CTraderMT5:
         conn, self._conn = self._conn, None
         if conn is not None:
             conn.close(reason)
+
+    def set_access_token(self, token: str) -> bool:
+        """Switch to a refreshed access token without dropping the session.
+
+        Refreshing invalidates the old token, so the current socket is closed
+        and the maintenance thread re-authorizes on a new one; the account and
+        its caches are kept, and account_info() rides out the short gap.
+        """
+        token = str(token or "").strip()
+        if not token or not self._account_id:
+            return False
+        with self._lock:
+            self._token = token
+            self._token_swapped_at = time.monotonic()
+            self._fatal_error = ""
+        self._close_connection("access token refreshed")
+        return True
 
     def shutdown(self) -> bool:
         self._stop.set()
@@ -447,6 +465,9 @@ class CTraderMT5:
             with self._lock:
                 self._trader = message.trader
         elif payload_type == model.PROTO_OA_ACCOUNTS_TOKEN_INVALIDATED_EVENT:
+            if time.monotonic() - self._token_swapped_at < 30.0:
+                # The old token's session ending after set_access_token().
+                return
             self._fatal_error = f"Access token was invalidated: {message.reason or 'reauthorize the account'}"
             self._fail(-10006, self._fatal_error)
             threading.Thread(target=self._close_connection, args=("token invalidated",), daemon=True).start()

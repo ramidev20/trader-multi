@@ -4,6 +4,7 @@ import { WifiOff } from "lucide-react";
 import Sidebar from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
 import { AppButton, Dialog, Field, SelectBox } from "./components/ui/Primitives";
+import { CTraderConnect } from "./components/CTraderConnect";
 import DashboardPage from "./pages/DashboardPage";
 import SearchPage from "./pages/SearchPage";
 import { ManualTradePage } from "./pages/ManualTradePage";
@@ -71,6 +72,7 @@ export default function App() {
     orderDelaySec: 0,
     latency: "",
     color: "from-blue-600 to-indigo-600",
+    oauthState: "",
   });
 
   // Surfaces in the TopBar's banner slot instead of an inline div in the
@@ -245,6 +247,7 @@ export default function App() {
       orderDelaySec: 0,
       latency: "",
       color: "from-blue-600 to-indigo-600",
+      oauthState: "",
     });
     setDialogMode("add");
   }
@@ -266,6 +269,7 @@ export default function App() {
       orderDelaySec: account.orderDelaySec ?? 0,
       latency: account.latency ?? "",
       color: account.color,
+      oauthState: "",
     });
     setDialogMode("edit");
   }
@@ -310,6 +314,7 @@ export default function App() {
         color: formState.color,
         risk_percent: Number(formState.risk || 1),
         order_delay_sec: Number(formState.orderDelaySec || 0),
+        oauth_state: formState.oauthState || null,
       });
       await refreshBootstrap();
       closeDialog();
@@ -449,10 +454,27 @@ export default function App() {
 
       <Dialog open={dialogMode === "add" || dialogMode === "edit"} title={dialogMode === "edit" ? "Edit Account Settings" : "Add Account"} onClose={closeDialog}>
         <div className="grid gap-4 md:grid-cols-2">
+          <CTraderConnect
+            currentLogin={dialogMode === "edit" ? String(selectedAccount?.login || "") : ""}
+            existingLogins={accountList.map((account) => String(account.login))}
+            selectedLogin={String(formState.login)}
+            linked={!!formState.oauthState || (dialogMode === "edit" && !!selectedAccount?.tokenAutoRefresh && formState.password === selectedAccount?.password)}
+            onPick={(account, oauthState) =>
+              setFormState((s) => ({
+                ...s,
+                login: String(account.login),
+                server: account.environment,
+                oauthState,
+                name: s.name.trim() ? s.name : `${account.broker || "cTrader"} ${account.login}`,
+              }))
+            }
+          />
           <Field label="Account Name" value={formState.name} onChange={(e) => setFormState((s) => ({ ...s, name: e.target.value }))} />
           <Field label="cTrader Account Number" value={formState.login} onChange={(e) => setFormState((s) => ({ ...s, login: e.target.value }))} />
           <SelectBox label="Environment" value={formState.server} options={["demo", "live"]} onChange={(e) => setFormState((s) => ({ ...s, server: e.target.value }))} />
-          <Field label="Open API Access Token" type="password" autoComplete="off" value={formState.password} onChange={(e) => setFormState((s) => ({ ...s, password: e.target.value }))} />
+          {!formState.oauthState && (
+            <Field label="Open API Access Token" type="password" autoComplete="off" value={formState.password} onChange={(e) => setFormState((s) => ({ ...s, password: e.target.value }))} />
+          )}
           <label className="block">
             <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Avatar Color</span>
             <select

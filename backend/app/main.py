@@ -5,6 +5,9 @@ import logging
 import os
 import secrets
 import asyncio
+import time
+import webbrowser
+from html import escape
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from .services.mt5_compat import mt5, mt5_available
@@ -37,6 +40,8 @@ from .services.strategy_service import (
 from .services.task_manager import set_runtime_logger, start_task, stop_task
 from .services.remote_controller import remote_controller
 from .services.zone_strategy_service import start_zone_strategy_system, stop_zone_strategy_system
+from .services import ctrader_oauth
+from .services.ctrader_oauth import CTraderOAuthError
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 load_project_env()
@@ -54,6 +59,10 @@ _remote_command_cache: dict[str, dict[str, Any]] = {}
 _remote_command_inflight: dict[str, asyncio.Event] = {}
 _remote_command_lock = RLock()
 _session_risk_lock = RLock()
+_token_refresh_lock = RLock()
+# Renew cTrader access tokens (valid ~30 days) once they are this close to expiry.
+TOKEN_REFRESH_LEAD_SEC = 7 * 24 * 3600
+_token_refresh_errors: dict[str, str] = {}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "trading_accounts": [],
@@ -151,6 +160,9 @@ class AccountPayload(BaseModel):
     risk_percent: float | None = None
     risk_multiplier: float | None = None
     order_delay_sec: int = 0
+    # Set when the account was picked from a "Connect with cTrader" login: the
+    # tokens (including the refresh token) are then taken from that login.
+    oauth_state: str | None = None
 
 
 class ActionPayload(BaseModel):
@@ -319,6 +331,7 @@ app = FastAPI(title="cTrader Trader API", version="0.3.0")
 def stop_account_adapters_on_backend_shutdown() -> None:
     """Adapters are explicit Dashboard connections, never a backend startup task."""
     stop_task("session_risk_guard")
+    stop_task("ctrader_token_refresh")
     disconnect_all()
 
 app.add_middleware(
@@ -425,12 +438,24 @@ def ensure_config_on_startup() -> None:
         start_time=datetime.now(),
         log_schedule=False,
     )
+    if not is_dev_mode():
+        start_task(
+            "ctrader_token_refresh",
+            _refresh_ctrader_tokens,
+            interval_sec=3600,
+            start_time=datetime.now(),
+            log_schedule=False,
+        )
     # Reconnects receivers that were connected when the app last closed.
     remote_controller.start()
 
 
 def _refresh_bootstrap_cache() -> dict[str, Any]:
     config = _load_config()
+    # Refresh tokens never expire, so they stay in config.json and are not
+    # handed to the UI with the rest of the settings.
+    for account in config["trading_accounts"]:
+        account["token_auto_refresh"] = bool(account.pop("refresh_token", ""))
     state_set("bootstrap_cache.settings", config)
     return config
 
@@ -475,6 +500,8 @@ def _to_front_account(index: int, account: dict[str, Any], session: dict[str, An
         "orderDelaySec": int(account.get("order_delay_sec", account.get("orderDelaySec", 0)) or 0),
         "latency": float((session or {}).get("latency", 0.0) or 0.0) or None,
         "algoEnabled": (session or {}).get("algo_enabled"),
+        "tokenAutoRefresh": bool(account.get("token_auto_refresh", account.get("refresh_token"))),
+        "tokenExpiresAt": int(account.get("token_expires_at", 0) or 0) or None,
         "color": str(account.get("color") or ("from-blue-600 to-indigo-600" if role == "MASTER" else "from-cyan-500 to-blue-600")),
     }
 
@@ -1009,6 +1036,22 @@ def save_account(payload: AccountPayload) -> dict[str, Any]:
     )
     account_data.pop("risk_multiplier", None)
     account_data.pop("terminal_path", None)
+    oauth_state = account_data.pop("oauth_state", None)
+    previous = next((a for a in accounts if int(a.get("user", 0) or 0) == payload.user), None)
+    if oauth_state:
+        try:
+            tokens = ctrader_oauth.login_tokens(oauth_state, payload.user)
+        except CTraderOAuthError as ex:
+            raise HTTPException(status_code=409, detail=str(ex)) from ex
+        account_data["password"] = tokens["access_token"]
+        account_data["refresh_token"] = tokens["refresh_token"]
+        account_data["token_expires_at"] = tokens["expires_at"]
+    elif previous is not None and str(previous.get("password", "")) == payload.password:
+        # Same token as before: keep its refresh token and expiry. A token
+        # pasted by hand has neither and is not renewed automatically.
+        for key in ("refresh_token", "token_expires_at"):
+            if previous.get(key):
+                account_data[key] = previous[key]
 
     for idx, existing in enumerate(accounts):
         if int(existing.get("user", 0) or 0) == payload.user:
@@ -1044,6 +1087,9 @@ def delete_account(login: int) -> dict[str, str]:
 
 @app.post("/accounts/{login}/connect")
 def connect_saved_account(login: int) -> dict[str, Any]:
+    if not is_dev_mode():
+        # An adapter starts with the token it is given; renew a due one first.
+        _refresh_ctrader_tokens(only_login=int(login))
     config = _load_config()
     account = next((a for a in config.get("trading_accounts", []) if int(a.get("user", 0) or 0) == int(login)), None)
     if account is None:
@@ -1060,6 +1106,116 @@ def disconnect_saved_account(login: int) -> dict[str, Any]:
 def account_sessions() -> dict[str, Any]:
     config = _load_config()
     return {"status": "ok", "sessions": list_sessions(config.get("trading_accounts", []))}
+
+
+@app.post("/ctrader/oauth/start")
+def ctrader_oauth_start() -> dict[str, Any]:
+    """Start a cTrader ID login. The backend runs on the user's own PC, so it
+    opens the consent page in the default browser itself (the desktop webview
+    does not open external pages); the UI opens `url` only if that failed."""
+    try:
+        login = ctrader_oauth.begin_login()
+    except CTraderOAuthError as ex:
+        raise HTTPException(status_code=400, detail=str(ex)) from ex
+    try:
+        opened = bool(webbrowser.open(login["url"]))
+    except Exception:
+        opened = False
+    return {"status": "ok", "state": login["state"], "url": login["url"], "opened": opened}
+
+
+@app.get("/ctrader/oauth/{state}")
+def ctrader_oauth_status(state: str) -> dict[str, Any]:
+    return ctrader_oauth.public_login(state)
+
+
+@app.get("/ctrader/callback", include_in_schema=False)
+def ctrader_oauth_callback(code: str = "", state: str = "", error: str = "", error_description: str = "") -> HTMLResponse:
+    try:
+        result = ctrader_oauth.complete_login(state, code, error_description or error)
+    except CTraderOAuthError as ex:
+        result = {"status": "error", "error": str(ex), "accounts": []}
+    if result["status"] == "done":
+        count = len(result["accounts"])
+        title = "cTrader connected"
+        body = (
+            f"Found {count} trading account{'s' if count != 1 else ''}. Go back to Lequidity Trader to pick the account to add. "
+            "You can close this tab."
+            if count
+            else "This cTrader ID has no trading accounts granted to the app. Open a trading account, then connect again."
+        )
+    else:
+        title = "cTrader connection failed"
+        body = f"{result.get('error') or 'Unknown error.'} Go back to Lequidity Trader and try again."
+    append_log("adapter", f"[{'INFO' if result['status'] == 'done' else 'ERROR'}] {title}: {body}")
+    page = f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escape(title)}</title>
+<style>
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f1f5f9; color: #0f172a;
+         font-family: system-ui, -apple-system, "Segoe UI", sans-serif; padding: 16px; box-sizing: border-box; }}
+  main {{ max-width: 460px; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 28px; }}
+  h1 {{ margin: 0 0 10px; font-size: 20px; color: {'#047857' if result['status'] == 'done' else '#be123c'}; }}
+  p {{ margin: 0; line-height: 1.5; color: #334155; }}
+</style></head>
+<body><main><h1>{escape(title)}</h1><p>{escape(body)}</p></main></body></html>"""
+    return HTMLResponse(page)
+
+
+def _refresh_ctrader_tokens(only_login: int | None = None) -> None:
+    """Renew cTrader access tokens that expire within TOKEN_REFRESH_LEAD_SEC.
+
+    Accounts added from the same cTrader login share one refresh token and are
+    renewed together: renewing invalidates the old pair for all of them. Each
+    running adapter is handed the new token so its session carries on.
+    """
+    renewed: list[tuple[list[int], str]] = []
+    with _token_refresh_lock:
+        config = _load_config()
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for account in config["trading_accounts"]:
+            refresh_token = str(account.get("refresh_token", "") or "")
+            if refresh_token:
+                groups.setdefault(refresh_token, []).append(account)
+        now = time.time()
+        for refresh_token, members in groups.items():
+            logins = [int(a.get("user", 0) or 0) for a in members]
+            if only_login is not None and only_login not in logins:
+                continue
+            expires_at = min(int(a.get("token_expires_at", 0) or 0) for a in members)
+            if expires_at - now > TOKEN_REFRESH_LEAD_SEC:
+                continue
+            try:
+                tokens = ctrader_oauth.refresh_tokens(refresh_token)
+            except CTraderOAuthError as ex:
+                message = str(ex)
+                if _token_refresh_errors.get(refresh_token) != message:
+                    _token_refresh_errors[refresh_token] = message
+                    append_log(
+                        "adapter",
+                        f"[ERROR] Could not renew the cTrader access token for {', '.join(map(str, logins))}: {message}. "
+                        "Use Connect with cTrader in the account settings.",
+                    )
+                continue
+            _token_refresh_errors.pop(refresh_token, None)
+            for account in members:
+                account["password"] = tokens["access_token"]
+                account["refresh_token"] = tokens["refresh_token"]
+                account["token_expires_at"] = tokens["expires_at"]
+            renewed.append((logins, tokens["access_token"]))
+        if not renewed:
+            return
+        _save_config(config)
+    _refresh_bootstrap_cache()
+    alive = {int(s.get("login", 0) or 0) for s in list_sessions(config["trading_accounts"]) if s.get("alive")}
+    for logins, access_token in renewed:
+        append_log("adapter", f"[INFO] Renewed the cTrader access token for {', '.join(map(str, logins))}.")
+        for login in logins:
+            if login not in alive:
+                continue
+            result = submit_adapter_command(login, "set_access_token", {"access_token": access_token}, timeout_sec=10)
+            if result.get("status") != "ok":
+                append_log("adapter", f"[WARNING] Account {login} did not take the renewed token ({result.get('message')}); reconnect it.")
 
 
 def _session_risk_state() -> dict[str, Any]:

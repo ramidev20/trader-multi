@@ -96,6 +96,10 @@ def _execute_command(command: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "message": "Invalid adapter command payload."}
     if action == "copy_open":
         return _execute_copy_open(payload)
+    if action == "set_access_token":
+        if mt5.set_access_token(str(payload.get("access_token", "") or "")):
+            return {"status": "ok", "message": "Access token updated."}
+        return {"status": "error", "message": "No active cTrader session to update."}
     if action == "chart_quote":
         try:
             symbol = str(payload.get("symbol", "XAUUSD") or "XAUUSD").strip().upper()

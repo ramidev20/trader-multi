@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 logs/
 *.zip
-config.json
+mt5/config.json
+ctrader/config.json
 controller_receivers.json
 .env

@@ -42,13 +42,9 @@ python run.py
 
 The launcher starts the FastAPI backend and Vite development server, then opens the React dashboard in a Python `pywebview` desktop window. Saved frontend changes hot-reload in the window; no `frontend/dist` build is used by `python run.py`.
 
-## Developer Mode
-
-The root `.env` file controls developer mode. With `TRADER_DEV_MODE=true`, the app uses mock MT5 data so you can browse and test pages without logging into a live MT5 account.
-
 ## Configuration
 
-Account and strategy settings are stored in the local `config.json` file. It is intentionally ignored by Git because it can contain account credentials.
+Account and strategy settings are stored in the local `mt5/config.json` file. It is intentionally ignored by Git because it can contain account credentials.
 
 ## Remote Control With Tailscale
 

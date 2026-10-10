@@ -21,14 +21,11 @@ except ModuleNotFoundError as exc:
         ) from exc
     raise
 
-from backend.app.services.env_utils import load_project_env
-
-load_project_env()
+from backend.app.services.config_file import CONFIG_FILE
 
 ROOT_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = ROOT_DIR / "frontend"
 WEBVIEW_STORAGE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LequidityTrader" / "webview"
-CONFIG_FILE = ROOT_DIR / "config.json"
 BACKEND_HEALTH_URL = "http://127.0.0.1:8000/health"
 FRONTEND_DEV_URL = "http://127.0.0.1:5173/"
 FRONTEND_VITE_BIN = FRONTEND_DIR / "node_modules" / ".bin" / "vite.cmd"

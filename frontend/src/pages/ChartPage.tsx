@@ -83,6 +83,15 @@ const TIMEFRAME_MINUTES: Record<string, number> = {
   M15: 15,
 };
 
+// MT5 quote times are in the broker's server time (often UTC+2/+3), so their
+// age can't be read off this PC's clock directly. The market counts as closed
+// (weekend, holiday or daily break) once the quote time hasn't moved for
+// MARKET_IDLE_SEC -- a liquid symbol ticks every few seconds while trading --
+// or, straight away on load, when the last quote is older than any broker
+// time zone offset could explain.
+const MARKET_IDLE_SEC = 180;
+const MARKET_CLOSED_GAP_SEC = 15 * 3600;
+
 function formatCountdown(totalSeconds: number) {
   const clamped = Math.max(0, Math.floor(totalSeconds));
   const minutes = Math.floor(clamped / 60);
@@ -228,6 +237,8 @@ function ChartPageView() {
   // timeframe's countdown (the offset between the two clocks is the same
   // regardless of which timeframe is selected).
   const brokerOffsetRef = useRef<number | null>(null);
+  // Latest broker quote time and when (local clock) it last moved on.
+  const lastQuoteAdvanceRef = useRef<{ serverTime: number; at: number } | null>(null);
   const countdownLineRef = useRef<any>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [timeframe, setTimeframe] = useState("M1");
@@ -628,9 +639,15 @@ function ChartPageView() {
     const serverTime = Number(snapshot.server_time);
     if (Number.isFinite(serverTime) && serverTime > 0) {
       const measuredOffset = serverTime - Date.now() / 1000;
-      brokerOffsetRef.current = brokerOffsetRef.current == null
-        ? measuredOffset
-        : brokerOffsetRef.current * 0.8 + measuredOffset * 0.2;
+      // Snap instead of smoothing after a jump (market reopening after a
+      // weekend), or the countdown would take minutes to line up again.
+      brokerOffsetRef.current =
+        brokerOffsetRef.current == null || Math.abs(measuredOffset - brokerOffsetRef.current) > 60
+          ? measuredOffset
+          : brokerOffsetRef.current * 0.8 + measuredOffset * 0.2;
+      if (lastQuoteAdvanceRef.current?.serverTime !== serverTime) {
+        lastQuoteAdvanceRef.current = { serverTime, at: Date.now() };
+      }
     }
   }, [snapshot.server_time]);
 
@@ -650,6 +667,15 @@ function ChartPageView() {
     return seconds - intoCandle;
   }, [nowTick, timeframe]);
 
+  const marketClosed = useMemo(() => {
+    const last = lastQuoteAdvanceRef.current;
+    if (!last) return false;
+    return (
+      nowTick - last.at > MARKET_IDLE_SEC * 1000 ||
+      nowTick / 1000 - last.serverTime > MARKET_CLOSED_GAP_SEC
+    );
+  }, [nowTick, snapshot.server_time]);
+
   // Replaces the series' own last-value tag (turned off above) with one that
   // folds the countdown into the same tag: "0:41 4396.59", colored like the
   // current candle (green/red) so it reads as the same price tag, just with
@@ -658,7 +684,7 @@ function ChartPageView() {
   // to the new frame's boundary automatically.
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
-    if (countdownSeconds == null) return;
+    if (countdownSeconds == null && !marketClosed) return;
     const lastCandle = normalizedCandles[normalizedCandles.length - 1];
     // Bid, like the MT5 candles themselves.
     const currentPrice =
@@ -671,7 +697,7 @@ function ChartPageView() {
     // The price line's axis tag renders as "{title} {formatted price}" --
     // the title here is just the countdown, so the single resulting tag
     // reads e.g. "0:41 4396.59" instead of a second box next to the price.
-    const title = formatCountdown(countdownSeconds);
+    const title = marketClosed ? "Closed" : formatCountdown(countdownSeconds ?? 0);
 
     if (!countdownLineRef.current) {
       countdownLineRef.current = seriesRef.current.createPriceLine({
@@ -686,7 +712,7 @@ function ChartPageView() {
     } else {
       countdownLineRef.current.applyOptions({ price: currentPrice, color, title });
     }
-  }, [countdownSeconds, normalizedCandles, snapshot.bid, snapshot.ask]);
+  }, [countdownSeconds, marketClosed, normalizedCandles, snapshot.bid, snapshot.ask]);
 
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;

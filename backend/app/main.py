@@ -17,8 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
-from .services.mt5_compat import mt5, mt5_available
-from .services.env_utils import is_dev_mode, load_project_env
+from .services.mt5_compat import mt5
+from .services.config_file import CONFIG_FILE
 from .services.mt5_lock import MT5_LOCK
 from .services.runtime_state import append_log, clear_logs, get as state_get, patch_path as state_patch, set_path as state_set, snapshot
 from .services.session_service import connect_account, disconnect_account, disconnect_all, list_sessions, submit_adapter_command
@@ -26,7 +26,6 @@ from .services.session_service import master_adapter_ready
 from .services.strategy_service import (
     Liquidity,
     manager as strategy_manager,
-    open_manual_position,
     running_tasks,
     start_strategy_system,
     stop_strategy_system,
@@ -35,15 +34,12 @@ from .services.strategy_service import (
     copy_to_sub_adapters_in_background,
     account_risk,
     account_risk_label,
-    _tick_for,
 )
 from .services.task_manager import set_runtime_logger, start_task, stop_task
 from .services.remote_controller import remote_controller
 from .services.zone_strategy_service import start_zone_strategy_system, stop_zone_strategy_system
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-load_project_env()
-CONFIG_FILE = ROOT_DIR / "config.json"
 FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
 FRONTEND_INDEX = FRONTEND_DIST / "index.html"
 SYMBOL_DEFAULT = "XAUUSD"
@@ -644,79 +640,6 @@ def _to_iso_from_epoch(value: Any) -> str | None:
         return None
 
 
-def _resolve_chart_timeframe(value: str | int | None) -> int:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        tf = value.upper()
-        mapping = {
-            "M1": mt5.TIMEFRAME_M1,
-            "M3": mt5.TIMEFRAME_M3,
-            "M5": mt5.TIMEFRAME_M5,
-            "M15": mt5.TIMEFRAME_M15,
-        }
-        return int(mapping.get(tf, mt5.TIMEFRAME_M1))
-    return int(mt5.TIMEFRAME_M1)
-
-
-def _generate_chart_orders() -> list[dict[str, Any]]:
-    orders: list[dict[str, Any]] = []
-    for order in state_get("orders", []):
-        if str(order.get("status", "")).lower() != "open":
-            continue
-        orders.append(
-            {
-                "ticket": int(order.get("ticket", 0) or 0),
-                "symbol": str(order.get("symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT),
-                "side": str(order.get("side", "BUY")).upper(),
-                "order_kind": str(order.get("order_kind", "MARKET") or "MARKET").upper(),
-                "lot": float(order.get("lot", 0.0) or 0.0),
-                "price": float(order.get("entry", order.get("price", 0.0)) or 0.0),
-                "tp": float(order.get("tp", 0.0) or 0.0),
-                "sl": float(order.get("sl", 0.0) or 0.0),
-                "created_at": str(order.get("created_at") or ""),
-                "status": str(order.get("status", "open") or "open"),
-            }
-        )
-    return orders
-
-
-def _generate_chart_candles(symbol: str, timeframe: int, count: int) -> list[dict[str, Any]]:
-    count = max(20, min(1000, int(count or 120)))
-    base = _tick_for(symbol)
-    candles: list[dict[str, Any]] = []
-    interval_seconds = 60
-    if timeframe == mt5.TIMEFRAME_M3:
-        interval_seconds = 180
-    elif timeframe == mt5.TIMEFRAME_M5:
-        interval_seconds = 300
-    elif timeframe == mt5.TIMEFRAME_M15:
-        interval_seconds = 900
-    now = int(datetime.now().timestamp())
-    now -= now % interval_seconds
-    current_close = float(base.bid)
-    for index in range(count):
-        offset = count - index
-        candle_time = now - offset * interval_seconds
-        drift = ((index % 9) - 4) * 0.18
-        swing = ((index % 5) - 2) * 0.11
-        open_price = current_close
-        close_price = round(open_price + drift + swing, 2)
-        high_price = round(max(open_price, close_price) + 0.42, 2)
-        low_price = round(min(open_price, close_price) - 0.42, 2)
-        candles.append(
-            {
-                "time": candle_time,
-                "open": round(open_price, 2),
-                "high": high_price,
-                "low": low_price,
-                "close": close_price,
-            }
-        )
-        current_close = close_price
-    return candles
-
-
 def _resolve_active_account_for_positions(accounts: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any] | None:
     master_login = _safe_int(config.get("master_account_login"))
     if master_login:
@@ -731,31 +654,6 @@ def _fetch_live_positions() -> tuple[list[dict[str, Any]], list[str]]:
     errors: list[str] = []
 
     with MT5_LOCK:
-        if not mt5_available():
-            # Keep endpoint useful in simulation/fallback mode.
-            for order in state_get("orders", []):
-                if str(order.get("status", "")).lower() != "open":
-                    continue
-                positions.append(
-                    {
-                        "account_login": _safe_int(config.get("master_account_login")),
-                        "account_name": "Master",
-                        "account_role": "MASTER",
-                        "tag": "Main",
-                        "ticket": int(order.get("ticket", 0) or 0),
-                        "symbol": str(order.get("symbol", SYMBOL_DEFAULT)),
-                        "side": str(order.get("side", "BUY")).upper(),
-                        "lot": float(order.get("lot", 0.0) or 0.0),
-                        "open_price": float(order.get("entry", 0.0) or 0.0),
-                        "sl": float(order.get("sl", 0.0) or 0.0),
-                        "tp": float(order.get("tp", 0.0) or 0.0),
-                        "profit": 0.0,
-                        "comment": str(order.get("origin", "runtime")),
-                        "opened_at": str(order.get("created_at") or ""),
-                    }
-                )
-            return positions, errors
-
         # Reading positions must not initialize terminals. Account connections are
         # explicit user actions; a page refresh should never launch MT5 instances.
         account_info = mt5.account_info()
@@ -807,10 +705,6 @@ def _fetch_live_positions() -> tuple[list[dict[str, Any]], list[str]]:
 
 def _fetch_all_live_positions() -> tuple[list[dict[str, Any]], list[str], float | None]:
     """Read positions from every account that is already connected."""
-    if not mt5_available():
-        positions, errors = _fetch_live_positions()
-        return positions, errors, 0.10
-
     config = _load_config()
     accounts = config.get("trading_accounts", [])
     positions: list[dict[str, Any]] = []
@@ -866,32 +760,6 @@ def _fetch_all_live_positions() -> tuple[list[dict[str, Any]], list[str], float 
 
 def _fetch_all_live_orders() -> tuple[list[dict[str, Any]], list[str]]:
     """Read pending limit orders from every connected account."""
-    if not mt5_available():
-        orders = [
-            {
-                "account_login": _safe_int(order.get("account_login", 0)),
-                "account_name": str(order.get("account_name", "Developer")) or "Developer",
-                "account_role": str(order.get("account_role", "MASTER")).upper(),
-                "tag": str(order.get("tag", "Pending")) or "Pending",
-                "ticket": int(order.get("ticket", 0) or 0),
-                "symbol": str(order.get("symbol", SYMBOL_DEFAULT) or SYMBOL_DEFAULT),
-                "side": str(order.get("side", "BUY")).upper(),
-                "lot": float(order.get("lot", 0.0) or 0.0),
-                "price": float(order.get("price", order.get("entry", 0.0)) or 0.0),
-                "sl": float(order.get("sl", 0.0) or 0.0),
-                "tp": float(order.get("tp", 0.0) or 0.0),
-                "comment": str(order.get("comment", "") or ""),
-                "opened_at": order.get("created_at") or order.get("opened_at"),
-                "order_kind": str(order.get("order_kind", "LIMIT") or "LIMIT").upper(),
-                "status": str(order.get("status", "open") or "open"),
-            }
-            for order in state_get("orders", [])
-            if str(order.get("status", "")).lower() == "open"
-            and str(order.get("order_kind", "")).upper() == "LIMIT"
-        ]
-        orders.sort(key=lambda item: str(item.get("opened_at") or ""), reverse=True)
-        return orders, []
-
     config = _load_config()
     accounts = config.get("trading_accounts", [])
     orders: list[dict[str, Any]] = []
@@ -952,8 +820,6 @@ def _fetch_all_live_orders() -> tuple[list[dict[str, Any]], list[str]]:
 
 
 def _require_master_connected() -> int:
-    if is_dev_mode():
-        return 0
     config = _load_config()
     ok, message, master_login = master_adapter_ready(config)
     if not ok:
@@ -980,7 +846,6 @@ def bootstrap() -> dict[str, Any]:
     ]
     runtime = snapshot()
     return {
-        "dev_mode": is_dev_mode(),
         "settings": config,
         "accounts": front_accounts,
         "metrics": _metrics(front_accounts),
@@ -1301,12 +1166,9 @@ def _master_balance_snapshot() -> tuple[int, str, float]:
         master_login = _safe_int((master or {}).get("user"))
     if not master or master_login <= 0:
         raise RuntimeError("No master account is configured for session risk tracking.")
-    if is_dev_mode():
-        balance = float(master.get("balance", 0) or 0)
-    else:
-        result = submit_adapter_command(master_login, "snapshot", {}, timeout_sec=5.0)
-        account = result.get("account", {}) if result.get("status") == "ok" else {}
-        balance = float(account.get("balance", 0) or 0) if isinstance(account, dict) else 0.0
+    result = submit_adapter_command(master_login, "snapshot", {}, timeout_sec=5.0)
+    account = result.get("account", {}) if result.get("status") == "ok" else {}
+    balance = float(account.get("balance", 0) or 0) if isinstance(account, dict) else 0.0
     if balance <= 0:
         raise RuntimeError("Could not verify master account balance for session risk tracking.")
     return master_login, str(master.get("username") or master_login), balance
@@ -1537,39 +1399,28 @@ def chart_data(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1", count: int =
     normalized_symbol = str(symbol or SYMBOL_DEFAULT).strip().upper()
     normalized_timeframe = str(timeframe or "M1").strip().upper()
     normalized_count = max(20, min(1000, int(count or 180)))
-    source = "simulated"
-    bid = None
-    ask = None
-    server_time = None
-
-    if not is_dev_mode():
-        config = _load_config()
-        ready, detail, master_login = master_adapter_ready(config)
-        if not ready or not master_login:
-            raise HTTPException(status_code=409, detail=detail)
-        result = submit_adapter_command(
-            master_login,
-            "chart",
-            {
-                "symbol": normalized_symbol,
-                "timeframe": normalized_timeframe,
-                "count": normalized_count,
-            },
-            timeout_sec=5.0,
-        )
-        if result.get("status") != "ok":
-            raise HTTPException(status_code=409, detail=str(result.get("message", "Live MT5 candle request failed.")))
-        candles = result.get("candles", [])
-        orders = result.get("orders", [])
-        source = "live"
-        bid = result.get("bid")
-        ask = result.get("ask")
-        server_time = result.get("server_time")
-    else:
-        tf = _resolve_chart_timeframe(normalized_timeframe)
-        candles = _generate_chart_candles(normalized_symbol, tf, normalized_count)
-        orders = _generate_chart_orders()
-        server_time = int(datetime.now().timestamp())
+    config = _load_config()
+    ready, detail, master_login = master_adapter_ready(config)
+    if not ready or not master_login:
+        raise HTTPException(status_code=409, detail=detail)
+    result = submit_adapter_command(
+        master_login,
+        "chart",
+        {
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "count": normalized_count,
+        },
+        timeout_sec=5.0,
+    )
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=409, detail=str(result.get("message", "Live MT5 candle request failed.")))
+    candles = result.get("candles", [])
+    orders = result.get("orders", [])
+    source = "live"
+    bid = result.get("bid")
+    ask = result.get("ask")
+    server_time = result.get("server_time")
     return {
         "status": "ok",
         "source": source,
@@ -1588,29 +1439,19 @@ def chart_data(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1", count: int =
 def chart_quote(symbol: str = SYMBOL_DEFAULT, timeframe: str = "M1") -> dict[str, Any]:
     normalized_symbol = str(symbol or SYMBOL_DEFAULT).strip().upper()
     normalized_timeframe = str(timeframe or "M1").strip().upper()
-    if not is_dev_mode():
-        config = _load_config()
-        ready, detail, master_login = master_adapter_ready(config)
-        if not ready or not master_login:
-            raise HTTPException(status_code=409, detail=detail)
-        result = submit_adapter_command(
-            master_login,
-            "chart_quote",
-            {"symbol": normalized_symbol, "timeframe": normalized_timeframe},
-            timeout_sec=3.0,
-        )
-        if result.get("status") != "ok":
-            raise HTTPException(status_code=409, detail=str(result.get("message", "Live quote request failed.")))
-        return {"status": "ok", **result}
-    tick = _tick_for(normalized_symbol)
-    return {
-        "status": "ok",
-        "source": "simulated",
-        "bid": float(tick.bid),
-        "ask": float(tick.ask),
-        "server_time": int(datetime.now().timestamp()),
-        "orders": _generate_chart_orders(),
-    }
+    config = _load_config()
+    ready, detail, master_login = master_adapter_ready(config)
+    if not ready or not master_login:
+        raise HTTPException(status_code=409, detail=detail)
+    result = submit_adapter_command(
+        master_login,
+        "chart_quote",
+        {"symbol": normalized_symbol, "timeframe": normalized_timeframe},
+        timeout_sec=3.0,
+    )
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=409, detail=str(result.get("message", "Live quote request failed.")))
+    return {"status": "ok", **result}
 
 
 @app.get("/trade-history")
@@ -1620,15 +1461,6 @@ def trade_history() -> dict[str, Any]:
     accounts = config.get("trading_accounts", [])
     history: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
-
-    if not mt5_available():
-        orders = state_get("orders", [])
-        master_login = _safe_int(config.get("master_account_login"))
-        master = next((a for a in accounts if _safe_int(a.get("user")) == master_login), None)
-        profit = sum(float(o.get("profit", 0) or 0) for o in orders if str(o.get("status", "")).lower() == "closed")
-        balance = float((master or {}).get("balance", 0) or 0)
-        summaries.append({"login": master_login, "initial_balance": balance - profit, "profit": profit, "profit_percent": (profit / (balance - profit) * 100) if balance - profit else 0})
-        return {"status": "ok", "history": orders, "summaries": summaries, "errors": []}
 
     errors: list[str] = []
     connected_logins = {
@@ -1791,57 +1623,26 @@ def open_position(payload: OpenPositionPayload, mirror_remote: bool = True) -> d
         payload_data = payload.model_dump()
     # Receivers size the lot from their own Risk % (_receiver_open_settings).
     remote_data = {key: value for key, value in payload_data.items() if key not in {"risk_percent", "risk_amount", "lot"}}
-    if not is_dev_mode():
-        # Never initialize MT5 from the API process. Doing so can take over the
-        # terminal session that belongs to the long-running adapter process.
-        if not ready or not master_login:
-            raise HTTPException(status_code=409, detail=_detail)
-        # defer_copy: the adapter replies the moment the master order fills
-        # (sub copies with their order delays used to run first). Receivers
-        # and sub accounts are then sent to at the same time, in the
-        # background: the reply doesn't wait for any order delay, and each
-        # outcome is written to the search log.
-        result = submit_adapter_command(master_login, "open", {**payload_data, "defer_copy": True})
-        if result.get("status") != "ok":
-            raise HTTPException(status_code=409, detail=str(result.get("message", "MT5 adapter command failed.")))
-        side_label = str(payload.side).upper()
-        if mirror_remote:
-            remote_controller.broadcast_in_background("open", remote_data, f"{side_label} mirror", "[manual]")
-        master_request = result.pop("master_request", None)
-        if isinstance(master_request, dict):
-            copy_to_sub_adapters_in_background(master_request, "manual", "[manual]")
-            result["copy_summary"] = "Copying to sub accounts in the background."
-        return {"status": "ok", "orders": state_get("orders", []), "adapter_result": result, "remote": None}
-    try:
-        open_manual_position(
-            str(payload.side).upper(),
-            payload.lot,
-            payload.tp,
-            payload.sl,
-            symbol=payload.symbol,
-            order_kind=str(payload.order_kind).upper(),
-            limit_price=payload.limit_price,
-            tp_in_pips=bool(payload.tp_in_pips),
-            sl_in_pips=bool(payload.sl_in_pips),
-            risk_percent=payload.risk_percent,
-            risk_amount=payload.risk_amount,
-            advanced=bool(payload.advanced),
-            sl_price=payload.sl_price,
-            spread_pips=float(payload.spread_pips or 0.0),
-            ratio=float(payload.ratio),
-            tp1_ratio=float(payload.tp1_ratio),
-            tp2_ratio=float(payload.tp2_ratio),
-            tp3_ratio=float(payload.tp3_ratio),
-            tp2_enabled=bool(payload.tp2_enabled),
-            tp3_enabled=bool(payload.tp3_enabled),
-            tp1_percent=float(payload.tp1_percent),
-            tp2_percent=float(payload.tp2_percent),
-            auto_close_at=payload.auto_close_at,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    remote_future = _start_remote_mirror("open", remote_data) if mirror_remote else None
-    return {"status": "ok", "orders": state_get("orders", []), "remote": _remote_mirror_result(remote_future)}
+    # Never initialize MT5 from the API process. Doing so can take over the
+    # terminal session that belongs to the long-running adapter process.
+    if not ready or not master_login:
+        raise HTTPException(status_code=409, detail=_detail)
+    # defer_copy: the adapter replies the moment the master order fills
+    # (sub copies with their order delays used to run first). Receivers
+    # and sub accounts are then sent to at the same time, in the
+    # background: the reply doesn't wait for any order delay, and each
+    # outcome is written to the search log.
+    result = submit_adapter_command(master_login, "open", {**payload_data, "defer_copy": True})
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=409, detail=str(result.get("message", "MT5 adapter command failed.")))
+    side_label = str(payload.side).upper()
+    if mirror_remote:
+        remote_controller.broadcast_in_background("open", remote_data, f"{side_label} mirror", "[manual]")
+    master_request = result.pop("master_request", None)
+    if isinstance(master_request, dict):
+        copy_to_sub_adapters_in_background(master_request, "manual", "[manual]")
+        result["copy_summary"] = "Copying to sub accounts in the background."
+    return {"status": "ok", "orders": state_get("orders", []), "adapter_result": result, "remote": None}
 
 
 @app.post("/positions/calculate-lot")

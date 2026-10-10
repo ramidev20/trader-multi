@@ -7,25 +7,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import wraps
-from pathlib import Path
 import json
 from types import SimpleNamespace
 from typing import Callable, Optional
 from uuid import uuid4
 
-from .mt5_compat import mt5, mt5_available
-from .env_utils import is_dev_mode
+from .mt5_compat import mt5
+from .config_file import CONFIG_FILE
 from .mt5_lock import MT5_LOCK
 from .path_utils import resolve_terminal_path, sanitize_terminal_path
 from .remote_controller import remote_controller
-from .runtime_state import append_list, append_log, get, patch_path, replace_list, set_path
+from .runtime_state import append_log, get, patch_path, replace_list, set_path
 from .session_service import list_sessions, submit_adapter_command
 from .task_manager import emit_log, is_task_running, start_task, stop_task
 
 SYMBOL_DEFAULT = "XAUUSD"
-CONFIG_FILE = Path(__file__).resolve().parents[3] / "config.json"
-_sim_ticks = {"XAUUSD": 3350.0}
-_sim_last_candle_ts: dict[str, int] = {}
 MANUAL_TP_TASK_NAME = "manual_multi_tp"
 MANUAL_AUTO_CLOSE_TASK_NAME = "manual_auto_close_all"
 _SUBACCOUNT_COPY_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="subaccount-copy")
@@ -57,15 +53,6 @@ def _mt5_session_locked(function):
             return function(*args, **kwargs)
 
     return wrapped
-
-
-def _tick_for(symbol: str) -> SimpleNamespace:
-    base = _sim_ticks.get(symbol, 3350.0)
-    drift = ((int(time.time()) % 12) - 6) * 0.08
-    ask = round(base + drift + 0.05, 2)
-    bid = round(base + drift - 0.05, 2)
-    _sim_ticks[symbol] = round(base + ((int(time.time() * 1000) % 2) * 0.01 - 0.005), 2)
-    return SimpleNamespace(ask=ask, bid=bid)
 
 
 def _resolve_timeframe(value) -> int:
@@ -230,9 +217,6 @@ MAX_QUOTE_AGE_SECONDS = 30
 
 
 def _ensure_symbol_selected(symbol: str) -> tuple[bool, str]:
-    if not mt5_available():
-        return True, "simulation"
-
     info = mt5.symbol_info(symbol)
     if info is None:
         return False, f"Symbol {symbol} not found in terminal."
@@ -253,7 +237,7 @@ def _ensure_symbol_ready(symbol: str, require_fresh_quote: bool = True) -> tuple
     retain the quote-age guard.
     """
     selected, detail = _ensure_symbol_selected(symbol)
-    if not selected or not require_fresh_quote or not mt5_available():
+    if not selected or not require_fresh_quote:
         return selected, detail
 
     tick = mt5.symbol_info_tick(symbol)
@@ -275,8 +259,6 @@ def _ensure_symbol_ready(symbol: str, require_fresh_quote: bool = True) -> tuple
 
 
 def _check_request(request: dict) -> tuple[bool, str]:
-    if not mt5_available():
-        return True, "simulation"
     try:
         result = mt5.order_check(request)
     except Exception as ex:
@@ -291,7 +273,7 @@ def _check_request(request: dict) -> tuple[bool, str]:
 
 def _normalize_volume(symbol: str, volume: float) -> float:
     raw_volume = max(0.0, float(volume or 0.0))
-    info = mt5.symbol_info(symbol) if mt5_available() else None
+    info = mt5.symbol_info(symbol)
     min_volume = float(getattr(info, "volume_min", 0.01) or 0.01)
     max_volume = float(getattr(info, "volume_max", 100.0) or 100.0)
     step = float(getattr(info, "volume_step", 0.01) or 0.01)
@@ -310,15 +292,14 @@ def _normalize_volume(symbol: str, volume: float) -> float:
 
 
 def _loss_per_lot(symbol: str, order_type: int, entry_price: float, stop_loss: float) -> float:
-    if mt5_available():
-        try:
-            profit = mt5.order_calc_profit(order_type, symbol, 1.0, float(entry_price), float(stop_loss))
-            if profit is not None:
-                return abs(float(profit))
-        except Exception:
-            pass
+    try:
+        profit = mt5.order_calc_profit(order_type, symbol, 1.0, float(entry_price), float(stop_loss))
+        if profit is not None:
+            return abs(float(profit))
+    except Exception:
+        pass
 
-    info = mt5.symbol_info(symbol) if mt5_available() else None
+    info = mt5.symbol_info(symbol)
     if info is None:
         return 0.0
 
@@ -345,9 +326,6 @@ def _risk_adjusted_volume(
 ) -> float:
     """Lot that loses the risk at the stop: a fixed risk_amount when given,
     otherwise risk_percent of the account's equity."""
-    if not mt5_available():
-        return _normalize_volume(symbol, fallback_lot)
-
     fixed_amount = float(risk_amount or 0.0)
     if fixed_amount <= 0:
         account_info = mt5.account_info()
@@ -374,14 +352,8 @@ def _risk_adjusted_volume(
 def _ensure_master_session() -> tuple[bool, str, dict | None, dict]:
     cfg = _load_config()
     master = _resolve_master_account(cfg)
-    if is_dev_mode():
-        if master:
-            return True, "developer mode", master, cfg
-        return True, "developer mode", {"user": 0, "username": "Developer Mode", "risk_percent": 1.0, "role": "master"}, cfg
     if not master:
         return False, "No master account configured for execution.", None, cfg
-    if not mt5_available():
-        return True, "simulation", master, cfg
     ok, detail = _initialize_mt5_for_account(master)
     if not ok:
         login = _safe_int(master.get("user"))
@@ -390,8 +362,6 @@ def _ensure_master_session() -> tuple[bool, str, dict | None, dict]:
 
 
 def _verify_mt5_login(expected_login: int) -> tuple[bool, str]:
-    if not mt5_available():
-        return True, "simulation"
     info = mt5.account_info()
     actual_login = _safe_int(getattr(info, "login", 0)) if info is not None else 0
     if actual_login != int(expected_login):
@@ -412,7 +382,7 @@ def _build_copy_request(master_request: dict, risk_percent: float, origin: str, 
         return req
     order_type = int(master_request.get("type", mt5.ORDER_TYPE_BUY) or mt5.ORDER_TYPE_BUY)
     is_pending_limit = order_type in {mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT}
-    tick = mt5.symbol_info_tick(symbol) if mt5_available() else None
+    tick = mt5.symbol_info_tick(symbol)
     if tick is None and not is_pending_limit:
         return req
 
@@ -504,8 +474,6 @@ def _clone_trade_to_sub_accounts(master_request: dict, origin: str) -> str | Non
     targets = _copy_targets(cfg, master_login)
     if not targets:
         return "Copied master trade to 0/0 sub account(s)"
-    if not mt5_available():
-        return f"Copied master trade to 0/{len(targets)} sub account(s)"
 
     # Each connected sub account owns an adapter process. Dispatch to those
     # processes concurrently so one account's network/order delay does not
@@ -598,8 +566,6 @@ def _mirror_strategy_order(side_label: str, symbol: str, entry_price: float, tp:
     keeps the same distances from its own fill price; each receiver sizes
     the lot from its own Risk %.
     """
-    if is_dev_mode():
-        return
     remote_controller.broadcast_in_background(
         "open",
         {
@@ -630,47 +596,29 @@ def wait_for_new_candle(
     poll_attempts: int = 10,
     poll_sleep: float = 0.2,
 ):
-    if mt5_available():
-        symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol, require_fresh_quote=False)
-        if not symbol_ok:
-            return None
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
-        if rates is None or len(rates) == 0:
-            return None
-        last_time = rates[0]["time"]
-        for _ in range(poll_attempts):
-            time.sleep(poll_sleep)
-            new_rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
-            if new_rates is not None and len(new_rates) > 0 and new_rates[0]["time"] != last_time:
-                closed = mt5.copy_rates_from_pos(symbol, timeframe, 1, 1)
-                return closed[0] if closed is not None and len(closed) > 0 else None
+    symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol, require_fresh_quote=False)
+    if not symbol_ok:
         return None
-
-    candle_ts = int(time.time())
-    last_ts = _sim_last_candle_ts.get(symbol)
-    if last_ts is not None and candle_ts <= last_ts:
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
+    if rates is None or len(rates) == 0:
         return None
-    _sim_last_candle_ts[symbol] = candle_ts
-    t = _tick_for(symbol)
-    open_price = t.bid
-    close_price = t.ask if candle_ts % 2 else t.bid
-    return {"time": candle_ts, 1: open_price, 4: close_price}
+    last_time = rates[0]["time"]
+    for _ in range(poll_attempts):
+        time.sleep(poll_sleep)
+        new_rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
+        if new_rates is not None and len(new_rates) > 0 and new_rates[0]["time"] != last_time:
+            closed = mt5.copy_rates_from_pos(symbol, timeframe, 1, 1)
+            return closed[0] if closed is not None and len(closed) > 0 else None
+    return None
 
 
 def latest_closed_candle(timeframe, symbol: str = SYMBOL_DEFAULT):
     """Return the most recently closed candle without waiting for another one."""
-    if mt5_available():
-        symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol, require_fresh_quote=False)
-        if not symbol_ok:
-            return None
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 1, 1)
-        return rates[0] if rates is not None and len(rates) > 0 else None
-
-    candle_ts = int(time.time())
-    t = _tick_for(symbol)
-    open_price = t.bid
-    close_price = t.ask if candle_ts % 2 else t.bid
-    return {"time": candle_ts, 1: open_price, 4: close_price}
+    symbol_ok, _symbol_detail = _ensure_symbol_ready(symbol, require_fresh_quote=False)
+    if not symbol_ok:
+        return None
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 1, 1)
+    return rates[0] if rates is not None and len(rates) > 0 else None
 
 
 def _candle_value(candle, key: int, fallback_name: str) -> float:
@@ -683,22 +631,16 @@ def _candle_value(candle, key: int, fallback_name: str) -> float:
 
 
 def _record_order(row: dict, order_sink: dict | None = None) -> None:
-    """Keep an in-memory order row only in simulation, where there is no
-    terminal to ask. With MT5 connected, positions and orders are always read
-    live from the connected accounts, so nothing accumulates here. A caller
-    that needs the row itself (e.g. scalping) passes `order_sink`."""
+    """Positions and orders are always read live from the connected accounts,
+    so nothing accumulates here. A caller that needs the row itself (e.g.
+    scalping) passes `order_sink`."""
     if order_sink is not None:
         order_sink.update(row)
-    if not mt5_available():
-        append_list("orders", row, limit=2000)
 
 
 def _open_positions_count(symbol: str) -> int:
-    if mt5_available():
-        positions = mt5.positions_get(symbol=symbol)
-        return len(positions) if positions else 0
-    orders = get("orders", [])
-    return len([o for o in orders if o.get("status") == "open" and o.get("symbol") == symbol])
+    positions = mt5.positions_get(symbol=symbol)
+    return len(positions) if positions else 0
 
 
 def _close_mt5_position(position, close_volume: float | None = None, comment: str = "close all positions") -> tuple[bool, str]:
@@ -711,11 +653,11 @@ def _close_mt5_position(position, close_volume: float | None = None, comment: st
         return False, "invalid position volume/ticket"
 
     with MT5_LOCK:
-        info = mt5.symbol_info(symbol) if mt5_available() else None
+        info = mt5.symbol_info(symbol)
         if info is not None and not bool(getattr(info, "visible", False)):
             if not mt5.symbol_select(symbol, True):
                 return False, f"symbol select failed: {mt5.last_error()}"
-        tick = mt5.symbol_info_tick(symbol) if mt5_available() else None
+        tick = mt5.symbol_info_tick(symbol)
         if tick is None:
             return False, "no tick"
 
@@ -827,8 +769,6 @@ def _manual_tp_position(session: dict):
 
 
 def _manual_tp_pending_order(session: dict):
-    if not mt5_available():
-        return None
     orders = mt5.orders_get(symbol=session["symbol"]) or []
     ticket = int(session.get("ticket") or 0)
     expected_type = mt5.ORDER_TYPE_BUY_LIMIT if session["side"] == "BUY" else mt5.ORDER_TYPE_SELL_LIMIT
@@ -896,7 +836,7 @@ def _report_manual_tp_session_closed(session: dict) -> None:
     all. Looks up the real closing deal(s) so the amount is exact, not an
     estimate from floating profit at the last poll tick."""
     ticket = int(session.get("ticket") or 0)
-    if not mt5_available() or not ticket:
+    if not ticket:
         emit_log(
             f"[manual_tp] {session.get('side', '-')} {session.get('symbol', SYMBOL_DEFAULT)} position is no longer open.",
             "warning",
@@ -948,47 +888,32 @@ def _monitor_manual_multi_tp() -> None:
 
         target_price, withdrawal_percent = targets[target_index]
         closed_profit: float | None = None
-        if mt5_available():
-            position = _manual_tp_position(session)
-            if position is None:
-                pending_order = _manual_tp_pending_order(session)
-                if pending_order is not None:
-                    continue
-                _report_manual_tp_session_closed(session)
-                _manual_tp_sessions.remove(session)
+        position = _manual_tp_position(session)
+        if position is None:
+            pending_order = _manual_tp_pending_order(session)
+            if pending_order is not None:
                 continue
-            tick = mt5.symbol_info_tick(session["symbol"])
-            if tick is None:
-                continue
-            current_price = float(tick.bid if session["side"] == "BUY" else tick.ask)
-            target_hit = current_price >= target_price if session["side"] == "BUY" else current_price <= target_price
-            if not target_hit:
-                continue
-            current_volume = float(getattr(position, "volume", 0.0) or 0.0)
-            position_profit = float(getattr(position, "profit", 0.0) or 0.0)
-            close_volume = current_volume * float(withdrawal_percent) / 100.0
-            closed, detail = _close_mt5_position(position, close_volume, "manual TP partial close")
-            if not closed:
-                emit_log(f"[manual_tp] TP{target_index + 1} partial close failed: {detail}", "warning")
-                continue
-            # The exact fill isn't available from order_send() without another
-            # round trip; this prorates the position's floating profit at the
-            # moment of the close, which is effectively the realized amount.
-            closed_profit = position_profit * (close_volume / current_volume) if current_volume else 0.0
-        else:
-            order_id = str(session.get("order_id") or "")
-            orders = get("orders", [])
-            order = next((item for item in orders if str(item.get("id")) == order_id and item.get("status") == "open"), None)
-            if order is None:
-                _manual_tp_sessions.remove(session)
-                continue
-            tick = _tick_for(session["symbol"])
-            current_price = float(tick.bid if session["side"] == "BUY" else tick.ask)
-            target_hit = current_price >= target_price if session["side"] == "BUY" else current_price <= target_price
-            if not target_hit:
-                continue
-            order["lot"] = round(float(order.get("lot", 0.0) or 0.0) * (1.0 - float(withdrawal_percent) / 100.0), 2)
-            replace_list("orders", orders)
+            _report_manual_tp_session_closed(session)
+            _manual_tp_sessions.remove(session)
+            continue
+        tick = mt5.symbol_info_tick(session["symbol"])
+        if tick is None:
+            continue
+        current_price = float(tick.bid if session["side"] == "BUY" else tick.ask)
+        target_hit = current_price >= target_price if session["side"] == "BUY" else current_price <= target_price
+        if not target_hit:
+            continue
+        current_volume = float(getattr(position, "volume", 0.0) or 0.0)
+        position_profit = float(getattr(position, "profit", 0.0) or 0.0)
+        close_volume = current_volume * float(withdrawal_percent) / 100.0
+        closed, detail = _close_mt5_position(position, close_volume, "manual TP partial close")
+        if not closed:
+            emit_log(f"[manual_tp] TP{target_index + 1} partial close failed: {detail}", "warning")
+            continue
+        # The exact fill isn't available from order_send() without another
+        # round trip; this prorates the position's floating profit at the
+        # moment of the close, which is effectively the realized amount.
+        closed_profit = position_profit * (close_volume / current_volume) if current_volume else 0.0
 
         session["next_target"] = target_index + 1
         move_pct = _price_move_pct(session["side"], float(session.get("entry", 0.0) or 0.0), float(target_price))
@@ -1107,7 +1032,7 @@ def open_manual_position(
         message = f"Manual order blocked: {master_session_detail}"
         log_failure(f"[ERROR] {message}")
         raise RuntimeError(message)
-    account_info = mt5.account_info() if mt5_available() else None
+    account_info = mt5.account_info()
     balance_before = float(getattr(account_info, "balance", 0.0) or 0.0) if account_info is not None else 0.0
 
     symbol_ok, symbol_detail = _ensure_symbol_ready(symbol)
@@ -1116,7 +1041,7 @@ def open_manual_position(
         log_failure(f"[ERROR] {message}")
         raise RuntimeError(message)
 
-    tick = mt5.symbol_info_tick(symbol) if mt5_available() else _tick_for(symbol)
+    tick = mt5.symbol_info_tick(symbol)
     if tick is None:
         message = f"Manual order blocked: no live tick for {symbol}."
         log_failure(f"[ERROR] {message}")
@@ -1251,8 +1176,8 @@ def open_manual_position(
         log_failure(f"[ERROR] {message}")
         raise RuntimeError(message)
 
-    result = mt5.order_send(request) if mt5_available() else None
-    done = bool(result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE) or not mt5_available()
+    result = mt5.order_send(request)
+    done = bool(result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE)
     if done:
         ticket = getattr(result, "order", int(time.time() * 1000))
         # Record the broker's fill price for market orders rather than the
@@ -1312,7 +1237,7 @@ def open_manual_position(
                 entry_price,
                 take_profit_specs,
                 ticket=getattr(result, "position", None) if result is not None else ticket,
-                order_id=str(get("orders", [])[-1].get("id")) if not mt5_available() and get("orders", []) else None,
+                order_id=None,
             )
     else:
         message = str(getattr(result, "comment", mt5.last_error()) or mt5.last_error())
@@ -1336,12 +1261,12 @@ def calculate_manual_lot(
     risk_amount = 0.0
     if risk_percent is None:
         risk_percent, risk_amount = account_risk(_resolve_master_account(_load_config()))
-    if mt5_available() and mt5.account_info() is None:
+    if mt5.account_info() is None:
         raise RuntimeError("Connect the master account from Dashboard before calculating lot size.")
     symbol_ok, symbol_detail = _ensure_symbol_ready(symbol)
     if not symbol_ok:
         raise RuntimeError(symbol_detail)
-    tick = mt5.symbol_info_tick(symbol) if mt5_available() else _tick_for(symbol)
+    tick = mt5.symbol_info_tick(symbol)
     if tick is None:
         raise RuntimeError(f"No live tick for {symbol}.")
     side = str(order_type).upper()
@@ -1453,8 +1378,8 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
     total_balance_before = 0.0
     cfg = _load_config()
     accounts = cfg.get("trading_accounts", []) if isinstance(cfg, dict) else []
-    require_ticket_match = mt5_available() and bool(accounts)
-    if mt5_available() and accounts:
+    require_ticket_match = bool(accounts)
+    if accounts:
         # Route through each account's own adapter subprocess instead of
         # touching MT5 from here. Initializing MT5 in this (API) process would
         # re-authenticate a terminal an adapter already owns -- for a
@@ -1545,7 +1470,7 @@ def close_all_positions(side: str = "all", symbol: str | None = None):
     return {
         "attempted": attempted,
         "closed": len(closed_tickets),
-        "real_close": mt5_available(),
+        "real_close": True,
         "errors": errors,
         "profit": round(total_profit, 2),
         "profit_percent": round(profit_percent, 2),
@@ -1567,7 +1492,7 @@ def open_order_strategy(config_data):
         emit_log(f"[order] blocked: {master_session_detail}", "error")
         return None
     emit_log(f"[order] master execution account={master_login}", "debug")
-    account_info = mt5.account_info() if mt5_available() else None
+    account_info = mt5.account_info()
     balance_before = float(getattr(account_info, "balance", 0.0) or 0.0) if account_info is not None else 0.0
 
     min_pips = config_data.get("min_pips", config_data.get("pips"))
@@ -1577,8 +1502,6 @@ def open_order_strategy(config_data):
     max_positions = int(config_data.get("max_positions", 0) or 0)
     enable_buy = bool(config_data.get("enable_buy", True))
     enable_sell = bool(config_data.get("enable_sell", True))
-    pullback_enabled = bool(config_data.get("enable_pullback", config_data.get("pullback_enabled", False)))
-    pullback_pips = float(config_data.get("pullback_pips", 0) or 0)
     tp_type = bool(config_data["tp_type"])
     tp_val = float(config_data["tp"])
     sl_type = bool(config_data["sl_type"])
@@ -1598,7 +1521,7 @@ def open_order_strategy(config_data):
     if not (float(min_pips) <= abs(pips) <= float(max_pips)):
         return None
 
-    tick = mt5.symbol_info_tick(symbol) if mt5_available() else _tick_for(symbol)
+    tick = mt5.symbol_info_tick(symbol)
     if tick is None:
         return None
 
@@ -1629,10 +1552,6 @@ def open_order_strategy(config_data):
             order_type = mt5.ORDER_TYPE_SELL
             entry_price = float(tick.bid)
 
-    if pullback_enabled and pullback_pips > 0 and not mt5_available():
-        # In simulation mode we skip pullback enforcement against real positions.
-        pass
-
     tp = (entry_price + (tp_val / 10)) if tp_type and order_type == mt5.ORDER_TYPE_BUY else (
         (entry_price - (tp_val / 10)) if tp_type else float(tp_val)
     )
@@ -1662,8 +1581,8 @@ def open_order_strategy(config_data):
         emit_log(f"[order] blocked {side_label} {symbol} reason={check_detail}", "warning")
         return None
 
-    result = mt5.order_send(request) if mt5_available() else None
-    done = bool(result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE) or not mt5_available()
+    result = mt5.order_send(request)
+    done = bool(result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE)
     if done:
         _record_order(
             {
@@ -1912,7 +1831,7 @@ class LiquidityManager:
                 self.last_stop_reason = "Liquidity mode paused at max positions."
             return
 
-        tick = mt5.symbol_info_tick(self.symbol) if mt5_available() else _tick_for(self.symbol)
+        tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             return
 

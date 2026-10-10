@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import random
 import threading
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from .env_utils import is_dev_mode
-from .mt5_compat import mt5, mt5_available
+from .mt5_compat import mt5
 from .mt5_lock import MT5_LOCK
 from .remote_controller import remote_controller
 from .runtime_state import append_log, get, patch_path
@@ -19,7 +17,6 @@ from .strategy_service import (
     _candle_value,
     _ensure_master_session,
     _ensure_symbol_ready,
-    _tick_for,
     _clone_trade_to_sub_accounts,
     _close_mt5_pending_order,
     close_all_positions,
@@ -167,59 +164,13 @@ def _is_bullish(candle: Any) -> bool:
     return _candle_value(candle, 4, "close") > _candle_value(candle, 1, "open")
 
 
-# wait_for_new_candle()'s simulated/dev-mode branch only carries open/close --
-# no other caller has ever needed high/low from it. Zone detection needs the
-# full candle range, so dev mode gets its own small synthetic M1/M5 generator
-# here rather than changing that shared helper (which the existing
-# pips-breakout strategy also relies on).
-_sim_state: dict[str, dict[str, Any]] = {}
-_sim_lock = threading.Lock()
-
-
-def _sim_next_candle(symbol: str, timeframe_label: str) -> Optional[dict[str, Any]]:
-    """Latest synthetic candle -- a new one each second.
-
-    One shared market feed: every caller in the same second gets the same
-    candle, so the demand and supply engines see identical candles (each
-    filters out what it already has by time). Handing each candle only to
-    the first caller left the other side with none.
-    """
-    key = f"zone:{timeframe_label}:{symbol}"
-    with _sim_lock:
-        return _sim_generate_locked(key, symbol)
-
-
-def _sim_generate_locked(key: str, symbol: str) -> dict[str, Any]:
-    now_ts = int(time.time())
-    state = _sim_state.get(key)
-    if state is not None and now_ts <= state["last_ts"]:
-        return state["candle"]
-    rng = random.Random(f"{key}:{now_ts}")
-    prior_close = state["close"] if state is not None else float(_tick_for(symbol).bid)
-    # Roughly one in four candles is a strong displacement so an armed demo
-    # strategy actually finds a zone within a handful of seconds.
-    is_displacement = now_ts % 4 == 0
-    body_pips = rng.uniform(20.0, 35.0) if is_displacement else rng.uniform(2.0, 8.0)
-    direction = 1 if rng.random() < 0.5 else -1
-    open_price = prior_close
-    close_price = round(open_price + direction * body_pips / 10.0, 2)
-    wick = rng.uniform(0.05, 0.2)
-    high_price = round(max(open_price, close_price) + wick, 2)
-    low_price = round(min(open_price, close_price) - wick, 2)
-    candle = {"time": now_ts, 1: open_price, 2: high_price, 3: low_price, 4: close_price}
-    _sim_state[key] = {"last_ts": now_ts, "close": close_price, "candle": candle}
-    return candle
-
-
 def _next_candle(symbol: str, timeframe_label: str) -> Optional[dict[str, Any]]:
-    if mt5_available():
-        # Same lazy in-process connect the trigger check needs -- without it,
-        # a search armed straight into M5 (instant start) or entered before
-        # anything else this process has touched MT5 with would just poll
-        # None forever.
-        _ensure_master_session()
-        return wait_for_new_candle(TIMEFRAME_MAP[timeframe_label], symbol=symbol)
-    return _sim_next_candle(symbol, timeframe_label)
+    # Same lazy in-process connect the trigger check needs -- without it,
+    # a search armed straight into M5 (instant start) or entered before
+    # anything else this process has touched MT5 with would just poll
+    # None forever.
+    _ensure_master_session()
+    return wait_for_new_candle(TIMEFRAME_MAP[timeframe_label], symbol=symbol)
 
 
 class ZoneStrategyEngine:
@@ -283,7 +234,6 @@ class ZoneStrategyEngine:
         self.m5_buffer: deque = deque(maxlen=CANDLE_BUFFER_MAXLEN)
         self.m1_buffer: deque = deque(maxlen=CANDLE_BUFFER_MAXLEN)
         self._last_processed_candle_time: dict[str, int] = {"M1": 0, "M5": 0}
-        self.last_mid: Optional[float] = None
         self.confirmation_level: Optional[float] = None
         # The M5 zone the M1 search is currently confirming against, kept
         # here (not just in the patched runtime state) so the M1 search loop
@@ -536,10 +486,7 @@ class ZoneStrategyEngine:
             patch_path(self._state_path, {"running": False})
 
     def _broker_time(self) -> Optional[int]:
-        """Latest MT5 quote time (broker clock), or this machine's clock in
-        simulation. None if MT5 can't be read right now."""
-        if not mt5_available():
-            return int(time.time())
+        """Latest MT5 quote time (broker clock). None if MT5 can't be read right now."""
         try:
             with MT5_LOCK:
                 tick = mt5.symbol_info_tick(self.symbol)
@@ -553,11 +500,11 @@ class ZoneStrategyEngine:
 
         MT5 stamps candles in server time (often UTC+2/+3), not real UTC.
         Rounded to the nearest half hour so a quote a few minutes old (quiet
-        market) still gives the whole-hour server offset. 0 in simulation or
-        when MT5 can't be read.
+        market) still gives the whole-hour server offset. 0 when MT5 can't be
+        read.
         """
         stamp = self._broker_time()
-        if not mt5_available() or not stamp:
+        if not stamp:
             return 0
         return int(round((stamp - time.time()) / 1800.0)) * 1800
 
@@ -643,30 +590,18 @@ class ZoneStrategyEngine:
         moment a fresh M15 candle opens, even though price never actually
         moved back to it. Checking a rolling M1 window has no such reset.
         """
-        if mt5_available():
-            if not self._ensure_symbol_or_log(require_fresh_quote=False):
-                return False
-            lookback = max(2, int(self.trigger_check_cycle_sec // 60) + 2)
-            try:
-                rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 0, lookback)
-            except Exception:
-                rates = None
-            if rates is None or len(rates) == 0:
-                return False
-            highs = [float(_candle_value(c, 2, "high")) for c in rates]
-            lows = [float(_candle_value(c, 3, "low")) for c in rates]
-            return min(lows) <= trigger_price <= max(highs)
-
-        # No real M1 feed in dev/sim mode -- fall back to the live simulated
-        # tick crossing the level between polls.
-        tick = _tick_for(self.symbol)
-        if tick is None:
+        if not self._ensure_symbol_or_log(require_fresh_quote=False):
             return False
-        mid = (float(tick.ask) + float(tick.bid)) / 2.0
-        with self._lock:
-            last_mid = self.last_mid
-            self.last_mid = mid
-        return last_mid is not None and (last_mid - trigger_price) * (mid - trigger_price) <= 0
+        lookback = max(2, int(self.trigger_check_cycle_sec // 60) + 2)
+        try:
+            rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 0, lookback)
+        except Exception:
+            rates = None
+        if rates is None or len(rates) == 0:
+            return False
+        highs = [float(_candle_value(c, 2, "high")) for c in rates]
+        lows = [float(_candle_value(c, 3, "low")) for c in rates]
+        return min(lows) <= trigger_price <= max(highs)
 
     def _capture_m1_confirmation_level(self, is_supply: bool) -> Optional[float]:
         """Last *closed* M1 candle's high (supply) / low (demand).
@@ -675,30 +610,22 @@ class ZoneStrategyEngine:
         held fixed -- it's the fakeout filter the amount touch has to clear,
         not a level that keeps sliding with the newest candle.
         """
-        if mt5_available():
-            if not self._ensure_symbol_or_log(require_fresh_quote=False):
-                return None
-            try:
-                rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 1, 1)
-            except Exception:
-                rates = None
-            if rates is None or len(rates) == 0:
-                return None
-            candle = rates[0]
-        else:
-            candle = _sim_next_candle(self.symbol, "M1")
-            if candle is None:
-                return None
+        if not self._ensure_symbol_or_log(require_fresh_quote=False):
+            return None
+        try:
+            rates = mt5.copy_rates_from_pos(self.symbol, TIMEFRAME_MAP["M1"], 1, 1)
+        except Exception:
+            rates = None
+        if rates is None or len(rates) == 0:
+            return None
+        candle = rates[0]
         return float(_candle_value(candle, 2, "high")) if is_supply else float(_candle_value(candle, 3, "low"))
 
     def _current_price(self) -> Optional[float]:
-        if mt5_available():
-            with MT5_LOCK:
-                if not self._ensure_symbol_or_log():
-                    return None
-                tick = mt5.symbol_info_tick(self.symbol)
-        else:
-            tick = _tick_for(self.symbol)
+        with MT5_LOCK:
+            if not self._ensure_symbol_or_log():
+                return None
+            tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             return None
         return (float(tick.ask) + float(tick.bid)) / 2.0
@@ -772,30 +699,29 @@ class ZoneStrategyEngine:
         """
         history: list[Any] = []
         latest_closed_time = 0
-        if mt5_available():
-            # MT5_LOCK here (not just from the tick handlers that usually
-            # call this) since start() also calls this directly from the API
-            # request thread -- see _trigger_tick's comment on why every
-            # MT5 touchpoint needs it. Reentrant, so no deadlock when a tick
-            # handler that already holds it calls in here too.
-            with MT5_LOCK:
-                # Same lazy in-process connect every other MT5 call here needs --
-                # see _ensure_symbol_or_log's docstring.
-                _ensure_master_session()
-                try:
-                    rates = mt5.copy_rates_from_pos(
-                        self.symbol,
-                        TIMEFRAME_MAP[timeframe_label],
-                        1,
-                        max(1, preload_count),
-                    )
-                except Exception:
-                    rates = None
-                if rates is not None:
-                    latest = list(rates)
-                    if latest:
-                        latest_closed_time = int(latest[-1]["time"])
-                    history = latest[-preload_count:] if preload_count else []
+        # MT5_LOCK here (not just from the tick handlers that usually
+        # call this) since start() also calls this directly from the API
+        # request thread -- see _trigger_tick's comment on why every
+        # MT5 touchpoint needs it. Reentrant, so no deadlock when a tick
+        # handler that already holds it calls in here too.
+        with MT5_LOCK:
+            # Same lazy in-process connect every other MT5 call here needs --
+            # see _ensure_symbol_or_log's docstring.
+            _ensure_master_session()
+            try:
+                rates = mt5.copy_rates_from_pos(
+                    self.symbol,
+                    TIMEFRAME_MAP[timeframe_label],
+                    1,
+                    max(1, preload_count),
+                )
+            except Exception:
+                rates = None
+            if rates is not None:
+                latest = list(rates)
+                if latest:
+                    latest_closed_time = int(latest[-1]["time"])
+                history = latest[-preload_count:] if preload_count else []
         with self._lock:
             buffer.clear()
             for candle in history:
@@ -814,17 +740,6 @@ class ZoneStrategyEngine:
         closed bars and filtering on the broker timestamp keeps c3/c2/c1
         consecutive.
         """
-        if not mt5_available():
-            candle = _next_candle(self.symbol, timeframe_label)
-            if candle is None:
-                return []
-            # The sim feed repeats its latest candle until the next second;
-            # this engine's own anchor decides whether it's new to this side.
-            with self._lock:
-                if int(candle["time"]) <= self._last_processed_candle_time[timeframe_label]:
-                    return []
-                self._last_processed_candle_time[timeframe_label] = int(candle["time"])
-            return [candle]
         # Serialize only the MT5 calls. Holding this process-wide lock for the
         # whole search tick made the demand and supply workers wait on each
         # other's buffer checks and state transitions too.
@@ -866,9 +781,6 @@ class ZoneStrategyEngine:
         so a breach wick between one-second polls is still caught. Its time is
         broker time, the same clock the chart uses to freeze a breached box.
         """
-        if not mt5_available():
-            tick = _tick_for(self.symbol)
-            return (float(tick.ask) + float(tick.bid)) / 2.0, []
         with MT5_LOCK:
             if not self._ensure_symbol_or_log():
                 return None, []
@@ -1169,8 +1081,6 @@ class ZoneStrategyEngine:
         """A LIMIT entry that hasn't filled must not fill on a broken zone."""
         if self._exit_levels.get("order_kind") != "LIMIT" or self._exit_position_seen:
             return
-        if not mt5_available():
-            return
         with MT5_LOCK:
             try:
                 pending = mt5.orders_get(symbol=self.symbol) or []
@@ -1324,22 +1234,16 @@ class ZoneStrategyEngine:
         """(anchor candle, M1 candles before it oldest first).
 
         Filtered by the anchor's broker timestamp rather than a fixed bar offset, so
-        the history is right even if the zone was picked up a bar late. In
-        dev/sim mode there's no historical feed to query, so fall back to
-        whatever the live search buffer collected (best-effort only).
+        the history is right even if the zone was picked up a bar late.
         """
-        if mt5_available():
-            with MT5_LOCK:
-                try:
-                    rates = mt5.copy_rates_from_pos(
-                        self.symbol, TIMEFRAME_MAP["M1"], 1, SL_LIQUIDITY_LOOKBACK_CANDLES + 3
-                    )
-                except Exception:
-                    rates = None
-            candles = list(rates) if rates is not None else []
-        else:
-            with self._lock:
-                candles = list(self.m1_buffer)
+        with MT5_LOCK:
+            try:
+                rates = mt5.copy_rates_from_pos(
+                    self.symbol, TIMEFRAME_MAP["M1"], 1, SL_LIQUIDITY_LOOKBACK_CANDLES + 3
+                )
+            except Exception:
+                rates = None
+        candles = list(rates) if rates is not None else []
         anchor = next((candle for candle in candles if int(candle["time"]) == anchor_time), None)
         return anchor, [candle for candle in candles if int(candle["time"]) < anchor_time]
 
@@ -1441,20 +1345,17 @@ class ZoneStrategyEngine:
         sl_liquidity_pips: Optional[float] = None
         order_kind = "MARKET"
         try:
-            if mt5_available():
-                with MT5_LOCK:
-                    _ensure_master_session()
-                    try:
-                        current_candle = mt5.copy_rates_from_pos(
-                            self.symbol, TIMEFRAME_MAP["M1"], 0, 1
-                        )
-                        if current_candle is not None and len(current_candle) > 0:
-                            position_candle_time = int(current_candle[0]["time"])
-                    except Exception:
-                        position_candle_time = None
-                    tick = mt5.symbol_info_tick(self.symbol)
-            else:
-                tick = _tick_for(self.symbol)
+            with MT5_LOCK:
+                _ensure_master_session()
+                try:
+                    current_candle = mt5.copy_rates_from_pos(
+                        self.symbol, TIMEFRAME_MAP["M1"], 0, 1
+                    )
+                    if current_candle is not None and len(current_candle) > 0:
+                        position_candle_time = int(current_candle[0]["time"])
+                except Exception:
+                    position_candle_time = None
+                tick = mt5.symbol_info_tick(self.symbol)
             if tick is None:
                 raise RuntimeError("No live tick to price the order.")
             market_price = float(tick.ask if is_buy else tick.bid)
@@ -1633,8 +1534,6 @@ class ZoneStrategyEngine:
         minimized window only polled about once a minute. Each receiver sizes
         the lot from its own Risk % (see _receiver_open_settings).
         """
-        if is_dev_mode():
-            return
         remote_controller.broadcast_in_background(
             "open",
             {
@@ -1669,19 +1568,6 @@ class ZoneStrategyEngine:
 
     def _watch_position_exit(self) -> None:
         """Restart the same side's search only after its trade closes by TP/SL."""
-        if not mt5_available():
-            price = self._current_price()
-            if price is None:
-                return
-            levels = self._exit_levels
-            hit_tp = price >= levels["tp"] if levels.get("side") == "BUY" else price <= levels["tp"]
-            hit_sl = price <= levels["sl"] if levels.get("side") == "BUY" else price >= levels["sl"]
-            self._monitor_m5_zone_after_entry()
-            if (levels.get("tp", 0) > 0 and hit_tp) or (levels.get("sl", 0) > 0 and hit_sl):
-                stop_task(self._exit_task_name)
-                self._sl_deal_time = None
-                self._restart_search_after_close("TP" if hit_tp else "SL")
-            return
 
         if not self._ensure_symbol_or_log():
             return
@@ -1799,7 +1685,7 @@ class ZoneStrategyEngine:
         sl_candle_time: Optional[int] = None
         if closed_reason == "SL":
             # The SL fill's broker time; the latest quote time if the deal
-            # didn't carry one (simulation), which is within a second of it.
+            # didn't carry one, which is within a second of it.
             sl_time = self._sl_deal_time or self._broker_time()
             sl_candle_time = (sl_time // 60) * 60 if sl_time else None
         if self._resume_m1_search_for_current_zone(sl_candle_time=sl_candle_time):

@@ -10,6 +10,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { cx } from "../../utils/format";
+import mt5Logo from "../../assets/mt5-logo.png";
 
 type SidebarProps = {
   activePage: string;
@@ -65,9 +66,11 @@ export default function Sidebar({ activePage, onChangePage }: SidebarProps) {
           collapsed ? "flex-col items-center gap-2" : "items-center gap-2.5 px-2",
         )}
       >
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-blue-600 text-sm font-black text-white">
-          MT
-        </span>
+        <img
+          src={mt5Logo}
+          alt="MetaTrader 5"
+          className="h-9 w-9 shrink-0 rounded-xl"
+        />
         {!collapsed ? (
           <span className="min-w-0 flex-1 truncate text-sm font-black tracking-tight text-slate-950">
             MT5 Trader

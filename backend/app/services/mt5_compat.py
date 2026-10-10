@@ -2,10 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from .env_utils import is_dev_mode, load_project_env
-
-load_project_env()
-
 try:
     import MetaTrader5 as _mt5  # type: ignore
 except Exception:  # pragma: no cover
@@ -41,7 +37,3 @@ class _MT5Fallback:
 
 
 mt5 = _mt5 if _mt5 is not None else _MT5Fallback()
-
-
-def mt5_available() -> bool:
-    return _mt5 is not None and not is_dev_mode()

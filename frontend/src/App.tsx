@@ -1,9 +1,20 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { MotionConfig, motion } from "framer-motion";
 import { WifiOff } from "lucide-react";
 import Sidebar from "./components/layout/Sidebar";
 import TopBar from "./components/layout/TopBar";
-import { AppButton, Dialog, Field, SelectBox } from "./components/ui/Primitives";
+import {
+  AppButton,
+  Dialog,
+  Field,
+  SelectBox,
+} from "./components/ui/Primitives";
 import { CTraderConnect } from "./components/CTraderConnect";
 import DashboardPage from "./pages/DashboardPage";
 import SearchPage from "./pages/SearchPage";
@@ -13,10 +24,15 @@ import { NotificationsPage } from "./pages/NotificationsPage";
 import { SettingsPlaceholder } from "./pages/SettingsPage";
 import TradeHistoryPage from "./pages/TradeHistoryPage";
 import RemoteControlPage from "./pages/RemoteControlPage";
-import { initialAccounts, liquidityLevels, strategyLogs } from "./data/mockData";
+import {
+  initialAccounts,
+  liquidityLevels,
+  strategyLogs,
+} from "./data/mockData";
 import { cx } from "./utils/format";
 import { clearBanner, showBanner } from "./utils/banner";
 import { api } from "./services/api";
+import { DEFAULT_APPEARANCE, setChartPreferences } from "./utils/chartTheme";
 
 const avatarColorOptions = [
   { name: "Blue", value: "from-blue-600 to-indigo-600", swatch: "#2563eb" },
@@ -24,13 +40,51 @@ const avatarColorOptions = [
   { name: "Violet", value: "from-violet-500 to-purple-700", swatch: "#8b5cf6" },
   { name: "Amber", value: "from-amber-500 to-orange-600", swatch: "#f59e0b" },
   { name: "Rose", value: "from-rose-500 to-pink-600", swatch: "#f43f5e" },
-  { name: "Emerald", value: "from-emerald-500 to-green-600", swatch: "#10b981" },
+  {
+    name: "Emerald",
+    value: "from-emerald-500 to-green-600",
+    swatch: "#10b981",
+  },
   { name: "Teal", value: "from-teal-500 to-cyan-600", swatch: "#14b8a6" },
   { name: "Sky", value: "from-sky-500 to-blue-600", swatch: "#0ea5e9" },
   { name: "Lime", value: "from-lime-500 to-green-600", swatch: "#84cc16" },
   { name: "Slate", value: "from-slate-500 to-slate-700", swatch: "#64748b" },
 ];
-const defaultNotificationSettings = { enabled: true, show_warnings: true, show_success: true, show_info: false };
+const defaultNotificationSettings = {
+  enabled: true,
+  show_warnings: true,
+  show_success: true,
+  show_info: false,
+};
+const UI_ZOOM_MIN = 70;
+const UI_ZOOM_MAX = 150;
+const clampZoom = (value) =>
+  Math.min(
+    UI_ZOOM_MAX,
+    Math.max(UI_ZOOM_MIN, Math.round(Number(value) || 100)),
+  );
+// The 5s bootstrap poll would otherwise put back a theme/zoom/appearance
+// value the user changed a moment ago, before its save has landed.
+const LOCAL_EDIT_GRACE_MS = 4000;
+const emptyAccountForm = {
+  name: "",
+  role: "SUB",
+  setAsMain: false,
+  login: "",
+  password: "",
+  server: "demo",
+  status: "Connected",
+  balance: 0,
+  equity: 0,
+  pnl: 0,
+  risk: 1,
+  riskMode: "percent",
+  riskAmount: "",
+  orderDelaySec: 0,
+  latency: "",
+  color: "from-blue-600 to-indigo-600",
+  oauthState: "",
+};
 export default function App() {
   const [devModeEnabled, setDevModeEnabled] = useState(false);
   const [activePage, setActivePage] = useState("dashboard");
@@ -38,11 +92,23 @@ export default function App() {
   const [runtime, setRuntime] = useState(null);
   const [searchLogs, setSearchLogs] = useState([]);
   const [notifications, setNotifications] = useState([]);
-  const [notificationSettings, setNotificationSettings] = useState(defaultNotificationSettings);
+  const [notificationSettings, setNotificationSettings] = useState(
+    defaultNotificationSettings,
+  );
   const [themeMode, setThemeMode] = useState("LIGHT");
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() =>
+    Boolean(window.matchMedia?.("(prefers-color-scheme: dark)").matches),
+  );
   const [uiZoomPercent, setUiZoomPercent] = useState(100);
+  const [appearance, setAppearance] = useState(DEFAULT_APPEARANCE);
+  const [copyTradingEnabled, setCopyTradingEnabled] = useState(true);
+  const localEditAt = useRef(0);
+  const zoomSaveTimer = useRef(null);
   const dismissedNotificationIds = useRef(new Set());
-  const [tradeHistory, setTradeHistory] = useState({ history: [], summaries: [] });
+  const [tradeHistory, setTradeHistory] = useState({
+    history: [],
+    summaries: [],
+  });
   const [loadingBootstrap, setLoadingBootstrap] = useState(true);
   const [settingsTabRequest, setSettingsTabRequest] = useState("accounts");
   const [dialogMode, setDialogMode] = useState(null);
@@ -57,23 +123,7 @@ export default function App() {
       endEnabled: false,
     };
   });
-  const [formState, setFormState] = useState({
-    name: "",
-    role: "SUB",
-    setAsMain: false,
-    login: "",
-    password: "",
-    server: "demo",
-    status: "Connected",
-    balance: 0,
-    equity: 0,
-    pnl: 0,
-    risk: 1,
-    orderDelaySec: 0,
-    latency: "",
-    color: "from-blue-600 to-indigo-600",
-    oauthState: "",
-  });
+  const [formState, setFormState] = useState(emptyAccountForm);
 
   // Surfaces in the TopBar's banner slot instead of an inline div in the
   // page content -- see utils/banner.js. Called with the actual Error object
@@ -92,104 +142,229 @@ export default function App() {
         const snapshot = snapshots.get(String(account.login));
         if (!snapshot) return account;
         const hasNumber = (value) =>
-          value !== null && value !== undefined && Number.isFinite(Number(value));
+          value !== null &&
+          value !== undefined &&
+          Number.isFinite(Number(value));
         return {
           ...account,
-          balance: hasNumber(snapshot.balance) ? Number(snapshot.balance) : account.balance,
-          equity: hasNumber(snapshot.equity) ? Number(snapshot.equity) : account.equity,
-          pnl: hasNumber(snapshot.floating_pnl) ? Number(snapshot.floating_pnl) : account.pnl,
-          floatingPnl: hasNumber(snapshot.floating_pnl) ? Number(snapshot.floating_pnl) : account.floatingPnl,
+          balance: hasNumber(snapshot.balance)
+            ? Number(snapshot.balance)
+            : account.balance,
+          equity: hasNumber(snapshot.equity)
+            ? Number(snapshot.equity)
+            : account.equity,
+          pnl: hasNumber(snapshot.floating_pnl)
+            ? Number(snapshot.floating_pnl)
+            : account.pnl,
+          floatingPnl: hasNumber(snapshot.floating_pnl)
+            ? Number(snapshot.floating_pnl)
+            : account.floatingPnl,
           latency: snapshot.latency ?? account.latency,
           algoEnabled: snapshot.algo_enabled ?? account.algoEnabled,
+          openPositions: hasNumber(snapshot.open_positions) ? Number(snapshot.open_positions) : account.openPositions,
         };
       }),
     );
   }, []);
 
-  const refreshBootstrap = useCallback(async (options = {}) => {
-    const { silent = false, withSnapshots = false, replaceSearchLogs = false } = options;
-    if (!silent) setLoadingBootstrap(true);
-    try {
-      const loaded = await api.bootstrap();
-      const nextDevMode = Boolean(loaded?.dev_mode);
-      setDevModeEnabled(nextDevMode);
-      const data = resolveBootstrapData(loaded, nextDevMode);
-      const nextNotificationSettings = { ...defaultNotificationSettings, ...(data.settings?.notification_settings || {}) };
-      setNotificationSettings(nextNotificationSettings);
-      setThemeMode(String(data.settings?.theme_mode || "LIGHT").toUpperCase());
-      setUiZoomPercent(Math.min(150, Math.max(70, Number(data.settings?.ui_zoom_percent || 100))));
-      setAccountList((current) => {
-        const previousByLogin = new Map(current.map((account) => [String(account.login), account]));
-        return (Array.isArray(data.accounts) ? data.accounts : []).map((account) => {
-          const previous = previousByLogin.get(String(account.login));
-          const balance = Number(account.balance || 0) > 0 ? account.balance : previous?.balance || 0;
-          const equity = Number(account.equity || 0) > 0 ? account.equity : previous?.equity || balance;
-          const latency = Number(account.latency || 0) > 0 ? account.latency : previous?.latency || null;
-          const floatingPnl = Number(previous?.floatingPnl ?? previous?.pnl ?? 0);
-          return { ...account, balance, equity, pnl: floatingPnl, floatingPnl, latency };
-        });
-      });
-      setRuntime(data.runtime || null);
-      const incomingSearchLogs = data.runtime?.logs?.search || data.logs?.search;
-      if (replaceSearchLogs && Array.isArray(incomingSearchLogs)) {
-        setSearchLogs(incomingSearchLogs);
-      } else if (Array.isArray(incomingSearchLogs) && incomingSearchLogs.length) {
-        setSearchLogs((current) => {
-          const known = new Set(current);
-          const merged = [...current];
-          incomingSearchLogs.forEach((line) => {
-            if (!known.has(line)) {
-              known.add(line);
-              merged.push(line);
-            }
+  const refreshBootstrap = useCallback(
+    async (options = {}) => {
+      const {
+        silent = false,
+        withSnapshots = false,
+        replaceSearchLogs = false,
+      } = options;
+      if (!silent) setLoadingBootstrap(true);
+      try {
+        const loaded = await api.bootstrap();
+        const nextDevMode = Boolean(loaded?.dev_mode);
+        setDevModeEnabled(nextDevMode);
+        const data = resolveBootstrapData(loaded, nextDevMode);
+        const nextNotificationSettings = {
+          ...defaultNotificationSettings,
+          ...(data.settings?.notification_settings || {}),
+        };
+        setNotificationSettings(nextNotificationSettings);
+        setCopyTradingEnabled(data.settings?.copy_trading_enabled !== false);
+        if (Date.now() - localEditAt.current > LOCAL_EDIT_GRACE_MS) {
+          setThemeMode(
+            String(data.settings?.theme_mode || "LIGHT").toUpperCase(),
+          );
+          setUiZoomPercent(clampZoom(data.settings?.ui_zoom_percent || 100));
+          setAppearance({
+            ...DEFAULT_APPEARANCE,
+            ...(data.settings?.appearance || {}),
           });
-          return merged.slice(-500);
-        });
-      }
-      setNotifications(buildNotifications(data, nextNotificationSettings).filter((item) => !dismissedNotificationIds.current.has(item.id)));
-      clearBanner();
-      if (withSnapshots && !devModeEnabled) {
-        try {
-          const snapshotData = await api.accountSnapshots();
-          mergeAccountSnapshots(snapshotData);
-        } catch (error) {
-          reportError(error);
         }
-      }
-      return data;
-    } catch (error) {
-      if (devModeEnabled) {
-        const data = buildDeveloperBootstrap();
-        setDevModeEnabled(true);
-        setAccountList(data.accounts || []);
+        setAccountList((current) => {
+          const previousByLogin = new Map(
+            current.map((account) => [String(account.login), account]),
+          );
+          return (Array.isArray(data.accounts) ? data.accounts : []).map(
+            (account) => {
+              const previous = previousByLogin.get(String(account.login));
+              const balance =
+                Number(account.balance || 0) > 0
+                  ? account.balance
+                  : previous?.balance || 0;
+              const equity =
+                Number(account.equity || 0) > 0
+                  ? account.equity
+                  : previous?.equity || balance;
+              const latency =
+                Number(account.latency || 0) > 0
+                  ? account.latency
+                  : previous?.latency || null;
+              const floatingPnl = Number(
+                previous?.floatingPnl ?? previous?.pnl ?? 0,
+              );
+              return {
+                ...account,
+                balance,
+                equity,
+                pnl: floatingPnl,
+                floatingPnl,
+                latency,
+                openPositions: previous?.openPositions ?? 0,
+              };
+            },
+          );
+        });
         setRuntime(data.runtime || null);
-        setSearchLogs(data.logs?.search || []);
-        setNotifications(buildNotifications(data, notificationSettings));
-        setTradeHistory(buildDeveloperTradeHistory());
+        const incomingSearchLogs =
+          data.runtime?.logs?.search || data.logs?.search;
+        if (replaceSearchLogs && Array.isArray(incomingSearchLogs)) {
+          setSearchLogs(incomingSearchLogs);
+        } else if (
+          Array.isArray(incomingSearchLogs) &&
+          incomingSearchLogs.length
+        ) {
+          setSearchLogs((current) => {
+            const known = new Set(current);
+            const merged = [...current];
+            incomingSearchLogs.forEach((line) => {
+              if (!known.has(line)) {
+                known.add(line);
+                merged.push(line);
+              }
+            });
+            return merged.slice(-500);
+          });
+        }
+        setNotifications(
+          buildNotifications(data, nextNotificationSettings).filter(
+            (item) => !dismissedNotificationIds.current.has(item.id),
+          ),
+        );
         clearBanner();
+        if (withSnapshots && !devModeEnabled) {
+          try {
+            const snapshotData = await api.accountSnapshots();
+            mergeAccountSnapshots(snapshotData);
+          } catch (error) {
+            reportError(error);
+          }
+        }
         return data;
+      } catch (error) {
+        if (devModeEnabled) {
+          const data = buildDeveloperBootstrap();
+          setDevModeEnabled(true);
+          setAccountList(data.accounts || []);
+          setRuntime(data.runtime || null);
+          setSearchLogs(data.logs?.search || []);
+          setNotifications(buildNotifications(data, notificationSettings));
+          setTradeHistory(buildDeveloperTradeHistory());
+          clearBanner();
+          return data;
+        }
+        reportError(error);
+        return null;
+      } finally {
+        if (!silent) setLoadingBootstrap(false);
       }
-      reportError(error);
-      return null;
-    } finally {
-      if (!silent) setLoadingBootstrap(false);
-    }
-  }, [devModeEnabled, mergeAccountSnapshots, reportError]);
+    },
+    [devModeEnabled, mergeAccountSnapshots, reportError],
+  );
+
+  const resolvedTheme =
+    themeMode === "SYSTEM" ? (systemPrefersDark ? "DARK" : "LIGHT") : themeMode;
 
   useEffect(() => {
-    document.documentElement.dataset.theme = themeMode;
-  }, [themeMode]);
+    const query = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!query) return undefined;
+    const update = () => setSystemPrefersDark(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolvedTheme;
+  }, [resolvedTheme]);
 
   useEffect(() => {
     document.documentElement.style.zoom = `${uiZoomPercent}%`;
+    document.documentElement.style.setProperty("--app-zoom", String(uiZoomPercent / 100));
     return () => {
       document.documentElement.style.zoom = "";
+      document.documentElement.style.removeProperty("--app-zoom");
     };
   }, [uiZoomPercent]);
 
+  useEffect(() => {
+    setChartPreferences(appearance);
+    document.documentElement.dataset.reduceMotion = appearance.reduce_motion
+      ? "true"
+      : "false";
+  }, [appearance]);
+
+  const markLocalEdit = useCallback(() => {
+    localEditAt.current = Date.now();
+  }, []);
+
+  // Applies immediately; the save is debounced so dragging the slider or
+  // holding Ctrl + "+" doesn't send a request per step.
+  const changeUiZoom = useCallback(
+    (value) => {
+      const zoom = clampZoom(value);
+      markLocalEdit();
+      setUiZoomPercent(zoom);
+      window.clearTimeout(zoomSaveTimer.current);
+      zoomSaveTimer.current = window.setTimeout(() => {
+        markLocalEdit();
+        api.saveZoom(zoom).catch((error) => reportError(error));
+      }, 500);
+    },
+    [markLocalEdit, reportError],
+  );
+
+  // Ctrl/Cmd + "+" / "-" / "0" scale the app itself (like browser zoom),
+  // so the saved zoom and the actual zoom never disagree.
+  useEffect(() => {
+    function handleZoomKeys(event) {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (event.key === "=" || event.key === "+") {
+        event.preventDefault();
+        changeUiZoom(uiZoomPercent + 10);
+      } else if (event.key === "-" || event.key === "_") {
+        event.preventDefault();
+        changeUiZoom(uiZoomPercent - 10);
+      } else if (event.key === "0") {
+        event.preventDefault();
+        changeUiZoom(100);
+      }
+    }
+    window.addEventListener("keydown", handleZoomKeys);
+    return () => window.removeEventListener("keydown", handleZoomKeys);
+  }, [changeUiZoom, uiZoomPercent]);
+
   function clearNotifications() {
-    notifications.filter((item) => item.category !== "system").forEach((item) => dismissedNotificationIds.current.add(item.id));
-    setNotifications((current) => current.filter((item) => item.category === "system"));
+    notifications
+      .filter((item) => item.category !== "system")
+      .forEach((item) => dismissedNotificationIds.current.add(item.id));
+    setNotifications((current) =>
+      current.filter((item) => item.category === "system"),
+    );
   }
 
   useEffect(() => {
@@ -201,22 +376,30 @@ export default function App() {
     return () => clearInterval(timer);
   }, [refreshBootstrap]);
 
-
   const totals = useMemo(
     () => ({
       balance: accountList.reduce((sum, account) => sum + account.balance, 0),
       equity: accountList.reduce((sum, account) => sum + account.equity, 0),
-      connected: accountList.filter((account) => account.status === "Connected").length,
-      pnl: accountList.reduce((sum, account) => sum + Number(account.floatingPnl ?? account.pnl ?? 0), 0),
+      connected: accountList.filter((account) => account.status === "Connected")
+        .length,
+      pnl: accountList.reduce(
+        (sum, account) => sum + Number(account.floatingPnl ?? account.pnl ?? 0),
+        0,
+      ),
+      positions: accountList.reduce((sum, account) => sum + Number(account.openPositions || 0), 0),
+      masterPositions: accountList
+        .filter((account) => account.role === "MASTER")
+        .reduce((sum, account) => sum + Number(account.openPositions || 0), 0),
     }),
-    [accountList]
+    [accountList],
   );
 
   const masterAccount = useMemo(
     () => accountList.find((account) => account.role === "MASTER") || null,
     [accountList],
   );
-  const masterConnected = devModeEnabled || masterAccount?.status === "Connected";
+  const masterConnected =
+    devModeEnabled || masterAccount?.status === "Connected";
 
   useEffect(() => {
     if (!["history", "profile"].includes(activePage)) return;
@@ -225,30 +408,20 @@ export default function App() {
       return;
     }
     if (!masterConnected) return;
-    api.tradeHistory()
-      .then((data) => setTradeHistory({ history: data.history || [], summaries: data.summaries || [] }))
+    api
+      .tradeHistory()
+      .then((data) =>
+        setTradeHistory({
+          history: data.history || [],
+          summaries: data.summaries || [],
+        }),
+      )
       .catch((error) => reportError(error));
   }, [activePage, masterConnected, reportError]);
 
   function openAddDialog() {
     setSelectedAccount(null);
-    setFormState({
-      name: "",
-      role: "SUB",
-      setAsMain: false,
-      login: "",
-      password: "",
-      server: "demo",
-      status: "Connected",
-      balance: 0,
-      equity: 0,
-      pnl: 0,
-      risk: 1,
-      orderDelaySec: 0,
-      latency: "",
-      color: "from-blue-600 to-indigo-600",
-      oauthState: "",
-    });
+    setFormState(emptyAccountForm);
     setDialogMode("add");
   }
 
@@ -260,12 +433,16 @@ export default function App() {
       setAsMain: account.role === "MASTER",
       login: account.login,
       password: account.password || "",
-      server: String(account.server || "").toLowerCase().includes("live") ? "live" : "demo",
+      server: String(account.server || "").toLowerCase().includes("live")
+        ? "live"
+        : "demo",
       status: account.status,
       balance: account.balance,
       equity: account.equity,
       pnl: account.pnl,
       risk: account.risk,
+      riskMode: account.riskMode === "amount" ? "amount" : "percent",
+      riskAmount: account.riskAmount ? String(account.riskAmount) : "",
       orderDelaySec: account.orderDelaySec ?? 0,
       latency: account.latency ?? "",
       color: account.color,
@@ -303,6 +480,16 @@ export default function App() {
 
   async function saveAccount() {
     if (!formState.name.trim() || !String(formState.login).trim()) return;
+    if (
+      formState.riskMode === "amount" &&
+      !(Number(formState.riskAmount) > 0)
+    ) {
+      showBanner(
+        "Enter a risk amount per trade above 0, or switch the risk type to percent.",
+        "error",
+      );
+      return;
+    }
     const shouldBeMain = !!formState.setAsMain;
     try {
       await api.saveAccount({
@@ -313,6 +500,8 @@ export default function App() {
         role: shouldBeMain ? "master" : "sub",
         color: formState.color,
         risk_percent: Number(formState.risk || 1),
+        risk_mode: formState.riskMode,
+        risk_amount: Number(formState.riskAmount || 0),
         order_delay_sec: Number(formState.orderDelaySec || 0),
         oauth_state: formState.oauthState || null,
       });
@@ -354,7 +543,9 @@ export default function App() {
       let connected = false;
       for (let i = 0; i < 8; i += 1) {
         const data = await refreshBootstrap({ silent: true });
-        const current = (data?.accounts || []).find((a) => String(a.login) === String(account.login));
+        const current = (data?.accounts || []).find(
+          (a) => String(a.login) === String(account.login),
+        );
         if (current?.status === "Connected") {
           connected = true;
           break;
@@ -388,21 +579,27 @@ export default function App() {
       : activePage === "trade"
         ? "Trade"
         : activePage === "history"
-            ? "Trade History"
-            : activePage === "settings"
-                ? "Settings"
-                : activePage === "remote"
-                  ? "Remote Control"
-                : activePage === "profile"
-                  ? "Profile"
+          ? "Trade History"
+          : activePage === "settings"
+            ? "Settings"
+            : activePage === "remote"
+              ? "Remote Control"
+              : activePage === "profile"
+                ? "Profile"
                 : activePage === "notifications"
                   ? "Notifications"
-                : "Trading Control Center";
+                  : "Trading Control Center";
 
   return (
-    <div className="app-shell lg:flex" style={styles.appShell}>
-      <Sidebar activePage={activePage} onChangePage={setActivePage} connectedCount={totals.connected} totalCount={accountList.length} />
-      {/* flex-col + min-h-0 lets the page-content div below claim exactly the
+    <MotionConfig reducedMotion={appearance.reduce_motion ? "always" : "never"}>
+      <div className="app-shell lg:flex" style={styles.appShell}>
+        <Sidebar
+          activePage={activePage}
+          onChangePage={setActivePage}
+          connectedCount={totals.connected}
+          totalCount={accountList.length}
+        />
+        {/* flex-col + min-h-0 lets the page-content div below claim exactly the
           remaining height and scroll internally, instead of every page having
           to independently guess it via a hardcoded `calc(100vh - Npx)` (which
           drifted from the real TopBar height and left a gap under short
@@ -415,21 +612,114 @@ export default function App() {
           concrete to size against, so its content -- most visibly a log panel
           -- collapsed to its own shrink-wrapped height whenever it had little
           or nothing to show instead of filling the remaining viewport. */}
-      <main className="app-main flex min-h-screen min-w-0 flex-col lg:min-h-0 lg:flex-1">
-        <TopBar pageTitle={pageTitle} activePage={activePage} onChangePage={setActivePage} onChangeSettingsTab={openSettingsTab} onAddAccount={openAddDialog} onLogout={handleLogout} masterAccount={masterAccount} notifications={notifications.filter((item) => item.category !== "system")} onClearNotifications={clearNotifications} onViewMoreNotifications={() => setActivePage("notifications")} />
-        <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-6 pt-2 lg:px-5" style={styles.pageContent}>
-          <motion.div key={activePage} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }} className="flex min-h-0 flex-1 flex-col">
-            {devModeEnabled ? <div style={styles.loadingBanner}>Developer mode is enabled. Using mock trading data unless a live cTrader session is available.</div> : null}
-            {loadingBootstrap ? <div style={styles.loadingBanner}>Loading backend data...</div> : null}
-            {activePage === "dashboard" && <DashboardPage totals={totals} accountsData={accountList} onAdd={openAddDialog} onEdit={openEditDialog} onDelete={openDeleteDialog} onConnect={connectAccountAndSync} onRefresh={refreshDashboard} />}
-            {activePage === "search" && (masterConnected ? <SearchPage runtime={runtime} searchLogs={searchLogs} onRefreshRuntime={refreshBootstrap} timeRange={searchTimeRange} onTimeRangeChange={setSearchTimeRange} /> : <MasterConnectionRequiredPage />)}
-            {activePage === "history" && (masterConnected ? <TradeHistoryPage runtime={runtime} historyRows={tradeHistory.history} /> : <MasterConnectionRequiredPage />)}
-            {activePage === "remote" && <RemoteControlPage />}
-            {activePage === "settings" && <SettingsPlaceholder initialTab={settingsTabRequest} accountsData={accountList} onEdit={openEditDialog} onDelete={openDeleteDialog} notificationSettings={notificationSettings} onNotificationSettingsChange={setNotificationSettings} themeMode={themeMode} onThemeModeChange={setThemeMode} uiZoomPercent={uiZoomPercent} onUiZoomPercentChange={setUiZoomPercent} />}
-            {activePage === "profile" && <ProfilePage accountsData={accountList} runtime={runtime} historyRows={tradeHistory.history} summaries={tradeHistory.summaries} />}
-            {activePage === "notifications" && <NotificationsPage notifications={notifications} />}
-          </motion.div>
-          {/* Rendered as an always-mounted sibling (absolutely positioned over
+        <main className="app-main flex min-h-[var(--app-vh)] min-w-0 flex-col lg:min-h-0 lg:flex-1">
+          <TopBar
+            pageTitle={pageTitle}
+            activePage={activePage}
+            onChangePage={setActivePage}
+            onChangeSettingsTab={openSettingsTab}
+            onAddAccount={openAddDialog}
+            onLogout={handleLogout}
+            masterAccount={masterAccount}
+            notifications={notifications.filter(
+              (item) => item.category !== "system",
+            )}
+            onClearNotifications={clearNotifications}
+            onViewMoreNotifications={() => setActivePage("notifications")}
+          />
+          <div
+            className="relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-6 pt-2 lg:px-5"
+            style={styles.pageContent}
+          >
+            <motion.div
+              key={activePage}
+              initial={appearance.reduce_motion ? false : { opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.22 }}
+              className="flex min-h-0 flex-1 flex-col"
+            >
+              {devModeEnabled ? (
+                <div style={styles.loadingBanner}>
+                  Developer mode is enabled. Using mock trading data unless a
+                  live cTrader session is available.
+                </div>
+              ) : null}
+              {loadingBootstrap ? (
+                <div style={styles.loadingBanner}>Loading backend data...</div>
+              ) : null}
+              {activePage === "dashboard" && (
+                <DashboardPage
+                  totals={totals}
+                  accountsData={accountList}
+                  onAdd={openAddDialog}
+                  onEdit={openEditDialog}
+                  onDelete={openDeleteDialog}
+                  onConnect={connectAccountAndSync}
+                  onRefresh={refreshDashboard}
+                />
+              )}
+              {activePage === "search" &&
+                (masterConnected ? (
+                  <SearchPage
+                    runtime={runtime}
+                    searchLogs={searchLogs}
+                    onRefreshRuntime={refreshBootstrap}
+                    timeRange={searchTimeRange}
+                    onTimeRangeChange={setSearchTimeRange}
+                  />
+                ) : (
+                  <MasterConnectionRequiredPage />
+                ))}
+              {activePage === "history" &&
+                (masterConnected ? (
+                  <TradeHistoryPage
+                    runtime={runtime}
+                    historyRows={tradeHistory.history}
+                  />
+                ) : (
+                  <MasterConnectionRequiredPage />
+                ))}
+              {activePage === "remote" && <RemoteControlPage />}
+              {activePage === "settings" && (
+                <SettingsPlaceholder
+                  initialTab={settingsTabRequest}
+                  accountsData={accountList}
+                  runtime={runtime}
+                  onEdit={openEditDialog}
+                  onDelete={openDeleteDialog}
+                  onOpenPage={setActivePage}
+                  notificationSettings={notificationSettings}
+                  onNotificationSettingsChange={setNotificationSettings}
+                  themeMode={themeMode}
+                  onThemeModeChange={(mode) => {
+                    markLocalEdit();
+                    setThemeMode(mode);
+                  }}
+                  uiZoomPercent={uiZoomPercent}
+                  onUiZoomPercentChange={changeUiZoom}
+                  appearance={appearance}
+                  onAppearanceChange={(next) => {
+                    markLocalEdit();
+                    setAppearance(next);
+                  }}
+                  copyTradingEnabled={copyTradingEnabled}
+                  onCopyTradingChange={setCopyTradingEnabled}
+                  onRefreshRuntime={refreshBootstrap}
+                />
+              )}
+              {activePage === "profile" && (
+                <ProfilePage
+                  accountsData={accountList}
+                  runtime={runtime}
+                  historyRows={tradeHistory.history}
+                  summaries={tradeHistory.summaries}
+                />
+              )}
+              {activePage === "notifications" && (
+                <NotificationsPage notifications={notifications} />
+              )}
+            </motion.div>
+            {/* Rendered as an always-mounted sibling (absolutely positioned over
               the animated container above, not inside it) instead of behind
               `activePage === "trade" &&` like every other page -- that ternary
               would unmount ManualTradePage (and the chart inside it) on every page
@@ -438,86 +728,267 @@ export default function App() {
               back preserves all of it. It only loses state if the master
               account actually disconnects, which is a real reset, not a
               navigation side effect. */}
-          <div
-            className={cx(
-              // Matches the horizontal and vertical padding on the scroll container
-              // itself (an inset-0 absolute child would otherwise sit flush
-              // against its edges, ignoring that padding).
-              "absolute left-3 right-3 top-2 bottom-6 flex min-h-0 flex-col lg:left-5 lg:right-5",
-              activePage === "trade" ? "flex" : "hidden",
-            )}
-          >
-            {masterConnected ? <ManualTradePage runtime={runtime} onRefreshRuntime={refreshBootstrap} /> : <MasterConnectionRequiredPage />}
-          </div>
-        </div>
-      </main>
-
-      <Dialog open={dialogMode === "add" || dialogMode === "edit"} title={dialogMode === "edit" ? "Edit Account Settings" : "Add Account"} onClose={closeDialog}>
-        <div className="grid gap-4 md:grid-cols-2">
-          <CTraderConnect
-            currentLogin={dialogMode === "edit" ? String(selectedAccount?.login || "") : ""}
-            existingLogins={accountList.map((account) => String(account.login))}
-            selectedLogin={String(formState.login)}
-            linked={!!formState.oauthState || (dialogMode === "edit" && !!selectedAccount?.tokenAutoRefresh && formState.password === selectedAccount?.password)}
-            onPick={(account, oauthState) =>
-              setFormState((s) => ({
-                ...s,
-                login: String(account.login),
-                server: account.environment,
-                oauthState,
-                name: s.name.trim() ? s.name : `${account.broker || "cTrader"} ${account.login}`,
-              }))
-            }
-          />
-          <Field label="Account Name" value={formState.name} onChange={(e) => setFormState((s) => ({ ...s, name: e.target.value }))} />
-          <Field label="cTrader Account Number" value={formState.login} onChange={(e) => setFormState((s) => ({ ...s, login: e.target.value }))} />
-          <SelectBox label="Environment" value={formState.server} options={["demo", "live"]} onChange={(e) => setFormState((s) => ({ ...s, server: e.target.value }))} />
-          {!formState.oauthState && (
-            <Field label="Open API Access Token" type="password" autoComplete="off" value={formState.password} onChange={(e) => setFormState((s) => ({ ...s, password: e.target.value }))} />
-          )}
-          <label className="block">
-            <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Avatar Color</span>
-            <select
-              value={formState.color}
-              onChange={(e) => setFormState((s) => ({ ...s, color: e.target.value }))}
-              className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+            <div
+              className={cx(
+                // Matches the horizontal and vertical padding on the scroll container
+                // itself (an inset-0 absolute child would otherwise sit flush
+                // against its edges, ignoring that padding).
+                "absolute left-3 right-3 top-2 bottom-6 flex min-h-0 flex-col lg:left-5 lg:right-5",
+                activePage === "trade" ? "flex" : "hidden",
+              )}
             >
-              {avatarColorOptions.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-            <div className="mt-2 flex items-center gap-2 text-xs font-semibold text-slate-600">
-              <span className="h-3 w-3 rounded-full" style={{ backgroundColor: (avatarColorOptions.find((c) => c.value === formState.color) || avatarColorOptions[0]).swatch }} />
-              {(avatarColorOptions.find((c) => c.value === formState.color) || avatarColorOptions[0]).name}
+              {masterConnected ? (
+                <ManualTradePage
+                  runtime={runtime}
+                  onRefreshRuntime={refreshBootstrap}
+                />
+              ) : (
+                <MasterConnectionRequiredPage />
+              )}
             </div>
-          </label>
-          {dialogMode === "edit" && (
-            <>
-              <Field label="Risk %" value={String(formState.risk)} type="number" onChange={(e) => setFormState((s) => ({ ...s, risk: e.target.value }))} />
-              <Field label="Position Delay (seconds)" value={String(formState.orderDelaySec)} type="number" min={0} max={10} onChange={(e) => setFormState((s) => ({ ...s, orderDelaySec: Math.min(10, Math.max(0, Number(e.target.value || 0))) }))} />
-              <label className="flex items-center justify-between rounded-[8px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700">
-                <span>Switch this account to main account</span>
-                <button
-                  type="button"
-                  onClick={() => setFormState((s) => ({ ...s, setAsMain: !s.setAsMain, role: !s.setAsMain ? "MASTER" : "SUB" }))}
-                  className={cx("relative h-6 w-11 rounded-full transition", formState.setAsMain ? "bg-blue-600" : "bg-slate-300")}
-                >
-                  <span className={cx("absolute top-1 h-4 w-4 rounded-full bg-white transition", formState.setAsMain ? "left-6" : "left-1")} />
-                </button>
-              </label>
-            </>
-          )}
-        </div>
-        <div className="mt-4 flex justify-end gap-2"><AppButton variant="soft" onClick={closeDialog}>Cancel</AppButton><AppButton variant="blue" onClick={saveAccount}>Save</AppButton></div>
-      </Dialog>
+          </div>
+        </main>
 
-      <Dialog open={dialogMode === "delete"} title="Delete Account" onClose={closeDialog}>
-        <p className="text-sm text-slate-600">Are you sure you want to delete <span className="font-bold">{selectedAccount?.name}</span>?</p>
-        <div className="mt-4 flex justify-end gap-2"><AppButton variant="soft" onClick={closeDialog}>Cancel</AppButton><AppButton variant="red" onClick={confirmDelete}>Delete</AppButton></div>
-      </Dialog>
-    </div>
+        <Dialog
+          open={dialogMode === "add" || dialogMode === "edit"}
+          title={
+            dialogMode === "edit" ? "Edit Account Settings" : "Add Account"
+          }
+          onClose={closeDialog}
+        >
+          <div className="grid gap-4 md:grid-cols-2">
+            <CTraderConnect
+              currentLogin={
+                dialogMode === "edit" ? String(selectedAccount?.login || "") : ""
+              }
+              existingLogins={accountList.map((account) =>
+                String(account.login),
+              )}
+              selectedLogin={String(formState.login)}
+              linked={
+                !!formState.oauthState ||
+                (dialogMode === "edit" &&
+                  !!selectedAccount?.tokenAutoRefresh &&
+                  formState.password === selectedAccount?.password)
+              }
+              onPick={(account, oauthState) =>
+                setFormState((s) => ({
+                  ...s,
+                  login: String(account.login),
+                  server: account.environment,
+                  oauthState,
+                  name: s.name.trim()
+                    ? s.name
+                    : `${account.broker || "cTrader"} ${account.login}`,
+                }))
+              }
+            />
+            <Field
+              label="Account Name"
+              value={formState.name}
+              onChange={(e) =>
+                setFormState((s) => ({ ...s, name: e.target.value }))
+              }
+            />
+            <Field
+              label="cTrader Account Number"
+              value={formState.login}
+              onChange={(e) =>
+                setFormState((s) => ({ ...s, login: e.target.value }))
+              }
+            />
+            <SelectBox
+              label="Environment"
+              value={formState.server}
+              options={["demo", "live"]}
+              onChange={(e) =>
+                setFormState((s) => ({ ...s, server: e.target.value }))
+              }
+            />
+            {!formState.oauthState && (
+              <Field
+                label="Open API Access Token"
+                type="password"
+                autoComplete="off"
+                value={formState.password}
+                onChange={(e) =>
+                  setFormState((s) => ({ ...s, password: e.target.value }))
+                }
+              />
+            )}
+            <label className="block">
+              <span className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                Avatar Color
+              </span>
+              <select
+                value={formState.color}
+                onChange={(e) =>
+                  setFormState((s) => ({ ...s, color: e.target.value }))
+                }
+                className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+              >
+                {avatarColorOptions.map((c) => (
+                  <option key={c.value} value={c.value}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-2 flex items-center gap-2 text-xs font-semibold text-slate-600">
+                <span
+                  className="h-3 w-3 rounded-full"
+                  style={{
+                    backgroundColor: (
+                      avatarColorOptions.find(
+                        (c) => c.value === formState.color,
+                      ) || avatarColorOptions[0]
+                    ).swatch,
+                  }}
+                />
+                {
+                  (
+                    avatarColorOptions.find(
+                      (c) => c.value === formState.color,
+                    ) || avatarColorOptions[0]
+                  ).name
+                }
+              </div>
+            </label>
+            <div className="md:col-span-2 grid gap-4 md:grid-cols-2">
+              <div className="block">
+                <span className="text-xs font-black uppercase tracking-wide text-slate-500">
+                  Risk per Trade
+                </span>
+                <div
+                  className="mt-1.5 grid grid-cols-2 gap-1 rounded-xl border border-slate-200 bg-slate-100 p-1"
+                  role="radiogroup"
+                  aria-label="Risk per trade type"
+                >
+                  {[
+                    ["percent", "Percent (%)"],
+                    ["amount", "Amount ($)"],
+                  ].map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={formState.riskMode === mode}
+                      onClick={() =>
+                        setFormState((s) => ({ ...s, riskMode: mode }))
+                      }
+                      className={cx(
+                        "rounded-lg px-3 py-2 text-xs font-black transition",
+                        formState.riskMode === mode
+                          ? "bg-white text-blue-700 shadow-sm"
+                          : "text-slate-500 hover:text-slate-900",
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {formState.riskMode === "amount" ? (
+                <Field
+                  label="Risk Amount ($ per trade)"
+                  value={String(formState.riskAmount)}
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  inputMode="decimal"
+                  placeholder="e.g. 50"
+                  onChange={(e) =>
+                    setFormState((s) => ({ ...s, riskAmount: e.target.value }))
+                  }
+                />
+              ) : (
+                <Field
+                  label="Risk % (of equity per trade)"
+                  value={String(formState.risk)}
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  inputMode="decimal"
+                  onChange={(e) =>
+                    setFormState((s) => ({ ...s, risk: e.target.value }))
+                  }
+                />
+              )}
+            </div>
+            {dialogMode === "edit" && (
+              <>
+                <Field
+                  label="Position Delay (seconds)"
+                  value={String(formState.orderDelaySec)}
+                  type="number"
+                  min={0}
+                  max={10}
+                  onChange={(e) =>
+                    setFormState((s) => ({
+                      ...s,
+                      orderDelaySec: Math.min(
+                        10,
+                        Math.max(0, Number(e.target.value || 0)),
+                      ),
+                    }))
+                  }
+                />
+                <label className="flex items-center justify-between rounded-[8px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700">
+                  <span>Switch to master account</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFormState((s) => ({
+                        ...s,
+                        setAsMain: !s.setAsMain,
+                        role: !s.setAsMain ? "MASTER" : "SUB",
+                      }))
+                    }
+                    className={cx(
+                      "relative h-6 w-11 rounded-full transition",
+                      formState.setAsMain ? "bg-blue-600" : "bg-slate-300",
+                    )}
+                  >
+                    <span
+                      className={cx(
+                        "absolute top-1 h-4 w-4 rounded-full bg-white transition",
+                        formState.setAsMain ? "left-6" : "left-1",
+                      )}
+                    />
+                  </button>
+                </label>
+              </>
+            )}
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <AppButton variant="soft" onClick={closeDialog}>
+              Cancel
+            </AppButton>
+            <AppButton variant="blue" onClick={saveAccount}>
+              Save
+            </AppButton>
+          </div>
+        </Dialog>
+
+        <Dialog
+          open={dialogMode === "delete"}
+          title="Delete Account"
+          onClose={closeDialog}
+        >
+          <p className="text-sm text-slate-600">
+            Are you sure you want to delete{" "}
+            <span className="font-bold">{selectedAccount?.name}</span>?
+          </p>
+          <div className="mt-4 flex justify-end gap-2">
+            <AppButton variant="soft" onClick={closeDialog}>
+              Cancel
+            </AppButton>
+            <AppButton variant="red" onClick={confirmDelete}>
+              Delete
+            </AppButton>
+          </div>
+        </Dialog>
+      </div>
+    </MotionConfig>
   );
 }
 
@@ -532,24 +1003,62 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
   };
   const priorityForTitle = (title) => {
     if (title === "Session risk limit") return 0;
-    if (title === "Account disconnected" || title === "Algorithmic trading disabled") return 0;
+    if (
+      title === "Account disconnected" ||
+      title === "Algorithmic trading disabled"
+    )
+      return 0;
     if (title === "Trade execution") return 1;
     if (title === "Account connection") return 1;
     if (title === "Strategy status") return 2;
     return 3;
   };
   const logs = [
-    ...(runtime.logs?.search || []).map((message) => ({ source: "search", message })),
-    ...(runtime.logs?.adapter || []).map((message) => ({ source: "adapter", message })),
+    ...(runtime.logs?.search || []).map((message) => ({
+      source: "search",
+      message,
+    })),
+    ...(runtime.logs?.adapter || []).map((message) => ({
+      source: "adapter",
+      message,
+    })),
   ];
   logs.slice(-60).forEach(({ source, message }, index) => {
     const text = String(message || "");
-    const normalizedMessage = text.replace(/^\[[^\]]+\]\s*/, "").replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, "").trim();
+    const normalizedMessage = text
+      .replace(/^\[[^\]]+\]\s*/, "")
+      .replace(/^\[\d{2}:\d{2}:\d{2}\]\s*/, "")
+      .trim();
     const id = `${source}-${normalizedMessage}`;
     if (notifications.some((item) => item.id === id)) return;
     const lower = normalizedMessage.toLowerCase();
-    const level = text.includes("[ERROR]") || lower.includes("failed") || lower.includes("blocked") ? "error" : text.includes("[WARNING]") || lower.includes("disabled") || lower.includes("disconnected") ? "warning" : text.includes("[SUCCESS]") ? "success" : "info";
-    const title = lower.includes("session risk limit") ? "Session risk limit" : lower.includes("algo") || lower.includes("algorithmic") ? "Algo Trading" : source === "adapter" || lower.includes("connect") || lower.includes("terminal") ? "Account connection" : lower.includes("copy") || lower.includes("order") || lower.includes("position") ? "Trade execution" : lower.includes("strategy") ? "Strategy status" : "System update";
+    const level =
+      text.includes("[ERROR]") ||
+      lower.includes("failed") ||
+      lower.includes("blocked")
+        ? "error"
+        : text.includes("[WARNING]") ||
+            lower.includes("disabled") ||
+            lower.includes("disconnected")
+          ? "warning"
+          : text.includes("[SUCCESS]")
+            ? "success"
+            : "info";
+    const title = lower.includes("session risk limit")
+      ? "Session risk limit"
+      : lower.includes("algo") || lower.includes("algorithmic")
+        ? "Algo Trading"
+        : source === "adapter" ||
+            lower.includes("connect") ||
+            lower.includes("terminal")
+          ? "Account connection"
+          : lower.includes("copy") ||
+              lower.includes("order") ||
+              lower.includes("position")
+            ? "Trade execution"
+            : lower.includes("strategy")
+              ? "Strategy status"
+              : "System update";
     notifications.push({
       id,
       title,
@@ -560,18 +1069,43 @@ function buildNotifications(data, preferences = defaultNotificationSettings) {
       seq: index,
     });
   });
-  (data?.accounts || []).filter((account) => account.status === "Disconnected").forEach((account) => {
-    notifications.push({ id: `disconnected-${account.login}`, title: "Account disconnected", message: `${account.name} is not connected.`, level: "warning", category: "other", priority: 0, seq: notifications.length + 1 });
-  });
-  (data?.accounts || []).filter((account) => account.algoEnabled === false).forEach((account) => {
-    notifications.push({ id: `algo-disabled-${account.login}`, title: "Algorithmic trading disabled", message: `${account.name} has trading disabled on its cTrader account.`, level: "warning", category: "other", priority: 0, seq: notifications.length + 1 });
-  });
+  (data?.accounts || [])
+    .filter((account) => account.status === "Disconnected")
+    .forEach((account) => {
+      notifications.push({
+        id: `disconnected-${account.login}`,
+        title: "Account disconnected",
+        message: `${account.name} is not connected.`,
+        level: "warning",
+        category: "other",
+        priority: 0,
+        seq: notifications.length + 1,
+      });
+    });
+  (data?.accounts || [])
+    .filter((account) => account.algoEnabled === false)
+    .forEach((account) => {
+      notifications.push({
+        id: `algo-disabled-${account.login}`,
+        title: "Algorithmic trading disabled",
+        message: `${account.name} has trading disabled on its cTrader account.`,
+        level: "warning",
+        category: "other",
+        priority: 0,
+        seq: notifications.length + 1,
+      });
+    });
   if (!preferences.enabled) return [];
-  return notifications.filter((item) => (
-    item.level === "error" || (item.level === "warning" && preferences.show_warnings) ||
-    (item.level === "success" && preferences.show_success) ||
-    (item.level === "info" && preferences.show_info)
-  )).sort((a, b) => (a.priority - b.priority) || (b.seq - a.seq)).slice(0, 30);
+  return notifications
+    .filter(
+      (item) =>
+        item.level === "error" ||
+        (item.level === "warning" && preferences.show_warnings) ||
+        (item.level === "success" && preferences.show_success) ||
+        (item.level === "info" && preferences.show_info),
+    )
+    .sort((a, b) => a.priority - b.priority || b.seq - a.seq)
+    .slice(0, 30);
 }
 
 function MasterConnectionRequiredPage() {
@@ -581,7 +1115,9 @@ function MasterConnectionRequiredPage() {
         <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-lg bg-amber-50 text-amber-600">
           <WifiOff className="h-8 w-8" strokeWidth={2.5} />
         </div>
-        <h3 className="mt-5 text-xl font-black text-slate-950">Master account is not connected</h3>
+        <h3 className="mt-5 text-xl font-black text-slate-950">
+          Master account is not connected
+        </h3>
         <p className="mt-2 text-sm font-medium leading-6 text-slate-500">
           Connect the master account from the Dashboard to use this page.
         </p>
@@ -665,10 +1201,17 @@ function buildDeveloperBootstrap() {
     settings: {},
     accounts,
     metrics: {
-      balance: accounts.reduce((sum, account) => sum + Number(account.balance || 0), 0),
-      equity: accounts.reduce((sum, account) => sum + Number(account.equity || 0), 0),
+      balance: accounts.reduce(
+        (sum, account) => sum + Number(account.balance || 0),
+        0,
+      ),
+      equity: accounts.reduce(
+        (sum, account) => sum + Number(account.equity || 0),
+        0,
+      ),
       pnl: accounts.reduce((sum, account) => sum + Number(account.pnl || 0), 0),
-      connected: accounts.filter((account) => account.status === "Connected").length,
+      connected: accounts.filter((account) => account.status === "Connected")
+        .length,
       total: accounts.length,
     },
     logs: runtime.logs,
@@ -708,12 +1251,15 @@ function buildDeveloperTradeHistory() {
 
 const styles = {
   appShell: {
-    minHeight: "100vh",
+    minHeight: "var(--app-vh)",
     overflowX: "clip",
     background: "#f1f5f9",
     color: "#020617",
   } satisfies React.CSSProperties,
-  pageContent: { paddingTop: 8, paddingBottom: 24 } satisfies React.CSSProperties,
+  pageContent: {
+    paddingTop: 8,
+    paddingBottom: 24,
+  } satisfies React.CSSProperties,
   errorBanner: {
     marginBottom: 16,
     border: "1px solid #fecdd3",

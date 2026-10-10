@@ -10,7 +10,7 @@ export function NotificationsPage({ notifications = [] }) {
   );
 
   return (
-    <Card className="min-h-[calc(100vh-150px)]">
+    <Card className="min-h-[calc(var(--app-vh)_-_150px)]">
       <div className="flex flex-col gap-4 border-b border-slate-100 pb-5 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h3 className="flex items-center gap-2 text-xl font-black text-slate-950">

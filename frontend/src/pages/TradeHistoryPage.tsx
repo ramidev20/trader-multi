@@ -96,7 +96,7 @@ export default function TradeHistoryPage({ runtime, historyRows = [] }) {
   }
 
   return (
-    <Card className="flex min-h-[calc(100vh-150px)] flex-col">
+    <Card className="flex min-h-[calc(var(--app-vh)_-_150px)] flex-col">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h3 className="text-lg font-black text-slate-950">Trade History</h3>

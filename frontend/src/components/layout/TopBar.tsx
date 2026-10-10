@@ -2,12 +2,13 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   Bell,
   ChevronDown,
-  Copy,
+  History,
   CheckCircle2,
   AlertTriangle,
   Info,
   LogOut,
   Plus,
+  Palette,
   Settings,
   SlidersHorizontal,
   Terminal,
@@ -48,7 +49,7 @@ const mobileNavItems = [
   { key: "dashboard", label: "Dashboard", icon: null },
   { key: "search", label: "Search", icon: null },
   { key: "trade", label: "Trade", icon: Terminal },
-  { key: "history", label: "History", icon: Copy },
+  { key: "history", label: "History", icon: History },
 ];
 
 export default function TopBar({
@@ -218,9 +219,16 @@ export default function TopBar({
                 <button
                   type="button"
                   className="app-menu-button flex w-full items-center gap-2 rounded-lg border-0 bg-transparent px-3 py-2.5 text-left text-sm font-bold text-slate-700 transition hover:bg-slate-100"
-                  onClick={() => { setAccountMenuOpen(false); onChangeSettingsTab("appearance"); }}
+                  onClick={() => { setAccountMenuOpen(false); onChangeSettingsTab("preferences"); }}
                 >
                   <SlidersHorizontal className="h-[17px] w-[17px]" /> Preferences
+                </button>
+                <button
+                  type="button"
+                  className="app-menu-button flex w-full items-center gap-2 rounded-lg border-0 bg-transparent px-3 py-2.5 text-left text-sm font-bold text-slate-700 transition hover:bg-slate-100"
+                  onClick={() => { setAccountMenuOpen(false); onChangeSettingsTab("appearance"); }}
+                >
+                  <Palette className="h-[17px] w-[17px]" /> Appearance
                 </button>
                 <div className="mx-1 my-1.5 h-px bg-slate-200" />
                 <button

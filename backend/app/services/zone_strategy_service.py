@@ -4,7 +4,7 @@ import random
 import threading
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .env_utils import is_dev_mode
@@ -24,6 +24,7 @@ from .strategy_service import (
     _close_mt5_pending_order,
     close_all_positions,
     open_manual_position,
+    stop_on_final_tp_enabled,
     wait_for_new_candle,
 )
 
@@ -81,7 +82,9 @@ from .strategy_service import (
 # are needed instead of three:
 #   - after an M5 zone breach, for the fresh M5 search;
 #   - after a position on this side hits SL, for the next M1 entry on the
-#     same, still-valid M5 zone.
+#     same, still-valid M5 zone. Here c3 is the M1 candle the SL hit in
+#     (from the SL deal's broker time), not whichever candle was last closed
+#     when the close was noticed.
 #
 # The demand side and the supply side are armed independently (two engine
 # instances below) so both can be watching -- and can both fire -- at once.
@@ -108,6 +111,9 @@ from .strategy_service import (
 # A position closed by its final TP (the broker TP -- partial TP1/TP2
 # withdrawals are closed by the app and don't count) ends the session: both
 # sides' searches stop and every open position on the symbol is closed.
+# With "Stop on final TP" turned off in Settings, nothing is closed and that
+# side starts a fresh 5-minute zone search (the old zone is dropped even if
+# it was never breached). An SL keeps searching 1-minute on the same zone.
 #   - Candles that fail either minimum are skipped and the walk continues to
 #     the next deeper low/high. Only if no candle in the lookback qualifies
 #     does the stop fall back to entry -/+ min SL.
@@ -127,6 +133,8 @@ M1_SEARCH_INTERVAL_SEC = 1.0
 M5_SEARCH_INTERVAL_SEC = 1.0
 # Closed candles re-read per poll so a late read never skips a bar.
 CLOSED_CANDLE_CATCHUP = 5
+# Re-read after a longer stall, back to the last processed candle.
+CLOSED_CANDLE_MAX_CATCHUP = 300
 # Polls to wait for the closing deal to reach history after a position
 # disappears, before treating the close as manual.
 EXIT_REASON_GRACE_POLLS = 10
@@ -165,14 +173,27 @@ def _is_bullish(candle: Any) -> bool:
 # here rather than changing that shared helper (which the existing
 # pips-breakout strategy also relies on).
 _sim_state: dict[str, dict[str, Any]] = {}
+_sim_lock = threading.Lock()
 
 
 def _sim_next_candle(symbol: str, timeframe_label: str) -> Optional[dict[str, Any]]:
+    """Latest synthetic candle -- a new one each second.
+
+    One shared market feed: every caller in the same second gets the same
+    candle, so the demand and supply engines see identical candles (each
+    filters out what it already has by time). Handing each candle only to
+    the first caller left the other side with none.
+    """
     key = f"zone:{timeframe_label}:{symbol}"
+    with _sim_lock:
+        return _sim_generate_locked(key, symbol)
+
+
+def _sim_generate_locked(key: str, symbol: str) -> dict[str, Any]:
     now_ts = int(time.time())
     state = _sim_state.get(key)
     if state is not None and now_ts <= state["last_ts"]:
-        return None
+        return state["candle"]
     rng = random.Random(f"{key}:{now_ts}")
     prior_close = state["close"] if state is not None else float(_tick_for(symbol).bid)
     # Roughly one in four candles is a strong displacement so an armed demo
@@ -185,8 +206,9 @@ def _sim_next_candle(symbol: str, timeframe_label: str) -> Optional[dict[str, An
     wick = rng.uniform(0.05, 0.2)
     high_price = round(max(open_price, close_price) + wick, 2)
     low_price = round(min(open_price, close_price) - wick, 2)
-    _sim_state[key] = {"last_ts": now_ts, "close": close_price}
-    return {"time": now_ts, 1: open_price, 2: high_price, 3: low_price, 4: close_price}
+    candle = {"time": now_ts, 1: open_price, 2: high_price, 3: low_price, 4: close_price}
+    _sim_state[key] = {"last_ts": now_ts, "close": close_price, "candle": candle}
+    return candle
 
 
 def _next_candle(symbol: str, timeframe_label: str) -> Optional[dict[str, Any]]:
@@ -276,6 +298,8 @@ class ZoneStrategyEngine:
         # open: a fresh M5 search is already running, so the exit watcher
         # must neither re-check the old zone nor restart the search on close.
         self._search_resumed_during_trade = False
+        # Broker time of the last SL fill, set by _closing_reason.
+        self._sl_deal_time: Optional[int] = None
 
     def start(self, cfg: dict) -> None:
         manual_sl_distance = float(cfg.get("manual_sl_distance", 0) or 0)
@@ -523,6 +547,19 @@ class ZoneStrategyEngine:
             return None
         stamp = int(getattr(tick, "time", 0) or 0) if tick is not None else 0
         return stamp or None
+
+    def _broker_clock_offset(self) -> int:
+        """Seconds the broker's candle clock runs ahead of this machine's.
+
+        MT5 stamps candles in server time (often UTC+2/+3), not real UTC.
+        Rounded to the nearest half hour so a quote a few minutes old (quiet
+        market) still gives the whole-hour server offset. 0 in simulation or
+        when MT5 can't be read.
+        """
+        stamp = self._broker_time()
+        if not mt5_available() or not stamp:
+            return 0
+        return int(round((stamp - time.time()) / 1800.0)) * 1800
 
     def _begin_scheduled_m5_search(self) -> None:
         # start_task normally repeats callbacks. This is an arm timer, so
@@ -779,10 +816,20 @@ class ZoneStrategyEngine:
         """
         if not mt5_available():
             candle = _next_candle(self.symbol, timeframe_label)
-            return [candle] if candle is not None else []
+            if candle is None:
+                return []
+            # The sim feed repeats its latest candle until the next second;
+            # this engine's own anchor decides whether it's new to this side.
+            with self._lock:
+                if int(candle["time"]) <= self._last_processed_candle_time[timeframe_label]:
+                    return []
+                self._last_processed_candle_time[timeframe_label] = int(candle["time"])
+            return [candle]
         # Serialize only the MT5 calls. Holding this process-wide lock for the
         # whole search tick made the demand and supply workers wait on each
         # other's buffer checks and state transitions too.
+        with self._lock:
+            known = self._last_processed_candle_time[timeframe_label]
         with MT5_LOCK:
             if not self._ensure_symbol_or_log(require_fresh_quote=False):
                 return []
@@ -790,6 +837,13 @@ class ZoneStrategyEngine:
                 rates = mt5.copy_rates_from_pos(
                     self.symbol, TIMEFRAME_MAP[timeframe_label], 1, CLOSED_CANDLE_CATCHUP
                 )
+                if rates is not None and len(rates) > 0 and 0 < known < int(rates[0]["time"]):
+                    # Stalled longer than the normal re-read: reach back to
+                    # the last processed candle, or the ones in between would
+                    # be lost and c3/c2/c1 would join non-adjacent bars.
+                    rates = mt5.copy_rates_from_pos(
+                        self.symbol, TIMEFRAME_MAP[timeframe_label], 1, CLOSED_CANDLE_MAX_CATCHUP
+                    )
             except Exception:
                 return []
         if rates is None or len(rates) == 0:
@@ -850,6 +904,9 @@ class ZoneStrategyEngine:
                 "search",
                 f"[INFO] [scalping:{self.side}] Started searching for a new 5-minute zone.",
             )
+        # Read before taking self._lock: _broker_time takes MT5_LOCK, which
+        # is always acquired before self._lock elsewhere.
+        clock_offset = self._broker_clock_offset()
         with self._lock:
             self.m5_zone = None
             self.m1_buffer.clear()
@@ -857,8 +914,10 @@ class ZoneStrategyEngine:
             # briefly keep returning the previous shift=1 candle while it
             # publishes the bar that just closed. Do not evaluate that stale
             # history as C1; _search_m5_tick will pick up the new closed bar
-            # as soon as MT5 advances its timestamp.
-            boundary_time = (int(time.time()) // 300) * 300
+            # as soon as MT5 advances its timestamp. The boundary must be on
+            # the broker's candle clock -- this machine's clock is hours
+            # behind it, which made every preload look current.
+            boundary_time = ((int(time.time()) + clock_offset) // 300) * 300
             latest_closed_time = (
                 int(self.m5_buffer[-1]["time"]) + 300
                 if self.m5_buffer
@@ -936,17 +995,34 @@ class ZoneStrategyEngine:
             start_time=datetime.now(),
         )
 
+    def _log_catch_up(self, timeframe_label: str, candles: list[Any]) -> None:
+        """One poll returned several closed candles: this side's poll or the
+        MT5 feed stalled (e.g. waiting on MT5_LOCK while the other side's
+        order was sent). Each candle is still checked; this just makes the
+        stall visible."""
+        if len(candles) > 1:
+            append_log(
+                "search",
+                f"[WARNING] [scalping:{self.side}] {timeframe_label} poll picked up {len(candles)} "
+                f"closed candles at once (feed or lock stall); checking each one in order.",
+            )
+
     def _search_m5_tick(self) -> None:
         candles = self._new_closed_candles("M5")
         if not candles:
             return
-        with self._lock:
-            self.m5_buffer.extend(candles)
-            zone = self._detect_gap_zone_locked(
+        self._log_catch_up("M5", candles)
+        # One candle at a time: testing only the newest window after a
+        # multi-candle catch-up skipped every window ending on an earlier one.
+        for candle in candles:
+            with self._lock:
+                self.m5_buffer.append(candle)
+                zone = self._detect_gap_zone_locked(
                     self.m5_buffer, self.m5_target_zone_type, extend_to_c2=True
                 )
-        if zone is not None and not self._m5_zone_too_big(zone):
-            self._accept_m5_zone(zone)
+            if zone is not None and not self._m5_zone_too_big(zone):
+                self._accept_m5_zone(zone)
+                return
 
     def _m5_zone_breach(self, price: float | None, candles: list[Any]) -> tuple[bool, Optional[int]]:
         """Has price traded through the M5 zone? Returns (breached, broker time).
@@ -1041,11 +1117,18 @@ class ZoneStrategyEngine:
             return
         if not candles:
             return
-        with self._lock:
-            self.m1_buffer.extend(candles)
-            zone = self._detect_gap_zone_locked(
-                self.m1_buffer, self.m1_target_zone_type
-            )
+        self._log_catch_up("M1", candles)
+        zone = None
+        # One candle at a time, same as the M5 search: a catch-up must not
+        # skip the windows ending on its earlier candles.
+        for candle in candles:
+            with self._lock:
+                self.m1_buffer.append(candle)
+                zone = self._detect_gap_zone_locked(
+                    self.m1_buffer, self.m1_target_zone_type
+                )
+            if zone is not None:
+                break
         if zone is None:
             # No candle limit: keep searching M1 on this M5 zone until a
             # match is found or the zone is breached. The buffer only keeps
@@ -1107,14 +1190,16 @@ class ZoneStrategyEngine:
     def _resume_m1_search_for_current_zone(
         self,
         allow_without_zone: bool = False,
-        keep_last_closed: bool = False,
+        sl_candle_time: Optional[int] = None,
     ) -> bool:
         """After TP/SL, reuse the still-valid M5 zone for another M1 entry.
 
         `allow_without_zone` lets the dev M1 test (which never has an M5
         zone) go back to its own M1 search after a failed order.
-        `keep_last_closed` (after an SL) keeps the last closed M1 candle as a
-        possible c3, so the next entry needs two new candles instead of three.
+        `sl_candle_time` (after an SL) is the open time of the M1 candle the
+        SL hit in. That candle becomes c3 however late the close was noticed:
+        the anchor sits just before it, so it enters the buffer as the first
+        new candle once it closes (or on the first poll if it already has).
         """
         if self._stopped:
             return True
@@ -1122,7 +1207,11 @@ class ZoneStrategyEngine:
             if self.m5_zone is None and not allow_without_zone:
                 return False
             self.m1_buffer.clear()
-        self._seed_buffer(self.m1_buffer, "M1", preload_count=1 if keep_last_closed else 0)
+        if sl_candle_time:
+            with self._lock:
+                self._last_processed_candle_time["M1"] = sl_candle_time - 1
+        else:
+            self._seed_buffer(self.m1_buffer, "M1", preload_count=0)
         patch_path(self._state_path, {
             "running": True,
             "phase": "searching_m1_zone",
@@ -1554,9 +1643,16 @@ class ZoneStrategyEngine:
                 "order_kind": order_kind,
                 "limit_price": placed.get("entry", entry_price) if order_kind == "LIMIT" else None,
                 "advanced": True,
-                # Already includes the spread, so none is added again.
-                "sl_price": placed.get("sl", final_sl),
-                "spread_pips": 0.0,
+                # The receiver adds the spread back, landing on the same
+                # final SL, and sizes the lot per its own "Include spread in
+                # risk" setting.
+                "sl_price": round(
+                    float(placed.get("sl", final_sl)) + self.spread_pips / 10.0
+                    if side == "BUY"
+                    else float(placed.get("sl", final_sl)) - self.spread_pips / 10.0,
+                    2,
+                ),
+                "spread_pips": self.spread_pips,
                 # With TP2 off, TP1 comes from `ratio`, not tp1_ratio.
                 "ratio": self.tp1_ratio,
                 "tp1_ratio": self.tp1_ratio,
@@ -1583,6 +1679,7 @@ class ZoneStrategyEngine:
             self._monitor_m5_zone_after_entry()
             if (levels.get("tp", 0) > 0 and hit_tp) or (levels.get("sl", 0) > 0 and hit_sl):
                 stop_task(self._exit_task_name)
+                self._sl_deal_time = None
                 self._restart_search_after_close("TP" if hit_tp else "SL")
             return
 
@@ -1672,11 +1769,14 @@ class ZoneStrategyEngine:
             if reason == tp_reason:
                 return "TP"
             if reason == sl_reason:
+                # Broker time of the SL fill: picks the M1 candle that
+                # becomes c3 for the next entry search.
+                self._sl_deal_time = int(getattr(deal, "time", 0) or 0) or None
                 return "SL"
         return None
 
     def _restart_search_after_close(self, closed_reason: str) -> None:
-        if closed_reason == "TP":
+        if closed_reason == "TP" and stop_on_final_tp_enabled():
             _stop_all_and_close(
                 self.symbol,
                 f"[SUCCESS] [scalping:{self.side}] Position hit its final TP; stopping scalping "
@@ -1689,9 +1789,26 @@ class ZoneStrategyEngine:
         if self._search_resumed_during_trade:
             append_log("search", f"{prefix}; 5-minute search already running after the zone breach.")
             return
-        hit_sl = closed_reason == "SL"
-        if self._resume_m1_search_for_current_zone(keep_last_closed=hit_sl):
-            candles = "2 new candles, last closed kept as c3" if hit_sl else "3 new candles"
+        if closed_reason == "TP":
+            # A final TP retires its 5-minute zone even though price never
+            # breached it: the next trade needs a new zone, not another M1
+            # entry on the one that just paid out.
+            append_log("search", f"{prefix}; starting a new 5-minute search.")
+            self._start_m5_search(fresh=True, announce=False)
+            return
+        sl_candle_time: Optional[int] = None
+        if closed_reason == "SL":
+            # The SL fill's broker time; the latest quote time if the deal
+            # didn't carry one (simulation), which is within a second of it.
+            sl_time = self._sl_deal_time or self._broker_time()
+            sl_candle_time = (sl_time // 60) * 60 if sl_time else None
+        if self._resume_m1_search_for_current_zone(sl_candle_time=sl_candle_time):
+            candles = (
+                f"SL candle {datetime.fromtimestamp(sl_candle_time, timezone.utc).strftime('%H:%M')} is c3, "
+                "2 more candles needed"
+                if sl_candle_time
+                else "3 new candles"
+            )
             append_log("search", f"{prefix}; searching 1-minute again on the same 5-minute zone ({candles}).")
             return
         append_log("search", f"{prefix}; starting a new 5-minute search.")

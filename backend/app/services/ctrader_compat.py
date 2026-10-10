@@ -19,15 +19,14 @@ Unit conversions handled here (cTrader -> MT5):
     opening order's ticket; cTrader keeps separate ids, so market order
     results report the position id as `order`).
 
-Credentials: the Open API application's CTRADER_CLIENT_ID and
-CTRADER_CLIENT_SECRET come from .env. Each account supplies its trader login
+Credentials: the Open API application's client id and secret come from
+`ctrader_app` in ctrader/config.json. Each account supplies its trader login
 (`login`), an OAuth access token (`password`) and `demo`/`live` (`server`).
 """
 
 from __future__ import annotations
 
 import bisect
-import os
 import re
 import threading
 import time
@@ -37,6 +36,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from .config_file import ctrader_app_credentials
 from .ctrader_client import HOSTS, CTraderConnection, CTraderError
 from .ctrader_proto import OpenApiMessages_pb2 as msg
 from .ctrader_proto import OpenApiModelMessages_pb2 as model
@@ -232,10 +232,9 @@ class CTraderMT5:
         self._last_error = (code, text)
 
     def initialize(self, login: Any = None, password: str = "", server: str = "", path: str | None = None, timeout: Any = None, **_kwargs: Any) -> bool:
-        client_id = os.getenv("CTRADER_CLIENT_ID", "").strip()
-        client_secret = os.getenv("CTRADER_CLIENT_SECRET", "").strip()
+        client_id, client_secret = ctrader_app_credentials()
         if not client_id or not client_secret:
-            self._fail(-2, "CTRADER_CLIENT_ID and CTRADER_CLIENT_SECRET must be set in .env (register an app at openapi.ctrader.com).")
+            self._fail(-2, 'Set "client_id" and "client_secret" under "ctrader_app" in ctrader/config.json (register an app at openapi.ctrader.com).')
             return False
         try:
             login_number = int(login or 0)

@@ -99,9 +99,10 @@ type SelectBoxProps = {
   value?: string;
   options: string[];
   onChange?: React.ChangeEventHandler<HTMLSelectElement>;
+  disabled?: boolean;
 };
 
-export function SelectBox({ label, value, options, onChange }: SelectBoxProps) {
+export function SelectBox({ label, value, options, onChange, disabled }: SelectBoxProps) {
   return (
     <label className="block">
       <span className={fieldCaptionClass}>{label}</span>
@@ -109,6 +110,7 @@ export function SelectBox({ label, value, options, onChange }: SelectBoxProps) {
         value={onChange ? value : undefined}
         defaultValue={onChange ? undefined : value}
         onChange={onChange}
+        disabled={disabled}
         className={fieldInputClass}
       >
         {options.map((option) => (

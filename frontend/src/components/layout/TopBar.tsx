@@ -27,7 +27,12 @@ type TopBarProps = {
   onLogout: () => void;
   onClearNotifications: () => void;
   onViewMoreNotifications: () => void;
-  notifications?: Array<{ id: string; title: string; message: string; level: string }>;
+  notifications?: Array<{
+    id: string;
+    title: string;
+    message: string;
+    level: string;
+  }>;
   masterAccount?: {
     status?: string;
     color?: string;
@@ -74,7 +79,12 @@ export default function TopBar({
   // scrollable page content and shove everything below it down every time
   // one appeared. This slot lives in the sticky header instead, so it never
   // shifts the page.
-  const [banner, setBanner] = useState<{ id: number; tone: string; text: string; code: string | null } | null>(null);
+  const [banner, setBanner] = useState<{
+    id: number;
+    tone: string;
+    text: string;
+    code: string | null;
+  } | null>(null);
 
   useEffect(() => {
     function closeAccountMenu(event: MouseEvent) {
@@ -99,7 +109,7 @@ export default function TopBar({
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
-            <span>cTrader Trader</span>
+            <span>cTrader</span>
             <span>/</span>
             <span className="text-slate-950">{pageTitle}</span>
             {/* Same row as the breadcrumb, not a block below it -- a short
@@ -148,25 +158,76 @@ export default function TopBar({
             {notificationsOpen ? (
               <div className="app-popover absolute right-0 top-14 z-20 w-[340px] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
                 <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                  <span className="text-sm font-black text-slate-950">Notifications</span>
+                  <span className="text-sm font-black text-slate-950">
+                    Notifications
+                  </span>
                   <div className="flex items-center gap-3">
-                    <button type="button" onClick={(event) => { event.stopPropagation(); setNotificationsOpen(false); onViewMoreNotifications(); }} className="text-xs font-bold text-slate-500 hover:text-slate-800">View more</button>
-                    <button type="button" onClick={(event) => { event.stopPropagation(); onClearNotifications(); }} className="text-xs font-bold text-blue-600 hover:text-blue-800">Clear all</button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setNotificationsOpen(false);
+                        onViewMoreNotifications();
+                      }}
+                      className="text-xs font-bold text-slate-500 hover:text-slate-800"
+                    >
+                      View more
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onClearNotifications();
+                      }}
+                      className="text-xs font-bold text-blue-600 hover:text-blue-800"
+                    >
+                      Clear all
+                    </button>
                   </div>
                 </div>
                 <div className="max-h-80 overflow-y-auto">
-                  {notifications.length ? notifications.map((notification) => {
-                    const Icon = notification.level === "error" || notification.level === "warning" ? AlertTriangle : notification.level === "success" ? CheckCircle2 : Info;
-                    return (
-                      <div key={notification.id} className="flex gap-3 border-b border-slate-50 px-4 py-3 last:border-0">
-                        <Icon className={cx("mt-0.5 h-4 w-4 shrink-0", notification.level === "error" ? "text-rose-500" : notification.level === "warning" ? "text-amber-500" : notification.level === "success" ? "text-emerald-500" : "text-blue-500")} />
-                        <div>
-                          <p className="text-xs font-black text-slate-800">{notification.title}</p>
-                          <p className="mt-1 text-xs leading-5 text-slate-500">{notification.message}</p>
+                  {notifications.length ? (
+                    notifications.map((notification) => {
+                      const Icon =
+                        notification.level === "error" ||
+                        notification.level === "warning"
+                          ? AlertTriangle
+                          : notification.level === "success"
+                            ? CheckCircle2
+                            : Info;
+                      return (
+                        <div
+                          key={notification.id}
+                          className="flex gap-3 border-b border-slate-50 px-4 py-3 last:border-0"
+                        >
+                          <Icon
+                            className={cx(
+                              "mt-0.5 h-4 w-4 shrink-0",
+                              notification.level === "error"
+                                ? "text-rose-500"
+                                : notification.level === "warning"
+                                  ? "text-amber-500"
+                                  : notification.level === "success"
+                                    ? "text-emerald-500"
+                                    : "text-blue-500",
+                            )}
+                          />
+                          <div>
+                            <p className="text-xs font-black text-slate-800">
+                              {notification.title}
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-slate-500">
+                              {notification.message}
+                            </p>
+                          </div>
                         </div>
-                      </div>
-                    );
-                  }) : <p className="px-4 py-8 text-center text-sm font-semibold text-slate-400">No notifications yet.</p>}
+                      );
+                    })
+                  ) : (
+                    <p className="px-4 py-8 text-center text-sm font-semibold text-slate-400">
+                      No notifications yet.
+                    </p>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -193,11 +254,25 @@ export default function TopBar({
               <div className="app-account-menu absolute right-0 top-[calc(100%+12px)] z-20 w-64 rounded-lg border border-slate-200 bg-white p-2 shadow-xl">
                 <div className="flex items-start justify-between gap-3 px-2.5 pb-3.5 pt-2.5">
                   <div className="min-w-0">
-                    <p className="truncate text-base font-extrabold text-slate-900">{masterAccount?.name || "Master Account"}</p>
-                    <p className="mt-0.5 text-[13px] text-slate-500">Login {masterAccount?.login || "-"}</p>
+                    <p className="truncate text-base font-extrabold text-slate-900">
+                      {masterAccount?.name || "Master Account"}
+                    </p>
+                    <p className="mt-0.5 text-[13px] text-slate-500">
+                      Login {masterAccount?.login || "-"}
+                    </p>
                   </div>
-                  <span className={cx("inline-flex shrink-0 items-center gap-1.5 text-xs font-semibold", statusTone[status] || "text-rose-600")}>
-                    <span className={cx("h-1.5 w-1.5 rounded-full", statusDotTone[status] || "bg-rose-500")} />
+                  <span
+                    className={cx(
+                      "inline-flex shrink-0 items-center gap-1.5 text-xs font-semibold",
+                      statusTone[status] || "text-rose-600",
+                    )}
+                  >
+                    <span
+                      className={cx(
+                        "h-1.5 w-1.5 rounded-full",
+                        statusDotTone[status] || "bg-rose-500",
+                      )}
+                    />
                     {status}
                   </span>
                 </div>
@@ -205,28 +280,41 @@ export default function TopBar({
                 <button
                   type="button"
                   className="app-menu-button flex w-full items-center gap-2 rounded-lg border-0 bg-transparent px-3 py-2.5 text-left text-sm font-bold text-slate-700 transition hover:bg-slate-100"
-                  onClick={() => { setAccountMenuOpen(false); onChangePage("profile"); }}
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    onChangePage("profile");
+                  }}
                 >
                   <UserRound className="h-[17px] w-[17px]" /> Profile
                 </button>
                 <button
                   type="button"
                   className="app-menu-button flex w-full items-center gap-2 rounded-lg border-0 bg-transparent px-3 py-2.5 text-left text-sm font-bold text-slate-700 transition hover:bg-slate-100"
-                  onClick={() => { setAccountMenuOpen(false); onChangeSettingsTab("accounts"); }}
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    onChangeSettingsTab("accounts");
+                  }}
                 >
                   <Settings className="h-[17px] w-[17px]" /> Account Settings
                 </button>
                 <button
                   type="button"
                   className="app-menu-button flex w-full items-center gap-2 rounded-lg border-0 bg-transparent px-3 py-2.5 text-left text-sm font-bold text-slate-700 transition hover:bg-slate-100"
-                  onClick={() => { setAccountMenuOpen(false); onChangeSettingsTab("preferences"); }}
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    onChangeSettingsTab("preferences");
+                  }}
                 >
-                  <SlidersHorizontal className="h-[17px] w-[17px]" /> Preferences
+                  <SlidersHorizontal className="h-[17px] w-[17px]" />{" "}
+                  Preferences
                 </button>
                 <button
                   type="button"
                   className="app-menu-button flex w-full items-center gap-2 rounded-lg border-0 bg-transparent px-3 py-2.5 text-left text-sm font-bold text-slate-700 transition hover:bg-slate-100"
-                  onClick={() => { setAccountMenuOpen(false); onChangeSettingsTab("appearance"); }}
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    onChangeSettingsTab("appearance");
+                  }}
                 >
                   <Palette className="h-[17px] w-[17px]" /> Appearance
                 </button>
@@ -234,7 +322,10 @@ export default function TopBar({
                 <button
                   type="button"
                   className="app-menu-button flex w-full items-center gap-2 rounded-lg border-0 bg-transparent px-3 py-2.5 text-left text-sm font-bold text-slate-700 transition hover:bg-slate-100"
-                  onClick={() => { setAccountMenuOpen(false); onAddAccount(); }}
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    onAddAccount();
+                  }}
                 >
                   <Plus className="h-4 w-4" /> Add Account
                 </button>
@@ -242,7 +333,10 @@ export default function TopBar({
                   <button
                     type="button"
                     className="app-menu-button flex w-full items-center gap-2 rounded-lg border-0 bg-transparent px-3 py-2.5 text-left text-sm font-bold text-rose-600 transition hover:bg-rose-50"
-                    onClick={() => { setAccountMenuOpen(false); onLogout(); }}
+                    onClick={() => {
+                      setAccountMenuOpen(false);
+                      onLogout();
+                    }}
                   >
                     <LogOut className="h-[17px] w-[17px]" /> Logout
                   </button>

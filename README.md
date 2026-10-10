@@ -44,18 +44,16 @@ python run.py
 
 The launcher starts the FastAPI backend and Vite development server, then opens the React dashboard in a Python `pywebview` desktop window. Saved frontend changes hot-reload in the window; no `frontend/dist` build is used by `python run.py`.
 
-## Developer Mode
-
-The root `.env` file controls developer mode. With `TRADER_DEV_MODE=true`, the app uses mock trading data so you can browse and test pages without connecting a live cTrader account.
-
 ## cTrader Setup
 
 1. Register an application at [openapi.ctrader.com](https://openapi.ctrader.com) and wait for it to be approved.
-2. Put its credentials in the root `.env`:
+2. Put its credentials in `ctrader/config.json` (created on first launch):
 
-   ```
-   CTRADER_CLIENT_ID=...
-   CTRADER_CLIENT_SECRET=...
+   ```json
+   "ctrader_app": {
+       "client_id": "...",
+       "client_secret": "..."
+   }
    ```
 
 3. In the application's settings on openapi.ctrader.com, add this **Redirect URI**:
@@ -64,19 +62,17 @@ The root `.env` file controls developer mode. With `TRADER_DEV_MODE=true`, the a
    http://127.0.0.1:8000/ctrader/callback
    ```
 
-   If the backend runs on another port, use that port here and set `CTRADER_REDIRECT_URI` in `.env` to the same value.
+   If the backend runs on another port, use that port here and add `"redirect_uri"` with the same value to `ctrader_app` in `ctrader/config.json`.
 
-4. In the app, open **Add Account** and click **Connect with cTrader**. Sign in in the browser with the cTrader ID that owns the trading accounts and approve access. Back in the app, pick the account from the list; the account number and environment are filled in. Name it and save.
+4. In the app, open **Add Account** and click **Connect with cTrader**. Sign in in the browser with the cTrader ID that owns the trading accounts and approve access. Back in the app, pick the account from the list (it shows each account's balance and whether it is Demo or Real). Name it, set its risk and save. The first account saved becomes the master.
 
 The same application credentials work on every PC and for every person: each user connects with their own cTrader ID and gets their own tokens. Access tokens last about 30 days; for accounts added through **Connect with cTrader** the backend renews them automatically a week before they expire, including on running connections. If renewal fails (for example after access was revoked at id.ctrader.com), the adapter log says so; open the account's settings and click **Reconnect with cTrader**.
-
-A token can still be pasted by hand into **Open API Access Token** (for example one from the app's *Playground*); such tokens are not renewed automatically.
 
 Do not connect the same account on two PCs at the same time: each PC would place its own trades on it.
 
 ## Configuration
 
-Account and strategy settings are stored in the local `config.json` file. It is intentionally ignored by Git because it can contain account credentials.
+Account and strategy settings are stored in the local `ctrader/config.json` file. It is intentionally ignored by Git because it can contain account credentials.
 
 ## Remote Control With Tailscale
 

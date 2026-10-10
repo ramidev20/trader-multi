@@ -65,17 +65,12 @@ This starts the Python backend and Vite development server automatically, then o
 
 The desktop launcher now uses Python `pywebview` instead of Electron, so the same launcher flow works across Windows and Linux.
 
-## 5) Developer Mode
+## 5) cTrader Credentials
 
-The project reads the root `.env` file for both backend and frontend dev flags.
+Fill in `client_id` / `client_secret` under `ctrader_app` in `ctrader/config.json` (see **cTrader Setup** in the README). No trading terminal needs to be installed.
 
-Use this flag in `.env`:
-- `TRADER_DEV_MODE=true`
-
-With developer mode enabled, the UI loads mock trading data and simulated trading behavior so you can test pages without connecting a real cTrader account.
-
-For live trading set `TRADER_DEV_MODE=false` and fill in `CTRADER_CLIENT_ID` / `CTRADER_CLIENT_SECRET` (see **cTrader Setup** in the README). No trading terminal needs to be installed.
+Accounts, settings and the cTrader app credentials are saved to `ctrader/config.json`, separate from the MetaTrader 5 build's `config.json` in the project root. It is created on first launch and ignored by Git.
 
 ## 6) Remote Control (Two PCs)
 
-On the PC that runs the account adapters, install Tailscale. Set `TRADER_DEV_MODE=false` in `.env`, then launch with `python run.py`. On the **Remote Control** page, choose the **Receiver** role, generate a token, turn on "Accept remote trades", and save -- this is stored in `config.json`, not `.env`. On the other PC, choose the **Controller / Trader** role and add this PC as a receiver using `ws://<tailscale-ip>:8000/remote/ws` and the same token.
+On the PC that runs the account adapters, install Tailscale, then launch with `python run.py`. On the **Remote Control** page, choose the **Receiver** role, generate a token, turn on "Accept remote trades", and save -- this is stored in `ctrader/config.json`. On the other PC, choose the **Controller / Trader** role and add this PC as a receiver using `ws://<tailscale-ip>:8000/remote/ws` and the same token.

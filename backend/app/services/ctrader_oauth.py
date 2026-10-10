@@ -1,11 +1,11 @@
 """cTrader ID login (OAuth 2.0 authorization-code flow) for the Open API app.
 
-One application (CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET) serves every PC
+One application (`ctrader_app` in ctrader/config.json) serves every PC
 and every person: each user signs in with their own cTrader ID, approves the
 app, and gets their own access/refresh token pair.
 
 Flow: `begin_login()` builds the id.ctrader.com consent URL; cTrader sends the
-browser back to CTRADER_REDIRECT_URI (the backend's /ctrader/callback) with a
+browser back to redirect_uri() (the backend's /ctrader/callback) with a
 one-time `code`; `complete_login()` exchanges it for tokens and lists the
 trading accounts they cover. Access tokens live ~30 days; `refresh_tokens()`
 renews them, and doing so invalidates the previous pair.
@@ -14,7 +14,6 @@ renews them, and doing so invalidates the previous pair.
 from __future__ import annotations
 
 import json
-import os
 import secrets
 import threading
 import time
@@ -25,7 +24,7 @@ from urllib.request import Request, urlopen
 
 from .ctrader_client import HOSTS, CTraderConnection, CTraderError
 from .ctrader_proto import OpenApiMessages_pb2 as msg
-from .env_utils import load_project_env
+from .config_file import ctrader_app_credentials, ctrader_app_settings
 
 AUTHORIZE_URL = "https://id.ctrader.com/my/settings/openapi/grantingaccess/"
 TOKEN_URL = "https://openapi.ctrader.com/apps/token"
@@ -43,17 +42,14 @@ class CTraderOAuthError(RuntimeError):
 
 
 def _app_credentials() -> tuple[str, str]:
-    load_project_env()
-    client_id = os.getenv("CTRADER_CLIENT_ID", "").strip()
-    client_secret = os.getenv("CTRADER_CLIENT_SECRET", "").strip()
+    client_id, client_secret = ctrader_app_credentials()
     if not client_id or not client_secret:
-        raise CTraderOAuthError("CTRADER_CLIENT_ID and CTRADER_CLIENT_SECRET must be set in .env.")
+        raise CTraderOAuthError('Set "client_id" and "client_secret" under "ctrader_app" in ctrader/config.json.')
     return client_id, client_secret
 
 
 def redirect_uri() -> str:
-    load_project_env()
-    return os.getenv("CTRADER_REDIRECT_URI", "").strip() or DEFAULT_REDIRECT_URI
+    return str(ctrader_app_settings().get("redirect_uri", "") or "").strip() or DEFAULT_REDIRECT_URI
 
 
 def _token_request(method: str, params: dict[str, str]) -> dict[str, Any]:
@@ -118,15 +114,49 @@ def list_token_accounts(access_token: str) -> list[dict[str, Any]]:
         raise CTraderOAuthError(f"Could not list the accounts for this cTrader ID: {ex}") from ex
     finally:
         conn.close("account list done")
-    return [
+    accounts = [
         {
             "login": int(account.traderLogin),
             "account_id": int(account.ctidTraderAccountId),
             "environment": "live" if account.isLive else "demo",
             "broker": str(account.brokerTitleShort or ""),
+            "balance": None,
+            "currency": "",
         }
         for account in reply.ctidTraderAccount
     ]
+    for env in ("demo", "live"):
+        _fill_balances([a for a in accounts if a["environment"] == env], env, access_token, client_id, client_secret)
+    return accounts
+
+
+def _fill_balances(
+    accounts: list[dict[str, Any]], env: str, access_token: str, client_id: str, client_secret: str
+) -> None:
+    """Best effort: an account whose balance can't be read is still listed."""
+    if not accounts:
+        return
+    conn = CTraderConnection(HOSTS[env])
+    try:
+        conn.connect()
+        conn.request_one(msg.ProtoOAApplicationAuthReq(clientId=client_id, clientSecret=client_secret))
+        for account in accounts:
+            account_id = account["account_id"]
+            try:
+                conn.request_one(msg.ProtoOAAccountAuthReq(ctidTraderAccountId=account_id, accessToken=access_token))
+                trader = conn.request_one(msg.ProtoOATraderReq(ctidTraderAccountId=account_id)).trader
+                assets = conn.request_one(msg.ProtoOAAssetListReq(ctidTraderAccountId=account_id)).asset
+            except CTraderError:
+                continue
+            digits = int(getattr(trader, "moneyDigits", 0) or 2)
+            account["balance"] = int(trader.balance or 0) / (10 ** digits)
+            account["currency"] = next(
+                (str(a.name) for a in assets if int(a.assetId) == int(trader.depositAssetId)), ""
+            )
+    except (CTraderError, OSError):
+        pass
+    finally:
+        conn.close("balance check done")
 
 
 def _prune_logins() -> None:

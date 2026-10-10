@@ -10,7 +10,6 @@ import sys
 from typing import Any
 from uuid import uuid4
 
-from .env_utils import is_dev_mode
 from .runtime_state import append_log
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -159,23 +158,6 @@ def list_sessions(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     sessions: list[dict[str, Any]] = []
     by_login = {_safe_int(a.get("user")): a for a in accounts}
     for login, account in by_login.items():
-        if is_dev_mode():
-            sessions.append(
-                {
-                    "login": login,
-                    "name": str(account.get("username", "")),
-                    "server": str(account.get("server", "")),
-                    "state": "connected" if str(account.get("role", "sub")).lower() == "master" else "disconnected",
-                    "alive": True,
-                    "balance": float(account.get("balance", 0.0) or 0.0),
-                    "equity": float(account.get("equity", account.get("balance", 0.0)) or 0.0),
-                    "latency": 0.0,
-                    "algo_enabled": True,
-                    "error": None,
-                    "updated_at": int(time.time()),
-                }
-            )
-            continue
         status = _read_status(login)
         state = str(status.get("state", "disconnected"))
         alive = _has_active_adapter(login)
@@ -216,9 +198,6 @@ def resolve_master_login(config: dict[str, Any]) -> int | None:
 
 
 def master_adapter_ready(config: dict[str, Any]) -> tuple[bool, str, int | None]:
-    if is_dev_mode():
-        master_login = resolve_master_login(config)
-        return True, "developer mode", master_login or 0
     master_login = resolve_master_login(config)
     if not master_login:
         return False, "No master account configured.", None
@@ -243,20 +222,6 @@ def connect_account(account: dict[str, Any]) -> dict[str, Any]:
     login = _safe_int(account.get("user"))
     if login <= 0:
         return {"status": "error", "message": "Invalid account login"}
-    if is_dev_mode():
-        _write_status(
-            login,
-            {
-                "state": "connected",
-                "server": str(account.get("server", "") or ""),
-                "balance": float(account.get("balance", 0.0) or 0.0),
-                "equity": float(account.get("equity", account.get("balance", 0.0)) or 0.0),
-                "latency": 0.0,
-                "algo_enabled": True,
-            },
-        )
-        append_log("adapter", f"[INFO] Developer mode: mocked adapter connection for account {login}.")
-        return {"status": "ok", "message": f"Developer mode connected account {login}"}
     access_token = str(account.get("password", "") or "").strip()
     if not access_token:
         return {"status": "error", "message": "Missing cTrader access token for this account."}
@@ -316,17 +281,6 @@ def connect_account(account: dict[str, Any]) -> dict[str, Any]:
 
 def disconnect_account(login: int) -> dict[str, Any]:
     login = _safe_int(login)
-    if is_dev_mode():
-        _write_status(
-            login,
-            {
-                "state": "stopped",
-                "error": None,
-                "updated_at": int(time.time()),
-            },
-        )
-        append_log("adapter", f"[WARNING] Developer mode: mocked adapter stopped for account {login}.")
-        return {"status": "ok", "message": f"Developer mode stopped adapter for {login}"}
     proc = _adapter_processes.get(login)
     if proc is not None:
         try:

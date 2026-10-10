@@ -9,6 +9,9 @@ export type CTraderAccount = {
   account_id: number;
   environment: "demo" | "live";
   broker: string;
+  // null when cTrader didn't return it for this account.
+  balance: number | null;
+  currency: string;
 };
 
 type CTraderConnectProps = {
@@ -22,6 +25,15 @@ type CTraderConnectProps = {
 };
 
 const POLL_MS = 1500;
+
+function formatBalance(balance: number, currency: string) {
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "USD" }).format(balance);
+  } catch {
+    // Not an ISO currency code (some brokers use their own asset names).
+    return `${balance.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+  }
+}
 const GIVE_UP_MS = 10 * 60 * 1000;
 
 /** "Connect with cTrader": signs in with a cTrader ID in the browser, then
@@ -85,7 +97,7 @@ export function CTraderConnect({ currentLogin = "", existingLogins, selectedLogi
           <div className="text-xs font-semibold text-slate-500">
             {linked
               ? "Linked to a cTrader ID. The access token renews automatically."
-              : "Sign in with the cTrader ID that owns the account, or paste a token below."}
+              : "Sign in with the cTrader ID that owns the account."}
           </div>
         </div>
         {phase === "waiting" ? (
@@ -137,7 +149,19 @@ export function CTraderConnect({ currentLogin = "", existingLogins, selectedLogi
                 </span>
                 <span className="flex shrink-0 items-center gap-2 text-xs font-bold">
                   {added && <span className="text-slate-400">already added</span>}
-                  <span className={account.environment === "live" ? "text-rose-600" : "text-emerald-600"}>{account.environment.toUpperCase()}</span>
+                  {account.balance != null && (
+                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-700">
+                      {formatBalance(account.balance, account.currency)}
+                    </span>
+                  )}
+                  <span
+                    className={cx(
+                      "rounded-full px-2 py-0.5",
+                      account.environment === "live" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700",
+                    )}
+                  >
+                    {account.environment === "live" ? "Real" : "Demo"}
+                  </span>
                   {selected && <CheckCircle2 size={16} className="text-blue-600" />}
                 </span>
               </button>

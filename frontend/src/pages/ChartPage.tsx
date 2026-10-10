@@ -83,6 +83,11 @@ const TIMEFRAME_MINUTES: Record<string, number> = {
   M15: 15,
 };
 
+// cTrader stamps quotes in UTC. A liquid symbol ticks every few seconds while
+// trading, so a last quote older than this means the market is closed
+// (weekend, holiday or daily break) and there is no candle to count down.
+const MARKET_IDLE_SEC = 180;
+
 function formatCountdown(totalSeconds: number) {
   const clamped = Math.max(0, Math.floor(totalSeconds));
   const minutes = Math.floor(clamped / 60);
@@ -650,6 +655,12 @@ function ChartPageView() {
     return seconds - intoCandle;
   }, [nowTick, timeframe]);
 
+  const marketClosed = useMemo(() => {
+    const serverTime = Number(snapshot.server_time);
+    if (!Number.isFinite(serverTime) || serverTime <= 0) return false;
+    return nowTick / 1000 - serverTime > MARKET_IDLE_SEC;
+  }, [nowTick, snapshot.server_time]);
+
   // Replaces the series' own last-value tag (turned off above) with one that
   // folds the countdown into the same tag: "0:41 4396.59", colored like the
   // current candle (green/red) so it reads as the same price tag, just with
@@ -658,7 +669,7 @@ function ChartPageView() {
   // to the new frame's boundary automatically.
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
-    if (countdownSeconds == null) return;
+    if (countdownSeconds == null && !marketClosed) return;
     const lastCandle = normalizedCandles[normalizedCandles.length - 1];
     // Bid, like the MT5 candles themselves.
     const currentPrice =
@@ -671,7 +682,7 @@ function ChartPageView() {
     // The price line's axis tag renders as "{title} {formatted price}" --
     // the title here is just the countdown, so the single resulting tag
     // reads e.g. "0:41 4396.59" instead of a second box next to the price.
-    const title = formatCountdown(countdownSeconds);
+    const title = marketClosed ? "Closed" : formatCountdown(countdownSeconds ?? 0);
 
     if (!countdownLineRef.current) {
       countdownLineRef.current = seriesRef.current.createPriceLine({
@@ -686,7 +697,7 @@ function ChartPageView() {
     } else {
       countdownLineRef.current.applyOptions({ price: currentPrice, color, title });
     }
-  }, [countdownSeconds, normalizedCandles, snapshot.bid, snapshot.ask]);
+  }, [countdownSeconds, marketClosed, normalizedCandles, snapshot.bid, snapshot.ask]);
 
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;

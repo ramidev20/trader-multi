@@ -10,6 +10,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { cx } from "../../utils/format";
+import ctraderLogo from "../../assets/ctrader-logo.svg";
 
 type SidebarProps = {
   activePage: string;
@@ -43,14 +44,19 @@ export default function Sidebar({ activePage, onChangePage }: SidebarProps) {
 
   useEffect(() => {
     try {
-      globalThis.localStorage?.setItem(COLLAPSED_STORAGE_KEY, String(collapsed));
+      globalThis.localStorage?.setItem(
+        COLLAPSED_STORAGE_KEY,
+        String(collapsed),
+      );
     } catch {
       // The sidebar still toggles; it just won't be remembered.
     }
   }, [collapsed]);
 
   const ToggleIcon = collapsed ? ChevronsRight : ChevronsLeft;
-  const toggleLabel = collapsed ? "Expand sidebar" : "Collapse sidebar to icons";
+  const toggleLabel = collapsed
+    ? "Expand sidebar"
+    : "Collapse sidebar to icons";
 
   return (
     <aside
@@ -62,15 +68,19 @@ export default function Sidebar({ activePage, onChangePage }: SidebarProps) {
       <div
         className={cx(
           "flex pb-2",
-          collapsed ? "flex-col items-center gap-2" : "items-center gap-2.5 px-2",
+          collapsed
+            ? "flex-col items-center gap-2"
+            : "items-center gap-2.5 px-2",
         )}
       >
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-blue-600 text-sm font-black text-white">
-          MT
-        </span>
+        <img
+          src={ctraderLogo}
+          alt="cTrader"
+          className="h-9 w-9 shrink-0 rounded-xl"
+        />
         {!collapsed ? (
           <span className="min-w-0 flex-1 truncate text-sm font-black tracking-tight text-slate-950">
-            cTrader Trader
+            cTrader
           </span>
         ) : null}
         <button
